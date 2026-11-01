@@ -105,17 +105,24 @@ TOTP rollover, timeout, missing redirect or ambiguous click result.
   command is never retried. Before Selenium may start, the worker closes its
   inherited lifecycle-writer FD, completes `setsid()`, starts a watchdog, and
   receives a reverse acknowledgement that the parent observed `pid == pgid`.
+  The parent also verifies the worker session ID, and the watchdog re-verifies
+  its own group/session membership immediately before each group signal.
   The watchdog terminates the whole group on worker death or parent-pipe EOF;
   both watchdog and parent enforce `SIGKILL` after the bounded `SIGTERM` grace.
-  Cleanup returns only after the process group is proven absent, so no later
-  command targets an unresolved session and no Chrome descendant is left behind.
+  The parent retains the unreaped leader as a PID/PGID identity anchor until its
+  final signal decision, then performs only observation while proving the group
+  absent. A pending application `SIGALRM` is delivered after this bounded cleanup,
+  so no later command targets an unresolved session and no live Chrome descendant
+  is left behind.
 - The hosted login form can take about 90 s to render on the CPU-throttled Oracle
   VM. Page-load strategy `none` and a 150 s complete-form wait remain bounded;
   `browser_timeout_seconds` is capped at 90 s for fill, one submission and redirect.
   See the
   [investigation](m25-oracle-browser-timeout-investigation-2026-11-01.md).
 - Every Shoonya SDK HTTP POST has an explicit `(5 s connect, 15 s read)` timeout.
-  The whole authentication operation has an independent 360 s real-time deadline.
+  Active authentication work has an independent 360 s real-time deadline. A
+  deadline pending during browser teardown is deferred for at most the 10 s
+  cleanup bound, producing a 370 s maximum application-side failure envelope.
 - Audit and status files are mode `0600`; sensitive field names are redacted.
 - Core dumps are disabled by the service templates.
 
@@ -135,12 +142,14 @@ overhead.
 | Browser process-group cleanup | 10 s |
 | Provider token exchange HTTP connect/read | 5 s / 15 s |
 | Read-only provider validation HTTP connect/read | 5 s / 15 s |
-| Whole application authentication attempt | 360 s |
+| Active authentication work | 360 s |
+| Application envelope including deferred mandatory cleanup | 370 s |
 | systemd `TimeoutStartSec` | 390 s |
 | systemd termination allowance (`TimeoutStopSec`) | 30 s |
 
-The service start ceiling leaves 30 s beyond the application deadline for CLI,
-audit/status and bounded cleanup. `KillMode=control-group` and `SendSIGKILL=yes`
+The service start ceiling leaves 30 s beyond the active-work deadline and 20 s
+beyond the application cleanup envelope for CLI and audit/status work.
+`KillMode=control-group` and `SendSIGKILL=yes`
 cover any remaining descendants. The worst systemd-enforced failure envelope is
 420 s (390 s start ceiling plus at most 30 s termination).
 

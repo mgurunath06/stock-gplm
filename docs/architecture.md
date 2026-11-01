@@ -75,3 +75,6 @@ disabled pending deployment and scheduling approval. M2.5.1 isolates each
 browser attempt in a killable process group, permits one credential submission,
 requires the exact Shoonya login origin/page/control contract, and bounds the
 complete authentication operation independently of systemd's final service cap.
+Mandatory browser teardown defers rather than discards a pending application
+alarm, while an unreaped leader anchors PID/PGID identity through the last
+process-group signal.

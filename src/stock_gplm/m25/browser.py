@@ -356,6 +356,8 @@ def _close_fd(descriptor: int) -> None:
 
 
 def _process_group_exists(process_group: int) -> bool:
+    if process_group <= 0:
+        raise ValueError("process-group identity must be positive")
     try:
         os.killpg(process_group, 0)
     except ProcessLookupError:
@@ -363,6 +365,11 @@ def _process_group_exists(process_group: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _watchdog_still_anchors_group(process_group: int, worker_pid: int) -> bool:
+    """Require the watchdog to remain in the exact worker-created session/group."""
+    return os.getpgrp() == process_group and os.getsid(0) == worker_pid
 
 
 def _watch_process_group(
@@ -399,11 +406,15 @@ def _watch_process_group(
             break
 
     _close_fd(lifecycle_read_fd)
+    if not _watchdog_still_anchors_group(process_group, worker_pid):
+        os._exit(125)
     try:
         os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
         os._exit(0)
     time.sleep(PROCESS_GROUP_SIGTERM_GRACE_SECONDS)
+    if not _watchdog_still_anchors_group(process_group, worker_pid):
+        os._exit(125)
     try:
         os.killpg(process_group, signal.SIGKILL)
     except ProcessLookupError:
@@ -583,6 +594,10 @@ def _terminate_process_group(
         return
 
     # The readiness handshake proves setsid() completed and pgid == worker pid.
+    # Do not call is_alive(), join(), or exitcode while the group can still
+    # exist: those APIs may reap a dead leader and release its numeric PID/PGID
+    # for reuse. The unreaped direct child is the parent's kernel identity
+    # anchor until every group signal and existence check is complete.
     # Closing the lifecycle pipe asks the watchdog to send SIGTERM. After its
     # grace period, both watchdog and parent independently enforce SIGKILL.
     grace_deadline = min(
@@ -590,18 +605,35 @@ def _terminate_process_group(
         time.monotonic() + PROCESS_GROUP_SIGTERM_GRACE_SECONDS + PROCESS_GROUP_POLL_SECONDS,
     )
     while _process_group_exists(process_group) and time.monotonic() < grace_deadline:
-        process.join(min(PROCESS_GROUP_POLL_SECONDS, grace_deadline - time.monotonic()))
+        time.sleep(min(PROCESS_GROUP_POLL_SECONDS, grace_deadline - time.monotonic()))
     if _process_group_exists(process_group):
         try:
             os.killpg(process_group, signal.SIGKILL)
         except ProcessLookupError:
             pass
 
-    while _process_group_exists(process_group) and time.monotonic() < deadline:
-        process.join(min(PROCESS_GROUP_POLL_SECONDS, deadline - time.monotonic()))
+    # The final group-signal decision is now irrevocably complete. A successful
+    # SIGKILL is delivered atomically to every current member; none can return to
+    # userspace and fork. Only now may the direct-child leader be reaped. Any
+    # later numeric PGID reuse can at worst make the observation below fail
+    # closed because no further signal is issued.
     process.join(max(0.0, deadline - time.monotonic()))
-    if _process_group_exists(process_group) or process.is_alive():
+    while _process_group_exists(process_group) and time.monotonic() < deadline:
+        time.sleep(min(PROCESS_GROUP_POLL_SECONDS, deadline - time.monotonic()))
+    if _process_group_exists(process_group):
         raise BrowserSessionUnresolved("browser process group did not terminate within cleanup bound")
+    if process.is_alive():
+        raise BrowserSessionUnresolved("browser worker survived after its process group disappeared")
+
+
+def _block_alarm_for_cleanup() -> set[signal.Signals]:
+    """Atomically defer SIGALRM delivery across mandatory bounded teardown."""
+    return signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+
+
+def _restore_signal_mask(previous_mask: set[signal.Signals]) -> None:
+    """Restore the caller's mask; a pending application deadline fires here."""
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 class SeleniumOAuthBrowser:
@@ -631,13 +663,22 @@ class SeleniumOAuthBrowser:
                 bootstrap_ack_write_fd,
             ),
         )
-        process.start()
-        child.close()
-        _close_fd(lifecycle_read_fd)
-        _close_fd(bootstrap_ack_read_fd)
         process_group: int | None = None
-        started = time.monotonic()
+        previous_signal_mask: set[signal.Signals] | None = None
         try:
+            # Do not allow the application alarm to land inside fork bookkeeping,
+            # where a child may exist before multiprocessing has published its
+            # PID to this object. Pending delivery resumes immediately afterward
+            # and is caught by the cleanup path below.
+            startup_signal_mask = _block_alarm_for_cleanup()
+            try:
+                process.start()
+            finally:
+                _restore_signal_mask(startup_signal_mask)
+            child.close()
+            _close_fd(lifecycle_read_fd)
+            _close_fd(bootstrap_ack_read_fd)
+            started = time.monotonic()
             bootstrap_timeout = min(
                 PROCESS_GROUP_BOOTSTRAP_TIMEOUT_SECONDS,
                 BROWSER_TOTAL_TIMEOUT_SECONDS,
@@ -660,6 +701,17 @@ class SeleniumOAuthBrowser:
                 process_group = None
                 raise BrowserSessionUnresolved("browser process-group identity did not match worker")
             try:
+                observed_group = os.getpgid(process.pid)
+                observed_session = os.getsid(process.pid)
+            except ProcessLookupError as exc:
+                raise BrowserSessionUnresolved(
+                    "browser worker disappeared during process-group verification"
+                ) from exc
+            if observed_group != process_group or observed_session != process.pid:
+                raise BrowserSessionUnresolved(
+                    "browser worker process-group or session identity changed"
+                )
+            try:
                 os.write(bootstrap_ack_write_fd, b"1")
             except OSError as exc:
                 raise BrowserSessionUnresolved(
@@ -679,10 +731,32 @@ class SeleniumOAuthBrowser:
                     "isolated browser exited without a resolved result"
                 ) from exc
             if classification == "OK":
-                return payload
-            error = _ERRORS.get(classification, BrowserSessionUnresolved)
-            raise error("isolated browser authentication failed closed")
+                result = payload
+            else:
+                error = _ERRORS.get(classification, BrowserSessionUnresolved)
+                raise error("isolated browser authentication failed closed")
+        except BaseException:
+            # If SIGALRM caused this unwind it is one-shot and already consumed.
+            # Otherwise this atomic mask prevents a near-boundary application
+            # alarm from replacing the active error inside mandatory cleanup.
+            previous_signal_mask = _block_alarm_for_cleanup()
+            raise
+        else:
+            # Mask before Python begins the finally suite. If SIGALRM wins the
+            # race, it raises into the except path above, which also masks it.
+            previous_signal_mask = _block_alarm_for_cleanup()
+            return result
         finally:
-            parent.close()
-            _close_fd(bootstrap_ack_write_fd)
-            _terminate_process_group(process, lifecycle_write_fd, process_group)
+            try:
+                child.close()
+                _close_fd(lifecycle_read_fd)
+                _close_fd(bootstrap_ack_read_fd)
+                parent.close()
+                _close_fd(bootstrap_ack_write_fd)
+                if process.pid is None:
+                    _close_fd(lifecycle_write_fd)
+                else:
+                    _terminate_process_group(process, lifecycle_write_fd, process_group)
+            finally:
+                if previous_signal_mask is not None:
+                    _restore_signal_mask(previous_signal_mask)

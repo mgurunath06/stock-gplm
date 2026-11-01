@@ -1,6 +1,7 @@
 # M2.5.1 authentication safety remediation — 2026-11-01
 
-This revision corrects the seven independent-review findings without using any
+This revision corrects the original seven and two follow-up independent-review
+findings without using any
 credential, TOTP, live Shoonya login, Oracle connection, deployment, collector,
 scheduler or production change. All authentication evidence is synthetic.
 
@@ -15,6 +16,8 @@ scheduler or production change. All authentication evidence is synthetic.
 | Incomplete wall-clock bounds | The browser worker bounds startup, readiness, authentication and cleanup. Provider POSTs force explicit connect/read timeouts. A POSIX real-time timer caps the whole authentication attempt. | Phase constants, provider tuple and the 360 s application deadline are asserted by tests. |
 | Undersized systemd timeout | `TimeoutStartSec=390`, `TimeoutStopSec=30`, `KillMode=control-group`, and `SendSIGKILL=yes`. | The start ceiling exceeds the 360 s application bound by 30 s and descendants remain in the kill scope. |
 | Security-control regression risk | No `--no-sandbox`; AppArmor template, encrypted `LoadCredentialEncrypted`, unit hardening, cache/audit permissions and sensitive-field redaction are retained. | Regression suite covers redaction/credential permissions; source check rejects `--no-sandbox`; unit controls remain present. |
+| Application alarm interrupts teardown | Entry into browser teardown atomically blocks `SIGALRM`; an already-pending 360 s deadline is delivered only after bounded process-group cleanup completes. The alarm remains one-shot and is never discarded. | A real Linux subprocess test expires the application deadline during the `SIGTERM` grace, forces `SIGKILL` for a resistant descendant, observes `OPERATION_DEADLINE_EXCEEDED`, and proves no live worker or descendant remains. |
+| PID/PGID lifetime and reuse | The parent verifies `pid == pgid == sid` before acknowledging browser startup. The watchdog verifies that it still belongs to that exact session/group before each signal. The parent never reaps the leader until its final group-signal decision is complete, and issues no group signal after reaping. | Adversarial Linux tests cover unexpected worker death, parent death, a resistant descendant, deadline expiry during escalation, and a group that disappeared before cleanup observation. Invalid/nonmatching identities fail closed. |
 
 ## Exact timeout budget
 
@@ -24,8 +27,9 @@ scheduler or production change. All authentication evidence is synthetic.
   single-submission/redirect phase, and 10 s cleanup allowance.
 - Provider exchange: explicit 5 s connect and 15 s read timeout.
 - Provider validation: explicit 5 s connect and 15 s read timeout.
-- Whole application authentication attempt: hard 360 s real-time deadline. This
-  wins over the sum of phase limits if local overhead consumes the remaining time.
+- Active authentication work: hard 360 s real-time deadline. If it expires in
+  browser teardown, delivery is deferred only until the independently bounded
+  cleanup completes, for a maximum application-side envelope of 370 s.
 - systemd: 390 s start ceiling, followed by at most 30 s termination allowance;
   absolute failure envelope 420 s.
 
@@ -38,7 +42,7 @@ or live authentication.
 
 Local verification on the feature worktree:
 
-- `.venv/bin/python -m pytest`: **202 passed**.
+- `.venv/bin/python -m pytest`: **208 passed**.
 - `.venv/bin/python -m compileall -q src tests`: **passed**.
 - Gitleaks **8.30.1**, downloaded from the official release and matched against
   its published checksum: `git` scan **no leaks found**; `dir` scan including
@@ -61,13 +65,17 @@ Local verification on the feature worktree:
   The result remains intentionally ambiguous and requires operator investigation;
   automated retry is forbidden.
 - POSIX `SIGALRM`, `fork`, process groups and group signals make this Linux-only.
+- Cleanup relies on Linux process-group semantics and the direct child remaining
+  unreaped through the final signal decision. After reaping, PGID checks are
+  observation-only; extremely fast numeric reuse can therefore cause a safe
+  false-positive unresolved result, but cannot redirect a cleanup signal.
 - The guarantee covers Chrome/ChromeDriver descendants that remain in the
   worker's inherited process group. A future browser/driver version that
   deliberately creates a new session or moves itself to another process group
   would require a cgroup-level assertion during the Oracle offline preflight;
   systemd `KillMode=control-group` remains the outer deployment safeguard.
 - Requests connect/read timeouts are not authenticity proof and a peer can extend
-  a read by continuously delivering bytes. The independent 360 s deadline is the
-  final wall-clock bound.
+  a read by continuously delivering bytes. The 360 s active-work deadline plus
+  at most 10 s of mandatory browser teardown is the final application-side bound.
 - Host-key-at-rest, static-IP, redirect registration and account binding evidence
   remain deployment gates. This revision does not establish production readiness.
