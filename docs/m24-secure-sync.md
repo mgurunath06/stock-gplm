@@ -6,9 +6,8 @@ tree, verifies their publication contract, and publishes new local files without
 overwriting existing bytes. It does not call Shoonya, alter Oracle, fill candles,
 or establish historical membership.
 
-No Oracle connection or real transfer was used during implementation. The
-transport was validated locally with `ssh.exe -G`, which expands configuration
-without connecting.
+`ssh.exe -G` validates the effective configuration locally without connecting;
+discovery and pull then use that verified profile for read-only access.
 
 ## Transport validation
 
@@ -40,9 +39,9 @@ Production requests must bind all of the following:
   on or after that boundary are eligible without installing a schedule;
 - explicit transfer, disk, retry and concurrency limits.
 
-The repository does not contain the five collector-window dates. A production
-request cannot be created until those ten boundaries are supplied. Tests use five
-synthetic one-day windows and do not claim collector compatibility.
+The five collector-window dates and approved limits live in the local request
+file, outside the repository. Tests use five synthetic one-day windows and do not
+claim collector compatibility.
 
 ## Request and transport contracts
 
@@ -62,8 +61,8 @@ The separate transport configuration contains exactly:
 }
 ```
 
-The remote root shown above is illustrative. The approved real path remains an
-open input and must not be inferred.
+The remote root shown above is illustrative; the approved path lives in the local
+transport file and must not be inferred.
 
 ## CLI
 
@@ -122,10 +121,21 @@ scheduler.
 
 ## Discovery and transfer
 
-Discovery lists only `.json.gz.done` markers beneath master symbols. A source is
-eligible only when the marker is `COMPLETE`, names the matching payload, provides
-bounded SHA-256/byte/record claims, has a metadata sidecar, and matches one of the
-five collector windows. Discovery downloads no candle payload.
+Windows SFTP treats a quoted wildcard literally, and the leading `-` of a batch
+`-ls` suppresses its failure, so per-symbol listing produced a false zero-marker
+result. Discovery therefore runs two fixed, read-only remote `find` commands over
+the validated root, one for markers and one for the sizes of regular files. Their
+globs and formats stay quoted against the remote shell. Zero publications, any
+stderr, a nonzero exit, a path outside the root, or a breached time or output bound
+fails the run; it can never read as "nothing published".
+
+A source is eligible only when the marker is `COMPLETE`, names the matching
+payload, provides bounded SHA-256/byte/record claims, has a metadata sidecar, and
+matches one of the five collector windows. Missing, symlinked or oversized members
+are rejected before any fetch, and a payload whose size disagrees with its marker
+is rejected after the marker is read. Each rejection stays visible in
+`exceptions.jsonl`; a publication outside the windows is excluded, not deleted.
+Discovery downloads no candle payload. Breaching the byte cap stops the run.
 
 The plan compares all three destination files:
 
@@ -134,11 +144,26 @@ The plan compares all three destination files:
 - `SKIP_IDENTICAL`: all three immutable files match;
 - `DESTINATION_CONFLICT`: an existing file differs.
 
+A plan containing any `DESTINATION_CONFLICT` is refused before a session opens.
+Every pending file must exist as a regular file with its planned size before
+transfer starts.
+
+Files move in bounded batches of at most 102 triplets and 64 MiB, one SFTP session
+per batch, in the order marker, metadata, payload, marker, metadata. The batch
+commands contain only `get` and `reget`. A failed command aborts the session, and
+nothing from an unverified batch is published. Each batch has a time and output
+bound.
+
 Payload downloads resume from the durable checkpoint length. The full payload is
 then rehashed and compared with the marker. Metadata and marker hashes must still
-match discovery and are fetched again after the payload to detect source changes.
+match discovery, both before and after the payload, to detect source changes.
 Only transient transfer errors retry; integrity, security, path, source-change,
 disk and destination failures stop immediately.
+
+The run re-hashes every planned destination file before writing its audit, and the
+audit directory appears by atomic rename, so a crash cannot leave a run that reads
+as finished. A triplet completed before a crash stays `VERIFIED_TRANSFER`, with
+content `NOT_EVALUATED` until `validate` runs.
 
 ## Crash-safe publication
 
@@ -174,14 +199,18 @@ inside the raw destination.
 | Historical | Imported only from an explicit M2.3 summary or `NOT_EVALUATED` |
 | Training | Always `NOT_READY` |
 
-The 1,584/1,131 result remains `USER_SUPPLIED_BASELINE` until a request with the
-actual five windows is discovered and reconciled.
+The 1,584/1,131 result is labeled `USER_SUPPLIED_BASELINE` in every report; the
+measured counts come from reconciliation.
 
 ## Resource and security boundaries
 
 - 16 MiB compressed payload, 64 KiB sidecars and 100,000 records;
 - explicit maximum triplets and total bytes;
-- explicit minimum free-space reserve checked at plan and pull time;
+- explicit minimum free-space reserve checked at plan and pull time, counting the
+  staged and published copies twice when both share a filesystem;
+- 4 MiB marker listing, 16 MiB file listing and 4 MiB batch output, enforced while
+  reading so the child is killed on breach;
+- 120-second listing and 30-minute batch time bounds;
 - chunks no larger than 1 MiB;
 - at most five attempts and four parallel transfers; implementation defaults to
   sequential transfer;
@@ -194,9 +223,4 @@ actual five windows is discovered and reconciled.
 
 ## Remaining operational inputs
 
-- Exact five collector-window names and date bounds.
-- Approved Oracle publication root for the transport configuration.
-- Approved maximum triplets, total bytes and disk reserve for a real run.
-- Confirmation that Windows SFTP can access the chosen WSL checkpoint path through
-  its translated UNC path.
-- A future decision on scheduler, cadence, audit retention and checkpoint pruning.
+A future decision on scheduler, cadence, audit retention and checkpoint pruning.

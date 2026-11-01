@@ -17,9 +17,15 @@ from stock_gplm.ingestion import validate_daily
 from stock_gplm.m2.master_validation import read_shoonya_nse_eq_inventory_v1
 
 from .models import SyncRequestV1
-from .transport import ReadOnlyTransport, TransientTransportError, TransportError, validate_relative_path
+from .transport import (
+    MAX_BATCH_FETCH_FILES, ReadOnlyTransport, TransientTransportError, TransportError,
+    validate_relative_path,
+)
 
 SYNC_LOCK = ".stock-gplm-m24.lock"
+FILES_PER_TRIPLET_PULL = 5
+PULL_BATCH_TRIPLETS = MAX_BATCH_FETCH_FILES // FILES_PER_TRIPLET_PULL
+PULL_BATCH_BYTES = 64 * 1024 * 1024
 
 
 def _active_sync_lock(path: Path) -> bool:
@@ -95,11 +101,21 @@ def _read_jsonl(path: Path, *, max_rows: int) -> list[dict[str, Any]]:
     return rows
 
 
-def _fetch_fresh(transport: ReadOnlyTransport, relative: str, target: Path, limit: int) -> None:
-    target.unlink(missing_ok=True)
-    transport.fetch(relative, target, resume=False)
-    if target.stat().st_size > limit:
-        raise ValueError(f"remote file exceeds configured limit: {relative}")
+def _fetch_with_retries(
+    transport: ReadOnlyTransport, requests: tuple[tuple[str, Path], ...],
+    request: SyncRequestV1, sleeper: Callable[[float], None], *, resume_payloads: bool,
+) -> None:
+    """Retry one bounded batch on transient failures; anything else stops the run."""
+    attempts = 0
+    while True:
+        try:
+            transport.fetch_many(requests, resume_payloads=resume_payloads)
+            return
+        except TransientTransportError:
+            attempts += 1
+            if attempts >= request.limits.max_attempts:
+                raise
+            sleeper(min(2 ** attempts, 8))
 
 
 def _triplet_paths(marker_relative: str) -> tuple[str, str, str]:
@@ -146,20 +162,26 @@ def _validate_master(
 def discover_catalog(
     *, request: SyncRequestV1, master_path: Path, transport: ReadOnlyTransport,
     output_root: Path, require_current_universe: bool = True,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> Path:
     """Discover marker-committed source triplets without downloading payloads."""
     inventory = _validate_master(request, master_path, require_current_universe=require_current_universe)
     _reports_outside_raw(output_root, Path(request.destination_root))
-    symbols = tuple(item["symbol"] for item in inventory)
-    markers = transport.list_markers(symbols)
+    ordered_symbols = tuple(item["symbol"] for item in inventory)
+    symbols = frozenset(ordered_symbols)
+    markers = transport.list_markers(ordered_symbols)
+    if not markers:
+        raise TransportError("remote marker enumeration returned zero publications")
     if len(markers) > request.limits.max_triplets:
         raise ValueError("remote marker count exceeds the approved run limit")
+    source_files = transport.list_files()
     rows: list[dict[str, Any]] = []
     exceptions: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     total_bytes = 0
     with tempfile.TemporaryDirectory(prefix="stock-gplm-m24-discovery-") as temporary:
         temp = Path(temporary)
+        candidates: list[dict[str, Any]] = []
         for marker_relative in sorted(markers):
             try:
                 payload_relative, metadata_relative, marker_relative = _triplet_paths(marker_relative)
@@ -178,11 +200,59 @@ def discover_catalog(
                 if key in seen:
                     raise ValueError("duplicate symbol/window publication")
                 seen.add(key)
-                marker_path = temp / f"{len(rows)}.done"
-                metadata_path = temp / f"{len(rows)}.meta"
-                _fetch_fresh(transport, marker_relative, marker_path, request.limits.max_sidecar_bytes)
+                for relative in (marker_relative, metadata_relative):
+                    size = source_files.get(relative)
+                    if size is None:
+                        raise ValueError(f"sidecar is absent or not a regular file: {relative}")
+                    if size > request.limits.max_sidecar_bytes:
+                        raise ValueError(f"sidecar exceeds configured limit: {relative}")
+                if payload_relative not in source_files:
+                    raise ValueError(f"payload is absent or not a regular file: {payload_relative}")
+                index = len(candidates)
+                candidates.append({
+                    "symbol": symbol, "start": start, "end": end,
+                    "payload_relative": payload_relative,
+                    "metadata_relative": metadata_relative,
+                    "marker_relative": marker_relative,
+                    "marker_path": temp / f"{index}.done",
+                    "metadata_path": temp / f"{index}.meta",
+                })
+            except (OSError, TransportError, TypeError, ValueError) as exc:
+                exceptions.append({
+                    "schema_version": 1, "marker": marker_relative,
+                    "source_classification": "SOURCE_REJECTED", "reason": str(exc),
+                })
+
+        downloads = tuple(
+            item
+            for candidate in candidates
+            for item in (
+                (candidate["marker_relative"], candidate["marker_path"]),
+                (candidate["metadata_relative"], candidate["metadata_path"]),
+            )
+        )
+        for offset in range(0, len(downloads), MAX_BATCH_FETCH_FILES):
+            _fetch_with_retries(
+                transport, downloads[offset : offset + MAX_BATCH_FETCH_FILES],
+                request, sleeper, resume_payloads=False,
+            )
+        for candidate in candidates:
+            marker_relative = candidate["marker_relative"]
+            try:
+                symbol = candidate["symbol"]
+                start = candidate["start"]
+                end = candidate["end"]
+                payload_relative = candidate["payload_relative"]
+                metadata_relative = candidate["metadata_relative"]
+                marker_path = candidate["marker_path"]
+                metadata_path = candidate["metadata_path"]
+                if marker_path.stat().st_size > request.limits.max_sidecar_bytes:
+                    raise ValueError("completion marker exceeds configured limit")
+                if metadata_path.stat().st_size > request.limits.max_sidecar_bytes:
+                    raise ValueError("metadata sidecar exceeds configured limit")
                 marker = _parse_marker(marker_path, PurePosixPath(payload_relative).name, request)
-                _fetch_fresh(transport, metadata_relative, metadata_path, request.limits.max_sidecar_bytes)
+                if source_files[payload_relative] != marker["bytes"]:
+                    raise ValueError("payload size disagrees with the completion marker")
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 if not isinstance(metadata, dict):
                     raise ValueError("metadata sidecar must contain an object")
@@ -191,9 +261,6 @@ def discover_catalog(
                     raise ValueError("metadata and marker payload checksums disagree")
                 if "records" in metadata and metadata["records"] != marker["records"]:
                     raise ValueError("metadata and marker record counts disagree")
-                total_bytes += marker["bytes"] + marker_path.stat().st_size + metadata_path.stat().st_size
-                if total_bytes > request.limits.max_total_bytes:
-                    raise ValueError("discovered bytes exceed the approved run limit")
                 triplet_id = _canonical_hash({
                     "symbol": symbol, "start": start, "end": end,
                     "payload_sha256": marker["sha256"],
@@ -212,11 +279,14 @@ def discover_catalog(
                     "marker": {"path": marker_relative, "bytes": marker_path.stat().st_size, "sha256": _sha256(marker_path)},
                     "records": marker["records"],
                 })
+                total_bytes += marker["bytes"] + marker_path.stat().st_size + metadata_path.stat().st_size
             except (OSError, TransportError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 exceptions.append({
                     "schema_version": 1, "marker": marker_relative,
                     "source_classification": "SOURCE_REJECTED", "reason": str(exc),
                 })
+    if total_bytes > request.limits.max_total_bytes:
+        raise RuntimeError("discovered bytes exceed the approved run limit")
     rows.sort(key=lambda item: (item["symbol"], item["window"]["start_date"]))
     binding = {
         "schema_version": 1, "contract": "stock-gplm.m24-source-catalog.v1",
@@ -436,14 +506,20 @@ def pull_plan(
     checkpoint_base.mkdir(parents=True, exist_ok=True)
     audit_base.mkdir(parents=True, exist_ok=True)
     destination.mkdir(parents=True, exist_ok=True)
+    rows = _read_jsonl(plan_path, max_rows=request.limits.max_triplets)
+    conflicts = sum(row["action"] == "DESTINATION_CONFLICT" for row in rows)
+    if conflicts:
+        raise ValueError(f"plan contains {conflicts} destination conflicts; refusing to transfer")
     remaining_bytes = sum(
         sum(item["bytes"] for item in _expected_files(row))
-        for row in _read_jsonl(plan_path, max_rows=request.limits.max_triplets)
-        if row["action"] in {"TRANSFER", "RECOVER_PUBLICATION"}
+        for row in rows if row["action"] in {"TRANSFER", "RECOVER_PUBLICATION"}
     )
-    if shutil.disk_usage(checkpoint_base).free - remaining_bytes < request.limits.minimum_free_bytes:
+    # Staged and published copies coexist when both live on one filesystem.
+    same_device = checkpoint_base.stat().st_dev == destination.stat().st_dev
+    reserved_bytes = remaining_bytes * 2 if same_device else remaining_bytes
+    if shutil.disk_usage(checkpoint_base).free - reserved_bytes < request.limits.minimum_free_bytes:
         raise ValueError("insufficient checkpoint disk space and configured reserve")
-    if shutil.disk_usage(destination).free - remaining_bytes < request.limits.minimum_free_bytes:
+    if shutil.disk_usage(destination).free - reserved_bytes < request.limits.minimum_free_bytes:
         raise ValueError("insufficient destination disk space and configured reserve")
     final_audit = audit_base / f"run-{plan_id}"
     if final_audit.exists():
@@ -458,78 +534,90 @@ def pull_plan(
     if state.get("run_id") != plan_id or state.get("plan") != str(Path(plan_dir).resolve()):
         raise ValueError("checkpoint belongs to another plan")
     completed = set(state.get("completed", []))
-    rows = _read_jsonl(plan_path, max_rows=request.limits.max_triplets)
+    pending = [
+        row for row in rows
+        if row["action"] != "SKIP_IDENTICAL" and row["triplet_id"] not in completed
+    ]
+    if pending:
+        source_files = transport.list_files()
+        for row in pending:
+            for item in _expected_files(row):
+                if source_files.get(item["path"]) != item["bytes"]:
+                    raise TransportError(f"source file changed after discovery: {item['path']}")
     _, lock_stream = _acquire_lock(destination, plan_id)
-    results: list[dict[str, Any]] = []
+    verified: dict[str, dict[str, Any]] = {}
+    batches: list[list[dict[str, Any]]] = []
+    batch_bytes = 0
+    for row in pending:
+        size = sum(item["bytes"] for item in _expected_files(row))
+        if (
+            not batches or len(batches[-1]) >= PULL_BATCH_TRIPLETS
+            or batch_bytes + size > PULL_BATCH_BYTES
+        ):
+            batches.append([])
+            batch_bytes = 0
+        batches[-1].append(row)
+        batch_bytes += size
     try:
+        for batch in batches:
+            downloads: list[tuple[str, Path]] = []
+            for row in batch:
+                stage = checkpoint / "triplets" / row["triplet_id"] / row["symbol"]
+                stage.mkdir(parents=True, exist_ok=True)
+                payload, metadata, marker = _expected_files(row)
+                # Sidecars are read again after the payload to detect source changes.
+                downloads.extend((
+                    (marker["path"], stage / PurePosixPath(marker["path"]).name),
+                    (metadata["path"], stage / PurePosixPath(metadata["path"]).name),
+                    (payload["path"], stage / PurePosixPath(payload["path"]).name),
+                    (marker["path"], stage / ".marker-recheck"),
+                    (metadata["path"], stage / ".metadata-recheck"),
+                ))
+            _fetch_with_retries(
+                transport, tuple(downloads), request, sleeper, resume_payloads=True,
+            )
+            for row in batch:
+                triplet_id = row["triplet_id"]
+                triplet_stage = checkpoint / "triplets" / triplet_id / row["symbol"]
+                payload, metadata, marker = _expected_files(row)
+                marker_stage = triplet_stage / PurePosixPath(marker["path"]).name
+                metadata_stage = triplet_stage / PurePosixPath(metadata["path"]).name
+                payload_stage = triplet_stage / PurePosixPath(payload["path"]).name
+                if _sha256(marker_stage, request.limits.max_sidecar_bytes) != marker["sha256"] or _sha256(metadata_stage, request.limits.max_sidecar_bytes) != metadata["sha256"]:
+                    raise TransportError("source sidecar changed after discovery")
+                if payload_stage.stat().st_size != payload["bytes"] or _sha256(payload_stage) != payload["sha256"]:
+                    raise TransportError("payload byte count or SHA-256 differs from the publication marker")
+                if (
+                    _sha256(triplet_stage / ".marker-recheck", request.limits.max_sidecar_bytes) != marker["sha256"]
+                    or _sha256(triplet_stage / ".metadata-recheck", request.limits.max_sidecar_bytes) != metadata["sha256"]
+                ):
+                    raise TransportError("source sidecar changed during transfer")
+                report = validate_daily(payload_stage)
+                if not report.publication_integrity.valid:
+                    raise ValueError("staged triplet failed M1 publication validation")
+                publish_verified_triplet(
+                    staged_symbol_dir=triplet_stage, destination_root=destination,
+                    row=row, after_publish=after_publish,
+                )
+                completed.add(triplet_id)
+                state["completed"] = sorted(completed)
+                _atomic_state(state_path, state)
+                verified[triplet_id] = {
+                    "content_classification": "ACCEPT" if report.content_quality.valid else "QUARANTINE",
+                }
+        results: list[dict[str, Any]] = []
         for row in rows:
             triplet_id = row["triplet_id"]
-            if row["action"] == "DESTINATION_CONFLICT":
-                results.append({
-                    "schema_version": 1, "triplet_id": triplet_id, "symbol": row["symbol"],
-                    "source_classification": row["source_classification"],
-                    "transfer_classification": "DESTINATION_CONFLICT",
-                    "content_classification": "NOT_EVALUATED",
-                    "historical_classification": "NOT_EVALUATED",
-                    "training_readiness": "NOT_READY",
-                })
-                continue
-            if row["action"] == "SKIP_IDENTICAL" or triplet_id in completed:
-                results.append({
-                    "schema_version": 1, "triplet_id": triplet_id, "symbol": row["symbol"],
-                    "source_classification": row["source_classification"],
-                    "transfer_classification": "SKIP_IDENTICAL",
-                    "content_classification": "NOT_EVALUATED",
-                    "historical_classification": "NOT_EVALUATED",
-                    "training_readiness": "NOT_READY",
-                    "payload": row["payload"], "metadata": row["metadata"],
-                    "marker": row["marker"], "window": row["window"],
-                })
-                continue
-            triplet_stage = checkpoint / "triplets" / triplet_id / row["symbol"]
-            triplet_stage.mkdir(parents=True, exist_ok=True)
-            payload, metadata, marker = _expected_files(row)
-            marker_stage = triplet_stage / PurePosixPath(marker["path"]).name
-            metadata_stage = triplet_stage / PurePosixPath(metadata["path"]).name
-            payload_stage = triplet_stage / PurePosixPath(payload["path"]).name
-            _fetch_fresh(transport, marker["path"], marker_stage, request.limits.max_sidecar_bytes)
-            _fetch_fresh(transport, metadata["path"], metadata_stage, request.limits.max_sidecar_bytes)
-            if _sha256(marker_stage) != marker["sha256"] or _sha256(metadata_stage) != metadata["sha256"]:
-                raise TransportError("source sidecar changed after discovery")
-            attempts = 0
-            while True:
-                try:
-                    transport.fetch(payload["path"], payload_stage, resume=True)
-                    break
-                except TransientTransportError:
-                    attempts += 1
-                    if attempts >= request.limits.max_attempts:
-                        raise
-                    sleeper(min(2 ** attempts, 8))
-            if payload_stage.stat().st_size != payload["bytes"] or _sha256(payload_stage) != payload["sha256"]:
-                raise TransportError("payload byte count or SHA-256 differs from the publication marker")
-            marker_check = triplet_stage / ".marker-recheck"
-            metadata_check = triplet_stage / ".metadata-recheck"
-            _fetch_fresh(transport, marker["path"], marker_check, request.limits.max_sidecar_bytes)
-            _fetch_fresh(transport, metadata["path"], metadata_check, request.limits.max_sidecar_bytes)
-            if _sha256(marker_check) != marker["sha256"] or _sha256(metadata_check) != metadata["sha256"]:
-                raise TransportError("source sidecar changed during transfer")
-            report = validate_daily(payload_stage)
-            if not report.publication_integrity.valid:
-                raise ValueError("staged triplet failed M1 publication validation")
-            content = "ACCEPT" if report.content_quality.valid else "QUARANTINE"
-            publish_verified_triplet(
-                staged_symbol_dir=triplet_stage, destination_root=destination,
-                row=row, after_publish=after_publish,
-            )
-            completed.add(triplet_id)
-            state["completed"] = sorted(completed)
-            _atomic_state(state_path, state)
+            transferred = row["action"] != "SKIP_IDENTICAL"
+            # A checkpoint or plan claim is not evidence that the bytes are still there.
+            if _destination_state(destination, row)[0] != "SKIP_IDENTICAL":
+                raise TransportError(f"published triplet no longer matches its plan: {triplet_id}")
             results.append({
                 "schema_version": 1, "triplet_id": triplet_id, "symbol": row["symbol"],
-                "window": row["window"], "source_classification": "VERIFIED_PUBLISHED",
-                "transfer_classification": "VERIFIED_TRANSFER",
-                "content_classification": content,
+                "window": row["window"],
+                "source_classification": "VERIFIED_PUBLISHED" if transferred else row["source_classification"],
+                "transfer_classification": "VERIFIED_TRANSFER" if transferred else "SKIP_IDENTICAL",
+                "content_classification": verified.get(triplet_id, {}).get("content_classification", "NOT_EVALUATED"),
                 "historical_classification": "NOT_EVALUATED",
                 "training_readiness": "NOT_READY",
                 "payload": row["payload"], "metadata": row["metadata"], "marker": row["marker"],
@@ -538,13 +626,16 @@ def pull_plan(
         fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
         lock_stream.close()
         _fsync_directory(destination)
-    final_audit.mkdir(parents=True, exist_ok=False)
-    _write_jsonl(final_audit / "transfer-results.jsonl", results)
+    # The final name is what marks a run finished, so it must appear atomically.
+    partial_audit = audit_base / f".run-{plan_id}.partial"
+    shutil.rmtree(partial_audit, ignore_errors=True)
+    partial_audit.mkdir(parents=True, exist_ok=False)
+    _write_jsonl(partial_audit / "transfer-results.jsonl", results)
     counts: dict[str, int] = {}
     for row in results:
         value = row["transfer_classification"]
         counts[value] = counts.get(value, 0) + 1
-    _write_json(final_audit / "run-manifest.json", {
+    _write_json(partial_audit / "run-manifest.json", {
         "schema_version": 1, "contract": "stock-gplm.m24-run.v1", "run_id": plan_id,
         "plan_sha256": _sha256(plan_path), "request_sha256": request.digest(),
         "classifications": {
@@ -552,8 +643,10 @@ def pull_plan(
             "content": "REPORTED_PER_TRIPLET", "historical": "NOT_EVALUATED",
             "training_readiness": "NOT_READY",
         },
-        "outputs": {"transfer-results.jsonl": _sha256(final_audit / "transfer-results.jsonl")},
+        "outputs": {"transfer-results.jsonl": _sha256(partial_audit / "transfer-results.jsonl")},
     })
+    os.rename(partial_audit, final_audit)
+    _fsync_directory(audit_base)
     return final_audit
 
 
