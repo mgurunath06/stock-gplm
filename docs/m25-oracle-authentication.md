@@ -5,8 +5,10 @@ The WSL development machine builds and tests the package but is never a runtime
 dependency. M2.5 does not place orders, change provider data, alter raw collector
 files, or bypass CAPTCHA and other interactive controls.
 
-No live login was performed during implementation or deployment. The approved
-offline Oracle deployment performed on 2026-11-01 is recorded in
+One explicitly authorized 2026-11-01 canary opened the hosted page but timed out
+before the form appeared; it did not submit credentials or obtain a token. The
+M2.5.1 safety remediation is synthetic-only and has not been deployed or tested
+with credentials. Historical evidence is recorded in
 `m25-oracle-deployment-report-2026-11-01.md`.
 
 ## Provider contract
@@ -14,8 +16,10 @@ offline Oracle deployment performed on 2026-11-01 is recorded in
 The implementation follows Shoonya's documented Selenium OAuth flow:
 
 1. launch headless Chrome;
-2. open the hosted Shoonya OAuth page;
-3. submit User ID, password and a fresh TOTP;
+2. require the exact `https://api.shoonya.com` origin, expected login path,
+   Shoonya title marker, three-input type contract and one `LOGIN` button;
+3. require all three inputs and the button to be visible, enabled and
+   interactable, then submit User ID, password and a fresh TOTP exactly once;
 4. capture a bounded authorization code from the exact registered
    `http://127.0.0.1` loopback redirect, or a narrowly approved HTTPS redirect;
 5. close Chrome;
@@ -62,10 +66,14 @@ Under the exclusive `shoonya_auth.lock`, M2.5 re-reads the cache and applies:
 | timeout, DNS/TLS error or unknown provider response | preserve cache and fail closed |
 | missing/locally expired cache | fresh flow only with `--allow-oauth-login` |
 | UID/account mismatch | security failure; do not cache |
-| CAPTCHA or changed login contract | interaction required; do not retry |
+| CAPTCHA, changed login identity, disabled control or unexpected origin | fail closed before submission |
+| timeout or transport error during/after click | ambiguous outcome; destroy browser process group; never resubmit |
 
-Only a TOTP-window rollover receives one bounded resubmission. There is no
-unbounded credential retry and no automatic retry of collector API calls.
+An authentication attempt has the linear states `STARTING`, `PAGE_VERIFIED`,
+`CREDENTIALS_FILLED`, `SUBMITTED` and `CODE_OBSERVED`. The transition into
+`SUBMITTED` increments a guarded submission counter from zero to one before the
+click command begins. There is no credential resubmission, including after a
+TOTP rollover, timeout, missing redirect or ambiguous click result.
 
 ## Security boundaries
 
@@ -87,13 +95,46 @@ unbounded credential retry and no automatic retry of collector API calls.
   configured HTTPS host using `/OAuthlogin/authorize/oauth`. Redirects with
   additional parameters, fragments, user information or explicit ports fail
   closed.
+- The exact login-page identity and complete control set are checked with one
+  browser-side predicate. Credential filling and the single click each repeat
+  that origin/page/control predicate atomically in the browser context.
+- Selenium and Chrome run in a dedicated process group. A stalled WebDriver
+  command is never retried. The parent terminates the whole group, first with
+  `SIGTERM` and then `SIGKILL` within the cleanup allowance, so no later command
+  targets an unresolved session.
 - The hosted login form can take about 90 s to render on the CPU-throttled Oracle
-  VM. The browser uses page-load strategy `none` and an explicit 150 s password-form
-  wait (`BROWSER_PAGE_NOT_READY` on expiry); `browser_timeout_seconds` then bounds
-  the login/redirect phase. See the
+  VM. Page-load strategy `none` and a 150 s complete-form wait remain bounded;
+  `browser_timeout_seconds` is capped at 90 s for fill, one submission and redirect.
+  See the
   [investigation](m25-oracle-browser-timeout-investigation-2026-11-01.md).
+- Every Shoonya SDK HTTP POST has an explicit `(5 s connect, 15 s read)` timeout.
+  The whole authentication operation has an independent 360 s real-time deadline.
 - Audit and status files are mode `0600`; sensitive field names are redacted.
 - Core dumps are disabled by the service templates.
+
+## Complete timeout budget
+
+The maximum configured path is bounded as follows. The 360 s application
+deadline is authoritative if phase allowances do not all fit because of local
+overhead.
+
+| Phase | Maximum |
+| --- | ---: |
+| Exclusive authentication lock | 30 s |
+| ChromeDriver/Chrome startup | 30 s |
+| Exact page and complete-control readiness | 150 s |
+| TOTP alignment, one submission and redirect observation | 90 s |
+| Browser process-group cleanup | 10 s |
+| Provider token exchange HTTP connect/read | 5 s / 15 s |
+| Read-only provider validation HTTP connect/read | 5 s / 15 s |
+| Whole application authentication attempt | 360 s |
+| systemd `TimeoutStartSec` | 390 s |
+| systemd termination allowance (`TimeoutStopSec`) | 30 s |
+
+The service start ceiling leaves 30 s beyond the application deadline for CLI,
+audit/status and bounded cleanup. `KillMode=control-group` and `SendSIGKILL=yes`
+cover any remaining descendants. The worst systemd-enforced failure envelope is
+420 s (390 s start ceiling plus at most 30 s termination).
 
 ## CLI
 
@@ -251,7 +292,9 @@ responses.
 
 Key outcomes are `VALID_REUSED`, `REFRESHED`, `LOGIN_REQUIRED`,
 `VALIDATION_INCONCLUSIVE`, `INTERACTION_REQUIRED`, `UI_CONTRACT_CHANGED`,
-`TOKEN_EXCHANGE_REJECTED` and `SECURITY_BOUNDARY_ERROR`.
+`AUTH_OUTCOME_AMBIGUOUS`, `BROWSER_SESSION_UNRESOLVED`, `PROVIDER_TIMEOUT`,
+`OPERATION_DEADLINE_EXCEEDED`, `TOKEN_EXCHANGE_REJECTED` and
+`SECURITY_BOUNDARY_ERROR`.
 
 On rollback, disable any M2.5 units, restore the previous authenticated collector
 entrypoint, and leave the last protected token cache untouched. Do not delete raw

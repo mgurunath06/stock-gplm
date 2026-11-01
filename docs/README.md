@@ -10,4 +10,5 @@
 - [M2.5 Oracle-native unattended authentication](m25-oracle-authentication.md)
 - [M2.5 Oracle offline deployment report — 2026-11-01](m25-oracle-deployment-report-2026-11-01.md)
 - [M2.5 Oracle browser timeout investigation — 2026-11-01](m25-oracle-browser-timeout-investigation-2026-11-01.md)
+- [M2.5.1 authentication safety remediation — 2026-11-01](m251-authentication-safety-remediation-2026-11-01.md)
 - [Architecture and milestone boundaries](architecture.md)

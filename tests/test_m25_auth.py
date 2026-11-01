@@ -4,22 +4,30 @@ import fcntl
 import json
 import os
 import stat
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
+import stock_gplm.m25.browser as browser_module
 from stock_gplm.m25.browser import (
-    PAGE_READY_TIMEOUT_SECONDS, capture_authorization_code, extract_authorization_code,
-    wait_for_login_form,
+    BROWSER_CLEANUP_TIMEOUT_SECONDS, BROWSER_TOTAL_TIMEOUT_SECONDS,
+    CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS, PAGE_READY_TIMEOUT_SECONDS, _command,
+    SeleniumOAuthBrowser, authenticate_once, capture_authorization_code,
+    extract_authorization_code, wait_for_login_form,
 )
 from stock_gplm.m25.credentials import FileCredentialProvider, _private_permissions
 from stock_gplm.m25.errors import (
-    BrowserPageNotReady, LoginRequired, SecurityBoundaryError, ValidationInconclusive,
+    AmbiguousAuthenticationOutcome, BrowserPageNotReady, BrowserSessionUnresolved, LoginRequired,
+    OperationDeadlineExceeded, ProviderTimeout, SecurityBoundaryError,
+    ValidationInconclusive,
 )
+from stock_gplm.m25.deadline import AUTH_OPERATION_TIMEOUT_SECONDS, authentication_deadline
 from stock_gplm.m25.models import AuthConfigV1, SessionRecordV1
 from stock_gplm.m25.security import AuditLogger, ExclusiveAuthLock, SessionCache
 from stock_gplm.m25.session import AuthManager, Validation, validate_session
+from stock_gplm.m25.noren import PROVIDER_HTTP_TIMEOUT, _BoundedRequests
 from stock_gplm.m25.totp import generate_totp, seconds_remaining
 
 
@@ -133,6 +141,16 @@ def test_config_loader_rejects_duplicate_keys(tmp_path):
     path.chmod(0o600)
     with pytest.raises(ValueError, match="duplicate"):
         AuthConfigV1.load(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), (("lock_timeout_seconds", 31), ("browser_timeout_seconds", 91)),
+)
+def test_config_cannot_expand_reviewed_timeout_budget(tmp_path, field, value):
+    payload = _config(tmp_path).to_dict()
+    payload[field] = value
+    with pytest.raises(ValueError, match=field):
+        AuthConfigV1.from_dict(payload)
 
 
 def test_totp_rfc_vector_and_remaining_window():
@@ -373,30 +391,49 @@ def test_cache_rejects_dangling_symlink(tmp_path):
         SessionCache(path).load()
 
 
-class _FormElement:
-    def __init__(self, *, displayed=True, enabled=True):
-        self._displayed, self._enabled = displayed, enabled
-
-    def is_displayed(self):
-        return self._displayed
-
-    def is_enabled(self):
-        return self._enabled
+READY = {
+    "locationOk": True, "titleOk": True, "typesOk": True, "challenge": False,
+    "inputsReady": True, "buttonReady": True,
+}
 
 
-class _FormDriver:
-    """Returns scripted find_elements results; Exception instances are raised."""
+class _ScriptDriver:
+    """Scriptable atomic page-contract, fill, submit, and log commands."""
 
-    def __init__(self, script):
-        self.script = list(script)
-        self.selectors = []
+    def __init__(self, *, contracts=None, fill=None, submit=None, logs=None):
+        self.contracts = list(contracts or [READY])
+        self.fill = {"filled": True} if fill is None else fill
+        self.submit = {"submitted": True} if submit is None else submit
+        self.logs = list(logs or [])
+        self.get_calls = 0
+        self.contract_calls = 0
+        self.fill_calls = 0
+        self.submit_calls = 0
+        self.log_calls = 0
 
-    def find_elements(self, by, selector):
-        self.selectors.append((by, selector))
-        item = self.script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+    def get(self, _url):
+        self.get_calls += 1
+
+    def execute_script(self, script, *args):
+        if "return {filled: true}" in script:
+            self.fill_calls += 1
+            value = self.fill
+        elif "return {submitted: true}" in script:
+            self.submit_calls += 1
+            value = self.submit
+        else:
+            self.contract_calls += 1
+            value = self.contracts.pop(0) if len(self.contracts) > 1 else self.contracts[0]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    def get_log(self, _name):
+        self.log_calls += 1
+        value = self.logs.pop(0) if self.logs else []
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
 
 def _fake_time():
@@ -408,30 +445,143 @@ def _fake_time():
     return sleeper, lambda: now[0]
 
 
-def test_login_form_wait_survives_slow_render_and_transient_driver_stalls():
+def test_login_form_wait_allows_only_completed_not_ready_polls():
     sleeper, monotonic = _fake_time()
-    driver = _FormDriver([
-        [], TimeoutError("driver read timeout"), [_FormElement(displayed=False)],
-        [_FormElement(enabled=False)], [_FormElement()],
-    ])
-    wait_for_login_form(driver, 100, transient=(TimeoutError,), sleeper=sleeper, monotonic=monotonic)
-    assert driver.selectors == [("css selector", "input[type='password']")] * 5
-    assert monotonic() == 4.0
+    not_ready = dict(READY, titleOk=False, typesOk=False, inputsReady=False)
+    driver = _ScriptDriver(contracts=[not_ready, not_ready, READY])
+    wait_for_login_form(driver, 100, sleeper=sleeper, monotonic=monotonic)
+    assert driver.contract_calls == 3
+    assert monotonic() == 2.0
 
 
 def test_login_form_wait_is_bounded_and_classified():
     sleeper, monotonic = _fake_time()
-    driver = _FormDriver([[] for _ in range(50)])
+    driver = _ScriptDriver(contracts=[dict(READY, buttonReady=False)])
     with pytest.raises(BrowserPageNotReady) as caught:
         wait_for_login_form(driver, 5, sleeper=sleeper, monotonic=monotonic)
     assert caught.value.classification == "BROWSER_PAGE_NOT_READY"
     assert monotonic() == 5.0
 
 
-def test_login_form_wait_does_not_swallow_unlisted_errors():
+def test_login_form_wait_never_retries_an_unresolved_driver_command():
     sleeper, monotonic = _fake_time()
     with pytest.raises(ValueError):
-        wait_for_login_form(_FormDriver([ValueError("bug")]), 5, sleeper=sleeper, monotonic=monotonic)
+        driver = _ScriptDriver(contracts=[ValueError("driver unresolved")])
+        wait_for_login_form(driver, 5, sleeper=sleeper, monotonic=monotonic)
+    assert driver.contract_calls == 1
+
+
+def test_unexpected_origin_is_rejected_before_credentials():
+    sleeper, monotonic = _fake_time()
+    driver = _ScriptDriver(contracts=[dict(READY, locationOk=False)])
+    with pytest.raises(SecurityBoundaryError):
+        authenticate_once(
+            driver, _config(Path("/tmp/m25-origin-test")),
+            SimpleNamespace(password="p", totp_secret="JBSWY3DPEHPK3PXP"),
+            sleeper=sleeper, clock=lambda: 60.0, monotonic=monotonic,
+        )
+    assert driver.fill_calls == driver.submit_calls == 0
+
+
+def test_disabled_control_blocks_all_credential_entry():
+    sleeper, monotonic = _fake_time()
+    driver = _ScriptDriver(contracts=[dict(READY, inputsReady=False)])
+    with pytest.raises(BrowserPageNotReady):
+        authenticate_once(
+            driver, _config(Path("/tmp/m25-disabled-test")),
+            SimpleNamespace(password="p", totp_secret="JBSWY3DPEHPK3PXP"),
+            sleeper=sleeper, clock=lambda: 60.0, monotonic=monotonic,
+        )
+    assert driver.fill_calls == driver.submit_calls == 0
+
+
+def test_ambiguous_submission_is_never_resubmitted():
+    sleeper, monotonic = _fake_time()
+    driver = _ScriptDriver(submit=TimeoutError("unknown click outcome"))
+    with pytest.raises(AmbiguousAuthenticationOutcome):
+        authenticate_once(
+            driver, _config(Path("/tmp/m25-submit-test")),
+            SimpleNamespace(password="p", totp_secret="JBSWY3DPEHPK3PXP"),
+            sleeper=sleeper, clock=lambda: 60.0, monotonic=monotonic,
+        )
+    assert driver.fill_calls == 1
+    assert driver.submit_calls == 1
+    assert driver.log_calls == 0
+
+
+def test_no_redirect_after_submission_is_ambiguous_without_retry():
+    sleeper, monotonic = _fake_time()
+    driver = _ScriptDriver()
+    with pytest.raises(AmbiguousAuthenticationOutcome):
+        authenticate_once(
+            driver, _config(Path("/tmp/m25-no-code-test")),
+            SimpleNamespace(password="p", totp_secret="JBSWY3DPEHPK3PXP"),
+            sleeper=sleeper, clock=lambda: 60.0, monotonic=monotonic,
+        )
+    assert driver.submit_calls == 1
+
+
+def test_browser_command_stall_expires_without_second_command():
+    calls = []
+
+    def stall():
+        calls.append("started")
+        time.sleep(1)
+
+    with pytest.raises(TimeoutError):
+        _command(stall, time.monotonic() + 0.01, time.monotonic)
+    assert calls == ["started"]
+
+
+def test_stalled_browser_worker_is_killed_at_outer_deadline(monkeypatch, tmp_path):
+    def stalled_worker(_connection, _config, _credentials):
+        os.setsid()
+        time.sleep(10)
+
+    monkeypatch.setattr(browser_module, "_worker", stalled_worker)
+    monkeypatch.setattr(browser_module, "BROWSER_TOTAL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(browser_module, "BROWSER_CLEANUP_TIMEOUT_SECONDS", 0.1)
+    browser = SeleniumOAuthBrowser(_config(tmp_path))
+    with pytest.raises(BrowserSessionUnresolved):
+        browser.acquire_code(SimpleNamespace())
+
+
+def test_authentication_wall_clock_deadline_expires():
+    with pytest.raises(OperationDeadlineExceeded):
+        with authentication_deadline(0.01):
+            time.sleep(1)
+
+
+def test_provider_transport_forces_connection_and_read_timeouts():
+    calls = []
+
+    class Timeout(Exception):
+        pass
+
+    class Requests:
+        exceptions = SimpleNamespace(Timeout=Timeout)
+
+        @staticmethod
+        def post(*args, **kwargs):
+            calls.append((args, kwargs))
+            raise Timeout()
+
+    with pytest.raises(ProviderTimeout):
+        _BoundedRequests(Requests()).post("https://api.shoonya.test/path", data="x")
+    assert calls[0][1]["timeout"] == PROVIDER_HTTP_TIMEOUT
+
+
+def test_maximum_timeout_budget_matches_hardened_systemd_unit():
+    service = Path("deploy/oracle/m25/stock-gplm-auth.service").read_text(encoding="utf-8")
+    assert AUTH_OPERATION_TIMEOUT_SECONDS == 360
+    assert CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS == 30
+    assert PAGE_READY_TIMEOUT_SECONDS == 150
+    assert BROWSER_TOTAL_TIMEOUT_SECONDS == 280
+    assert BROWSER_CLEANUP_TIMEOUT_SECONDS == 10
+    assert "TimeoutStartSec=390" in service
+    assert "TimeoutStopSec=30" in service
+    assert "KillMode=control-group" in service
+    assert "--no-sandbox" not in Path("src/stock_gplm/m25/browser.py").read_text(encoding="utf-8")
 
 
 def test_page_ready_bound_covers_observed_oracle_render_time():

@@ -36,7 +36,7 @@ at full speed, so steal is load-triggered burst throttling, not a constant fault
 Chrome still contacts Google update/account/autofill endpoints despite
 `--disable-background-networking`; this is noise, not the cause.
 
-## Fix (only the demonstrated cause)
+## Original timeout fix
 
 [browser.py](../src/stock_gplm/m25/browser.py):
 
@@ -51,6 +51,11 @@ Chrome still contacts Google update/account/autofill endpoints despite
   after the form is usable; the config schema is unchanged.
 - `stock-gplm-auth.service` `TimeoutStartSec` raised from 180 to 360 s so the
   unit cannot kill a slow but healthy run. This template change is not deployed.
+
+That revision addressed the measured render delay but did not satisfy the later
+independent safety review. It is superseded by M2.5.1; the 150 s readiness
+evidence remains an input to the new fixed budget, not justification for retrying
+a timed-out WebDriver command.
 
 ## Verification
 
@@ -80,7 +85,11 @@ revision is not approved for a live canary because:
 - the 360-second systemd limit does not cover every permitted timeout plus
   provider exchange, validation and cleanup.
 
-No revised package was built or deployed during that review. The authentication
-service and timer must remain disabled, and live OAuth remains unapproved until
-these findings are corrected, synthetically tested, packaged, and followed by
-one explicitly authorized credential-free Oracle readiness test.
+No revised package was built or deployed during that review. The findings are
+corrected in the local M2.5.1 feature revision documented in
+[the remediation report](m251-authentication-safety-remediation-2026-11-01.md):
+one guarded submission, exact origin/page identity, complete control readiness,
+process-group isolation for unresolved WebDriver commands, explicit provider
+timeouts, a 360 s application deadline, and a 390 s systemd start ceiling plus
+30 s termination allowance. This is synthetic evidence only. The authentication
+service and timer must remain disabled, and live OAuth remains unapproved.
