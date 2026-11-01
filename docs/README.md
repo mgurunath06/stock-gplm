@@ -11,4 +11,5 @@
 - [M2.5 Oracle offline deployment report — 2026-11-01](m25-oracle-deployment-report-2026-11-01.md)
 - [M2.5 Oracle browser timeout investigation — 2026-11-01](m25-oracle-browser-timeout-investigation-2026-11-01.md)
 - [M3 local data readiness](m3-data-readiness.md)
+- [M3.2 point-in-time research framework](m32-research-framework.md)
 - [Architecture and milestone boundaries](architecture.md)

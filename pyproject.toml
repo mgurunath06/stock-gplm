@@ -23,6 +23,7 @@ stock-gplm-inventory = "stock_gplm.m2.inventory_cli:main"
 stock-gplm-sync = "stock_gplm.m24.cli:main"
 stock-gplm-auth = "stock_gplm.m25.cli:main"
 stock-gplm-readiness = "stock_gplm.m3.cli:main"
+stock-gplm-research = "stock_gplm.m3.research_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

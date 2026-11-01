@@ -80,3 +80,8 @@ hash before publication, and never writes inside the raw tree. Current-master
 identity remains separate from point-in-time membership, calendar, alias, and
 corporate-action evidence; missing evidence keeps historical coverage incomplete
 and training readiness `NOT_READY`.
+
+M3.2 reads a manifest-verified M3.1 run and adds causal features, separate label
+contracts, per-horizon purged walk-forward plans and quality gates. It consumes M2
+reference models, never reads raw files and performs no training. See
+[m32-research-framework.md](m32-research-framework.md).
