@@ -28,9 +28,20 @@ Each run contains:
 - `coverage-quality.json`: observed coverage and independent readiness gates;
 - `research-dataset.csv`: ascending validated OHLCV with source path/hash and
   causal EMA20, RSI14, and MACD (12,26,9) columns when enough observations exist;
+- `symbol-coverage.csv`: one row per current-master EQ symbol, including symbols
+  with no candles, comparing each to the observed sessions;
+- `observed-sessions.csv`: every date with at least one candle and its symbol count;
+- `ohlcv-flags.csv`: unrepaired zero-volume, flat-OHLC and >=20% close-move rows;
 - per-symbol JSON and Markdown exploration summaries;
 - an SVG price/volume/indicator view when at least one validated candle exists;
 - `run-manifest.json`: the deterministic run binding and output hashes.
+
+With `--sync-request`, segments outside the pinned collector windows stay hashed
+and listed under `excluded_segments` but contribute no candles, so an overlapping
+sample cannot contaminate the dataset.
+
+`observed-sessions.csv` is an empirical union, not a market calendar. A symbol's
+unobserved sessions stay `UNKNOWN`, and flagged candles keep their source values.
 
 Derived reports and datasets remain ignored local artifacts. Market data must
 not be committed.

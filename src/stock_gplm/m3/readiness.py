@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from html import escape
@@ -18,13 +18,22 @@ from typing import Any, Iterable
 from stock_gplm.ingestion import validate_daily
 from stock_gplm.m2.master_validation import read_shoonya_nse_eq_inventory_v1
 
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 EMA_PERIOD = 20
 RSI_PERIOD = 14
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
+LARGE_CLOSE_MOVE = Decimal("0.20")
+COVERAGE_FIELDS = (
+    "symbol", "observed_candles", "first_observed_date", "last_observed_date",
+    "published_windows", "collector_windows_absent", "non_accepted_segments",
+    "observed_sessions_before_first", "observed_sessions_after_last",
+    "unobserved_sessions_within_span", "longest_unobserved_run",
+    "zero_volume_candles", "flat_ohlc_candles", "large_close_moves",
+    "ema20_available", "rsi14_available", "macd_available", "macd_signal_available",
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,11 @@ class DatasetRow:
 def _sha256(path: Path) -> str:
     if path.stat().st_size > MAX_INPUT_BYTES:
         raise ValueError(f"input exceeds {MAX_INPUT_BYTES} bytes: {path}")
+    return _stream_sha256(path)
+
+
+def _stream_sha256(path: Path) -> str:
+    """Hash a derived output; the input size bound does not apply to these."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
@@ -161,18 +175,17 @@ def _with_indicators(rows: list[DatasetRow]) -> list[DatasetRow]:
     ema = _ema(closes, EMA_PERIOD)
     rsi = _rsi(closes, RSI_PERIOD)
     macd, signal, histogram = _macd(closes)
-    enriched: list[DatasetRow] = []
-    for index, item in enumerate(rows):
-        values = asdict(item)
-        values.update(
+    return [
+        replace(
+            item,
             ema20=_decimal(ema[index]) if ema[index] is not None else None,
             rsi14=_decimal(rsi[index]) if rsi[index] is not None else None,
             macd_12_26=_decimal(macd[index]) if macd[index] is not None else None,
             macd_signal_9=_decimal(signal[index]) if signal[index] is not None else None,
             macd_histogram=_decimal(histogram[index]) if histogram[index] is not None else None,
         )
-        enriched.append(DatasetRow(**values))
-    return enriched
+        for index, item in enumerate(rows)
+    ]
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -182,60 +195,228 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
-def _points(values: list[Decimal], left: int, top: int, width: int, height: int) -> str:
-    if not values:
-        return ""
-    low, high = min(values), max(values)
-    span = high - low or Decimal(1)
-    denominator = max(1, len(values) - 1)
-    return " ".join(
-        f"{left + index * width / denominator:.2f},{top + height - float((value - low) / span) * height:.2f}"
-        for index, value in enumerate(values)
+_SVG_STYLE = """
+.surface { fill: #fcfcfb; } .frame { fill: none; stroke: #e4e3df; }
+.reference { stroke: #c3c2b7; stroke-width: 1; stroke-dasharray: 4 4; }
+.ink { fill: #0b0b0b; } .muted { fill: #52514e; }
+.series-1 { stroke: #2a78d6; fill: none; stroke-width: 2; }
+.series-2 { stroke: #eb6834; fill: none; stroke-width: 2; }
+.swatch-1 { fill: #2a78d6; } .swatch-2 { fill: #eb6834; }
+.bar { fill: #2a78d6; } .hit { fill: transparent; }
+.hit:hover { fill: #52514e; fill-opacity: 0.12; }
+text { font-family: sans-serif; }
+@media (prefers-color-scheme: dark) {
+  .surface { fill: #1a1a19; } .frame { stroke: #3a3a37; } .reference { stroke: #6f6e69; }
+  .ink { fill: #f0efec; } .muted { fill: #c3c2b7; }
+  .series-1 { stroke: #3987e5; } .series-2 { stroke: #d95926; }
+  .swatch-1, .bar { fill: #3987e5; } .swatch-2 { fill: #d95926; }
+}
+"""
+_SVG_LEFT, _SVG_WIDTH, _SVG_PANEL_WIDTH = 80, 1000, 860
+_MISSING_LINE_BREAK_DAYS = 10
+
+
+def _polyline(
+    days: list[int], values: list[Decimal | None], x_of: Any, y_of: Any, css: str,
+) -> str:
+    """Draw connected runs; a long unobserved stretch breaks the line instead of bridging it."""
+    runs: list[list[str]] = [[]]
+    previous: int | None = None
+    for day, value in zip(days, values):
+        if value is None:
+            continue
+        if previous is not None and day - previous > _MISSING_LINE_BREAK_DAYS:
+            runs.append([])
+        runs[-1].append(f"{x_of(day):.1f},{y_of(value):.1f}")
+        previous = day
+    return "".join(
+        f'<polyline class="{css}" points="{" ".join(run)}"/>' for run in runs if len(run) > 1
     )
 
 
 def _svg(symbol: str, rows: list[DatasetRow], status: str) -> str:
-    closes = [Decimal(item.close) for item in rows]
-    volumes = [item.volume for item in rows]
-    ema_values = [Decimal(item.ema20) for item in rows if item.ema20 is not None]
-    rsi_values = [Decimal(item.rsi14) for item in rows if item.rsi14 is not None]
-    macd_values = [Decimal(item.macd_12_26) for item in rows if item.macd_12_26 is not None]
-    width, height = 1000, 780
-    labels = " ".join(item.trading_date for item in rows)
-    price_points = _points(closes, 80, 80, 840, 190)
-    ema_points = _points(ema_values, 80, 80, 840, 190)
-    max_volume = max(volumes, default=1)
-    bars = []
-    for index, volume in enumerate(volumes):
-        x = 80 + index * 840 / max(1, len(volumes))
-        bar_height = 130 * volume / max_volume
-        bars.append(
-            f'<rect x="{x:.2f}" y="{450 - bar_height:.2f}" width="{max(4, 700 / max(1, len(volumes))):.2f}" height="{bar_height:.2f}" fill="#6384b8"/>'
+    panel_height, gap = 130, 42
+    tops = [90 + index * (panel_height + gap) for index in range(4)]
+    height = tops[-1] + panel_height + 70
+    ordinals = [date.fromisoformat(item.trading_date).toordinal() for item in rows]
+    first, last = ordinals[0], ordinals[-1]
+    span = max(1, last - first)
+
+    def x_of(day: int) -> float:
+        return _SVG_LEFT + (day - first) * _SVG_PANEL_WIDTH / span
+
+    def scale(values: list[Decimal], top: int) -> Any:
+        low, high = min(values), max(values)
+        extent = high - low or Decimal(1)
+        return lambda value: top + panel_height - float((value - low) / extent) * panel_height
+
+    def number(value: str | None) -> Decimal | None:
+        return Decimal(value) if value is not None else None
+
+    def bounds(values: list[Decimal], top: int) -> str:
+        return (
+            f'<text class="muted" x="{_SVG_LEFT - 6}" y="{top + 10}" font-size="11" text-anchor="end">{max(values):.2f}</text>'
+            f'<text class="muted" x="{_SVG_LEFT - 6}" y="{top + panel_height}" font-size="11" text-anchor="end">{min(values):.2f}</text>'
         )
-    insufficient = (
-        f"EMA20 unavailable: {len(rows)}/20 observations; "
-        f"RSI14 unavailable: {len(rows)}/15; MACD signal unavailable: {len(rows)}/34"
-    )
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
-<rect width="100%" height="100%" fill="#fafafa"/>
-<text x="50" y="36" font-family="sans-serif" font-size="24">{escape(symbol)} local exploratory view</text>
-<text x="50" y="60" font-family="sans-serif" font-size="13" fill="#9b2c2c">{escape(status)}</text>
-<text x="80" y="78" font-family="sans-serif" font-size="14">Close and EMA20</text>
-<rect x="80" y="80" width="840" height="190" fill="#fff" stroke="#bbb"/>
-<polyline points="{price_points}" fill="none" stroke="#1f5d8f" stroke-width="3"/>
-<polyline points="{ema_points}" fill="none" stroke="#d97706" stroke-width="2"/>
-<text x="80" y="300" font-family="monospace" font-size="12">dates: {escape(labels)}</text>
-<text x="80" y="318" font-family="sans-serif" font-size="13">Volume</text>
-<rect x="80" y="320" width="840" height="130" fill="#fff" stroke="#bbb"/>{''.join(bars)}
-<text x="80" y="485" font-family="sans-serif" font-size="13">RSI14</text>
-<rect x="80" y="490" width="840" height="90" fill="#fff" stroke="#bbb"/>
-<text x="95" y="540" font-family="sans-serif" font-size="14">{escape('available' if rsi_values else insufficient)}</text>
-<text x="80" y="620" font-family="sans-serif" font-size="13">MACD (12,26,9)</text>
-<rect x="80" y="625" width="840" height="90" fill="#fff" stroke="#bbb"/>
-<text x="95" y="675" font-family="sans-serif" font-size="14">{escape('available' if macd_values else insufficient)}</text>
-<text x="80" y="752" font-family="sans-serif" font-size="12">No missing-date explanation, adjustment, prediction, or trading signal is inferred.</text>
-</svg>
-'''
+
+    def legend(top: int, names: tuple[str, ...]) -> str:
+        if len(names) < 2:
+            return ""
+        return "".join(
+            f'<rect class="swatch-{index}" x="{720 + (index - 1) * 110}" y="{top - 15}" width="10" height="10" rx="2"/>'
+            f'<text class="muted" x="{735 + (index - 1) * 110}" y="{top - 6}" font-size="12">{escape(name)}</text>'
+            for index, name in enumerate(names, 1)
+        )
+
+    closes = [Decimal(item.close) for item in rows]
+    ema = [number(item.ema20) for item in rows]
+    rsi = [number(item.rsi14) for item in rows]
+    macd = [number(item.macd_12_26) for item in rows]
+    signal = [number(item.macd_signal_9) for item in rows]
+    insufficient = {
+        "ema": f"EMA20 unavailable: {len(rows)}/20 observations",
+        "rsi": f"RSI14 unavailable: {len(rows)}/15 observations",
+        "macd": f"MACD signal unavailable: {len(rows)}/34 observations",
+    }
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{_SVG_WIDTH}" height="{height}" viewBox="0 0 {_SVG_WIDTH} {height}">',
+        f"<style>{_SVG_STYLE}</style>",
+        f'<rect class="surface" width="{_SVG_WIDTH}" height="{height}"/>',
+        f'<text class="ink" x="{_SVG_LEFT}" y="34" font-size="22">{escape(symbol)} local exploratory view</text>',
+        f'<text class="muted" x="{_SVG_LEFT}" y="56" font-size="13">{escape(status)}; {len(rows)} validated observations, {escape(rows[0].trading_date)} to {escape(rows[-1].trading_date)}. Unadjusted prices.</text>',
+    ]
+    titles = ("Close and EMA20", "Volume", "RSI14", "MACD (12,26) and signal (9)")
+    series_names: tuple[tuple[str, ...], ...] = (("Close", "EMA20"), ("Volume",), ("RSI14",), ("MACD", "Signal"))
+    for top, title, names in zip(tops, titles, series_names):
+        parts.append(f'<text class="ink" x="{_SVG_LEFT}" y="{top - 6}" font-size="13">{escape(title)}</text>')
+        parts.append(legend(top, names))
+        parts.append(f'<rect class="frame" x="{_SVG_LEFT}" y="{top}" width="{_SVG_PANEL_WIDTH}" height="{panel_height}"/>')
+
+    price_values = closes + [item for item in ema if item is not None]
+    price_y = scale(price_values, tops[0])
+    parts.append(bounds(price_values, tops[0]))
+    parts.append(_polyline(ordinals, list(closes), x_of, price_y, "series-1"))
+    if any(item is not None for item in ema):
+        parts.append(_polyline(ordinals, ema, x_of, price_y, "series-2"))
+    else:
+        parts.append(f'<text class="muted" x="{_SVG_LEFT + 12}" y="{tops[0] + 20}" font-size="13">{escape(insufficient["ema"])}</text>')
+
+    max_volume = max(max(item.volume for item in rows), 1)
+    bar_width = max(1.0, min(6.0, _SVG_PANEL_WIDTH / max(1, span) * 0.6))
+    for day, item in zip(ordinals, rows):
+        bar = panel_height * item.volume / max_volume
+        parts.append(f'<rect class="bar" x="{x_of(day) - bar_width / 2:.1f}" y="{tops[1] + panel_height - bar:.1f}" width="{bar_width:.1f}" height="{bar:.1f}"/>')
+    parts.append(f'<text class="muted" x="{_SVG_LEFT - 6}" y="{tops[1] + 10}" font-size="11" text-anchor="end">{max_volume:,}</text>')
+
+    rsi_available = [item for item in rsi if item is not None]
+    if rsi_available:
+        limits = [Decimal(0), Decimal(100)]
+        rsi_y = scale(limits, tops[2])
+        parts.append(bounds(limits, tops[2]))
+        for level in (30, 70):
+            y = rsi_y(Decimal(level))
+            parts.append(f'<line class="reference" x1="{_SVG_LEFT}" x2="{_SVG_LEFT + _SVG_PANEL_WIDTH}" y1="{y:.1f}" y2="{y:.1f}"/>')
+        parts.append(_polyline(ordinals, rsi, x_of, rsi_y, "series-1"))
+    else:
+        parts.append(f'<text class="muted" x="{_SVG_LEFT + 12}" y="{tops[2] + 20}" font-size="13">{escape(insufficient["rsi"])}</text>')
+
+    macd_available = [item for item in macd + signal if item is not None]
+    if macd_available:
+        macd_y = scale(macd_available + [Decimal(0)], tops[3])
+        parts.append(bounds(macd_available + [Decimal(0)], tops[3]))
+        zero = macd_y(Decimal(0))
+        parts.append(f'<line class="reference" x1="{_SVG_LEFT}" x2="{_SVG_LEFT + _SVG_PANEL_WIDTH}" y1="{zero:.1f}" y2="{zero:.1f}"/>')
+        parts.append(_polyline(ordinals, macd, x_of, macd_y, "series-1"))
+        parts.append(_polyline(ordinals, signal, x_of, macd_y, "series-2"))
+    if not any(item is not None for item in signal):
+        parts.append(f'<text class="muted" x="{_SVG_LEFT + 12}" y="{tops[3] + 20}" font-size="13">{escape(insufficient["macd"])}</text>')
+
+    axis_y = tops[-1] + panel_height + 16
+    first_date, last_date = date.fromordinal(first), date.fromordinal(last)
+    for year in range(first_date.year + 1, last_date.year + 1):
+        x = x_of(date(year, 1, 1).toordinal())
+        parts.append(f'<text class="muted" x="{x:.1f}" y="{axis_y}" font-size="11" text-anchor="middle">{year}</text>')
+    if first_date.year == last_date.year:
+        parts.append(f'<text class="muted" x="{_SVG_LEFT}" y="{axis_y}" font-size="11">{first_date.isoformat()}</text>')
+        parts.append(f'<text class="muted" x="{_SVG_LEFT + _SVG_PANEL_WIDTH}" y="{axis_y}" font-size="11" text-anchor="end">{last_date.isoformat()}</text>')
+    parts.append(f'<text class="muted" x="{_SVG_LEFT}" y="{axis_y + 26}" font-size="12">No missing-date explanation, adjustment, prediction, or trading signal is inferred.</text>')
+
+    column = max(2.0, _SVG_PANEL_WIDTH / max(1, span))
+    for day, item in zip(ordinals, rows):
+        detail = (
+            f"{item.trading_date} close {item.close} volume {item.volume:,}"
+            f" EMA20 {item.ema20 or 'n/a'} RSI14 {item.rsi14 or 'n/a'}"
+            f" MACD {item.macd_12_26 or 'n/a'} signal {item.macd_signal_9 or 'n/a'}"
+        )
+        parts.append(
+            f'<rect class="hit" x="{x_of(day) - column / 2:.1f}" y="{tops[0]}" width="{column:.1f}" '
+            f'height="{tops[-1] + panel_height - tops[0]}"><title>{escape(detail)}</title></rect>'
+        )
+    parts.append("</svg>\n")
+    return "".join(parts)
+
+
+def _symbol_quality(
+    symbol: str, rows: list[DatasetRow], sessions: list[str],
+    published_windows: int, expected_windows: int | None, non_accepted: int,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Describe one symbol against observed sessions; causes stay UNKNOWN by contract."""
+    flags: list[dict[str, str]] = []
+    observed = {item.trading_date for item in rows}
+    first = rows[0].trading_date if rows else None
+    last = rows[-1].trading_date if rows else None
+    before = after = within = longest = run = 0
+    for session in sessions:
+        if first is None or session < first:
+            before += first is not None
+        elif session > last:
+            after += 1
+        elif session in observed:
+            run = 0
+        else:
+            within += 1
+            run += 1
+            longest = max(longest, run)
+    zero_volume = flat = moves = 0
+    previous: Decimal | None = None
+    for item in rows:
+        close = Decimal(item.close)
+        if item.volume == 0:
+            zero_volume += 1
+            flags.append({"symbol": symbol, "trading_date": item.trading_date, "code": "ZERO_VOLUME", "value": "0"})
+        if item.open == item.high == item.low == item.close:
+            flat += 1
+            flags.append({"symbol": symbol, "trading_date": item.trading_date, "code": "FLAT_OHLC", "value": item.close})
+        if previous is not None and abs(close / previous - 1) >= LARGE_CLOSE_MOVE:
+            moves += 1
+            flags.append({
+                "symbol": symbol, "trading_date": item.trading_date,
+                "code": "LARGE_CLOSE_MOVE", "value": _decimal(close / previous - 1),
+            })
+        previous = close
+    count = len(rows)
+    return {
+        "symbol": symbol, "observed_candles": count,
+        "first_observed_date": first, "last_observed_date": last,
+        "published_windows": published_windows,
+        "collector_windows_absent": (
+            expected_windows - published_windows if expected_windows is not None else None
+        ),
+        "non_accepted_segments": non_accepted,
+        "observed_sessions_before_first": before, "observed_sessions_after_last": after,
+        "unobserved_sessions_within_span": within, "longest_unobserved_run": longest,
+        "zero_volume_candles": zero_volume, "flat_ohlc_candles": flat, "large_close_moves": moves,
+        "ema20_available": count >= EMA_PERIOD, "rsi14_available": count > RSI_PERIOD,
+        "macd_available": count >= MACD_SLOW,
+        "macd_signal_available": count >= MACD_SLOW + MACD_SIGNAL - 1,
+    }, flags
+
+
+def _write_csv(path: Path, fields: Iterable[str], rows: Iterable[dict[str, Any]]) -> None:
+    with path.open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(fields), lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _exploration(symbol: str, rows: list[DatasetRow], blockers: list[str]) -> dict[str, Any]:
@@ -266,8 +447,13 @@ def _exploration(symbol: str, rows: list[DatasetRow], blockers: list[str]) -> di
 def build_readiness_run(
     *, raw_root: Path, master: Path, output_root: Path,
     exploration_symbols: tuple[str, ...] = ("RELIANCE-EQ", "TCS-EQ"),
+    collector_windows: tuple[tuple[str, str], ...] | None = None,
 ) -> Path:
-    """Validate local publications and publish a checksum-bound derived run."""
+    """Validate local publications and publish a checksum-bound derived run.
+
+    With ``collector_windows``, other segments stay inventoried and hashed but
+    contribute no candles, so an overlapping sample cannot contaminate the dataset.
+    """
     raw_root = Path(raw_root).resolve()
     master = Path(master).resolve()
     output_root = Path(output_root).resolve()
@@ -287,6 +473,9 @@ def build_readiness_run(
     issues: list[dict[str, Any]] = []
     rows_by_key: dict[tuple[str, str], DatasetRow] = {}
     symbol_ranges: dict[str, list[tuple[str, str]]] = {}
+    published_windows: dict[str, int] = {}
+    non_accepted: dict[str, int] = {}
+    allowed_windows = set(collector_windows) if collector_windows is not None else None
     for symbol_dir in sorted(raw_root.iterdir(), key=lambda item: item.name):
         if symbol_dir.name == ".stock-gplm-m24.lock":
             continue
@@ -322,11 +511,18 @@ def build_readiness_run(
                 ],
             }
             segments.append(segment)
+            if allowed_windows is not None and (
+                (report.segment_start, report.segment_end) not in allowed_windows
+            ):
+                segment["excluded"] = "OUTSIDE_COLLECTOR_WINDOWS"
+                continue
+            published_windows[symbol] = published_windows.get(symbol, 0) + 1
             if report.segment_start and report.segment_end:
                 symbol_ranges.setdefault(symbol, []).append(
                     (report.segment_start, report.segment_end)
                 )
             if report.disposition != "ACCEPT":
+                non_accepted[symbol] = non_accepted.get(symbol, 0) + 1
                 issues.append({"code": "SEGMENT_NOT_ACCEPTED", "path": segment["source"]})
                 continue
             for candle in report.content_quality.normalized_candles:
@@ -353,6 +549,59 @@ def build_readiness_run(
         grouped[symbol] = _with_indicators(sorted(rows, key=lambda item: item.trading_date))
     all_rows = [row for symbol in sorted(grouped) for row in grouped[symbol]]
 
+    # The union of observed dates is a comparison set, never a proof of market sessions.
+    symbols_by_date: dict[str, int] = {}
+    for row in all_rows:
+        symbols_by_date[row.trading_date] = symbols_by_date.get(row.trading_date, 0) + 1
+    sessions = sorted(symbols_by_date)
+    expected_windows = len(allowed_windows) if allowed_windows is not None else None
+    symbol_quality: dict[str, dict[str, Any]] = {}
+    ohlcv_flags: list[dict[str, str]] = []
+    for symbol in sorted(current_symbols):
+        quality, flags = _symbol_quality(
+            symbol, grouped.get(symbol, []), sessions, published_windows.get(symbol, 0),
+            expected_windows, non_accepted.get(symbol, 0),
+        )
+        symbol_quality[symbol] = quality
+        ohlcv_flags.extend(flags)
+    window_coverage: list[dict[str, Any]] = []
+    for start, end in sorted(allowed_windows or ()):
+        in_window = [
+            item for item in segments
+            if (item["requested_start"], item["requested_end"]) == (start, end)
+        ]
+        window_coverage.append({
+            "start_date": start, "end_date": end, "segments": len(in_window),
+            "accepted_segments": sum(item["disposition"] == "ACCEPT" for item in in_window),
+            "records": sum(item["records"] or 0 for item in in_window),
+        })
+    with_candles = [item for item in symbol_quality.values() if item["observed_candles"]]
+    universe = {
+        "current_eq_symbols": len(current_symbols),
+        "symbols_with_validated_candles": len(with_candles),
+        "symbols_without_validated_candles": len(current_symbols) - len(with_candles),
+        "symbols_with_all_collector_windows": (
+            sum(item["collector_windows_absent"] == 0 for item in symbol_quality.values())
+            if expected_windows is not None else None
+        ),
+        "symbols_with_rsi14": sum(item["rsi14_available"] for item in with_candles),
+        "symbols_with_ema20": sum(item["ema20_available"] for item in with_candles),
+        "symbols_with_macd_signal": sum(item["macd_signal_available"] for item in with_candles),
+        "symbols_without_unobserved_sessions_in_span": sum(
+            item["unobserved_sessions_within_span"] == 0 for item in with_candles
+        ),
+        "observed_session_dates": len(sessions),
+        "first_observed_session": sessions[0] if sessions else None,
+        "last_observed_session": sessions[-1] if sessions else None,
+        "observed_session_classification": "EMPIRICAL_UNION_NOT_AUTHORITATIVE",
+        "unobserved_session_classification": "UNKNOWN",
+        "ohlcv_flag_counts": {
+            code: sum(item["code"] == code for item in ohlcv_flags)
+            for code in ("ZERO_VOLUME", "FLAT_OHLC", "LARGE_CLOSE_MOVE")
+        },
+        "ohlcv_flag_classification": "UNREPAIRED_CAUSE_UNKNOWN",
+    }
+
     coverage: list[dict[str, Any]] = []
     for symbol in exploration_symbols:
         rows = grouped.get(symbol, [])
@@ -375,6 +624,7 @@ def build_readiness_run(
             "last_observed_date": rows[-1].trading_date if rows else None,
             "unobserved_dates_within_published_ranges": sorted(set(unknown_dates)),
             "unobserved_date_classification": "UNKNOWN",
+            "observed_session_comparison": symbol_quality[symbol],
             "current_master_membership": True,
             "point_in_time_membership": "NOT_ESTABLISHED",
             "market_session_validation": "NOT_EVALUATED_NO_CALENDAR",
@@ -388,6 +638,7 @@ def build_readiness_run(
         "pipeline_version": PIPELINE_VERSION,
         "inputs": sorted(input_hashes.items()),
         "exploration_symbols": exploration_symbols,
+        "collector_windows": sorted(allowed_windows) if allowed_windows is not None else None,
     }
     run_id = _canonical_hash(binding)
     final_dir = output_root / run_id
@@ -402,15 +653,31 @@ def build_readiness_run(
             "symbols_with_validated_candles": len(grouped),
             "zero_validated_candle_symbols": len(current_symbols - set(grouped)),
             "validated_candles": len(all_rows),
-            "accepted_segments": sum(item["disposition"] == "ACCEPT" for item in segments),
+            "accepted_segments": sum(
+                item["disposition"] == "ACCEPT" and "excluded" not in item for item in segments
+            ),
+            "excluded_segments": [item["source"] for item in segments if "excluded" in item],
             "raw_files": len(input_hashes) - 1, "segments": segments, "issues": issues,
         })
         _write_json(partial / "coverage-quality.json", {
             "schema_version": 1, "decision": "INCOMPLETE",
             "raw_candle_acceptance": "ACCEPT" if segments and not issues else "REVIEW",
             "historical_completeness": "INCOMPLETE",
-            "training_readiness": "NOT_READY", "coverage": coverage,
+            "training_readiness": "NOT_READY", "universe": universe,
+            "window_coverage": window_coverage, "coverage": coverage,
         })
+        _write_csv(partial / "symbol-coverage.csv", COVERAGE_FIELDS, (
+            symbol_quality[symbol] for symbol in sorted(symbol_quality)
+        ))
+        _write_csv(partial / "ohlcv-flags.csv", ("symbol", "trading_date", "code", "value"), ohlcv_flags)
+        _write_csv(partial / "observed-sessions.csv", ("trading_date", "weekday", "symbols_observed"), (
+            {
+                "trading_date": session,
+                "weekday": date.fromisoformat(session).strftime("%a"),
+                "symbols_observed": symbols_by_date[session],
+            }
+            for session in sessions
+        ))
         fields = list(DatasetRow.__dataclass_fields__)
         with (partial / "research-dataset.csv").open("x", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields, lineterminator="\n")
@@ -439,7 +706,7 @@ def build_readiness_run(
             if _sha256(Path(path_text)) != expected:
                 raise RuntimeError(f"immutable input changed during M3 run: {path_text}")
         output_hashes = {
-            path.name: _sha256(path) for path in sorted(partial.iterdir()) if path.is_file()
+            path.name: _stream_sha256(path) for path in sorted(partial.iterdir()) if path.is_file()
         }
         _write_json(partial / "run-manifest.json", {
             **binding, "run_id": run_id, "input_sha256": input_hashes,
