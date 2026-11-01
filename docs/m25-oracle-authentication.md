@@ -102,9 +102,13 @@ TOTP rollover, timeout, missing redirect or ambiguous click result.
   returned without redirect and declared `<title>SHOONYA</title>`; it did not
   verify the rendered SPA controls.
 - Selenium and Chrome run in a dedicated process group. A stalled WebDriver
-  command is never retried. The parent terminates the whole group, first with
-  `SIGTERM` and then `SIGKILL` within the cleanup allowance, so no later command
-  targets an unresolved session.
+  command is never retried. Before Selenium may start, the worker closes its
+  inherited lifecycle-writer FD, completes `setsid()`, starts a watchdog, and
+  receives a reverse acknowledgement that the parent observed `pid == pgid`.
+  The watchdog terminates the whole group on worker death or parent-pipe EOF;
+  both watchdog and parent enforce `SIGKILL` after the bounded `SIGTERM` grace.
+  Cleanup returns only after the process group is proven absent, so no later
+  command targets an unresolved session and no Chrome descendant is left behind.
 - The hosted login form can take about 90 s to render on the CPU-throttled Oracle
   VM. Page-load strategy `none` and a 150 s complete-form wait remain bounded;
   `browser_timeout_seconds` is capped at 90 s for fill, one submission and redirect.
@@ -124,7 +128,8 @@ overhead.
 | Phase | Maximum |
 | --- | ---: |
 | Exclusive authentication lock | 30 s |
-| ChromeDriver/Chrome startup | 30 s |
+| Process-group/watchdog handshake | 5 s |
+| ChromeDriver/Chrome startup | 25 s |
 | Exact page and complete-control readiness | 150 s |
 | TOTP alignment, one submission and redirect observation | 90 s |
 | Browser process-group cleanup | 10 s |

@@ -11,7 +11,7 @@ scheduler or production change. All authentication evidence is synthetic.
 | Duplicate submission after ambiguity | Linear state machine advances a guarded counter to one before the click begins. Any click/observation timeout or absent redirect is `AUTH_OUTCOME_AMBIGUOUS`. | Every attempt executes zero or one submit command; adversarial click timeout and missing-code tests observe exactly one. |
 | Unverified login destination | Login is fixed to `https://api.shoonya.com/OAuthlogin/investor-entry-level/login`. Origin, portless path, title marker and input/button identity are checked before credentials and again inside fill/click scripts. | Unexpected origin/path/title/control identity fails before fill or click. |
 | Partial control readiness | All three expected typed inputs and the sole `LOGIN` button must be present, visible, enabled, non-read-only, pointer-enabled, in the viewport, unobscured at center and have nonzero geometry. | A disabled/noninteractable input or button prevents all credential entry. |
-| Overlapping WebDriver commands | Selenium owns a separate Linux process group. Completed not-ready polls may repeat; any unresolved command abandons the group and never issues another WebDriver command. | A stalled command reaches its bound, receives no follow-up command, and the parent performs bounded group termination. |
+| Overlapping WebDriver commands | Selenium owns a separate Linux process group. A watchdog observes both worker death and parent lifecycle-pipe EOF. A two-way handshake prohibits Selenium startup until `setsid()` and `pid == pgid` are parent-verified. Completed not-ready polls may repeat; any unresolved command abandons the group and never issues another WebDriver command. | Real Linux subprocess tests prove worker-exit cleanup, parent cleanup of a SIGTERM-resistant descendant, parent death after readiness, and parent death before `setsid()`. Cleanup verifies the process group no longer exists. |
 | Incomplete wall-clock bounds | The browser worker bounds startup, readiness, authentication and cleanup. Provider POSTs force explicit connect/read timeouts. A POSIX real-time timer caps the whole authentication attempt. | Phase constants, provider tuple and the 360 s application deadline are asserted by tests. |
 | Undersized systemd timeout | `TimeoutStartSec=390`, `TimeoutStopSec=30`, `KillMode=control-group`, and `SendSIGKILL=yes`. | The start ceiling exceeds the 360 s application bound by 30 s and descendants remain in the kill scope. |
 | Security-control regression risk | No `--no-sandbox`; AppArmor template, encrypted `LoadCredentialEncrypted`, unit hardening, cache/audit permissions and sensitive-field redaction are retained. | Regression suite covers redaction/credential permissions; source check rejects `--no-sandbox`; unit controls remain present. |
@@ -19,8 +19,9 @@ scheduler or production change. All authentication evidence is synthetic.
 ## Exact timeout budget
 
 - Lock: at most 30 s.
-- Browser: at most 280 s total, comprising 30 s startup, 150 s complete-page
-  readiness, 90 s single-submission/redirect phase, and 10 s cleanup allowance.
+- Browser: at most 280 s total, comprising a 5 s process-group/watchdog
+  handshake, 25 s ChromeDriver startup, 150 s complete-page readiness, 90 s
+  single-submission/redirect phase, and 10 s cleanup allowance.
 - Provider exchange: explicit 5 s connect and 15 s read timeout.
 - Provider validation: explicit 5 s connect and 15 s read timeout.
 - Whole application authentication attempt: hard 360 s real-time deadline. This
@@ -37,7 +38,7 @@ or live authentication.
 
 Local verification on the feature worktree:
 
-- `.venv/bin/python -m pytest`: **198 passed**.
+- `.venv/bin/python -m pytest`: **202 passed**.
 - `.venv/bin/python -m compileall -q src tests`: **passed**.
 - Gitleaks **8.30.1**, downloaded from the official release and matched against
   its published checksum: `git` scan **no leaks found**; `dir` scan including
@@ -60,6 +61,11 @@ Local verification on the feature worktree:
   The result remains intentionally ambiguous and requires operator investigation;
   automated retry is forbidden.
 - POSIX `SIGALRM`, `fork`, process groups and group signals make this Linux-only.
+- The guarantee covers Chrome/ChromeDriver descendants that remain in the
+  worker's inherited process group. A future browser/driver version that
+  deliberately creates a new session or moves itself to another process group
+  would require a cgroup-level assertion during the Oracle offline preflight;
+  systemd `KillMode=control-group` remains the outer deployment safeguard.
 - Requests connect/read timeouts are not authenticity proof and a peer can extend
   a read by continuously delivering bytes. The independent 360 s deadline is the
   final wall-clock bound.

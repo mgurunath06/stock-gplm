@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import select
+import signal
 import stat
 import time
 from types import SimpleNamespace
@@ -14,12 +16,12 @@ import stock_gplm.m25.browser as browser_module
 from stock_gplm.m25.browser import (
     BROWSER_CLEANUP_TIMEOUT_SECONDS, BROWSER_TOTAL_TIMEOUT_SECONDS,
     CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS, PAGE_READY_TIMEOUT_SECONDS, _command,
-    SeleniumOAuthBrowser, authenticate_once, capture_authorization_code,
-    extract_authorization_code, wait_for_login_form,
+    authenticate_once, capture_authorization_code, extract_authorization_code,
+    wait_for_login_form,
 )
 from stock_gplm.m25.credentials import FileCredentialProvider, _private_permissions
 from stock_gplm.m25.errors import (
-    AmbiguousAuthenticationOutcome, BrowserPageNotReady, BrowserSessionUnresolved, LoginRequired,
+    AmbiguousAuthenticationOutcome, BrowserPageNotReady, LoginRequired,
     OperationDeadlineExceeded, ProviderTimeout, SecurityBoundaryError,
     ValidationInconclusive,
 )
@@ -58,6 +60,147 @@ def _credentials(tmp_path: Path) -> FileCredentialProvider:
         path.write_text(value + "\n", encoding="utf-8")
         path.chmod(0o600)
     return FileCredentialProvider(directory)
+
+
+def _read_process_report(descriptor: int, timeout: float = 3.0) -> tuple[int, int, int]:
+    readable, _, _ = select.select([descriptor], [], [], timeout)
+    if not readable:
+        raise AssertionError("lifecycle subprocess did not report readiness")
+    raw = os.read(descriptor, 128)
+    if not raw:
+        raise AssertionError("lifecycle subprocess exited before reporting readiness")
+    worker, descendant, process_group = (int(item) for item in raw.decode("ascii").split())
+    return worker, descendant, process_group
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        status = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return False
+    state = status.rsplit(")", 1)[1].strip().split()[0]
+    return state != "Z"
+
+
+def _wait_for_group_cleanup(
+    worker: int,
+    descendant: int,
+    process_group: int,
+    timeout: float = 8.0,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (
+            not _pid_is_running(worker)
+            and not _pid_is_running(descendant)
+            and not browser_module._process_group_exists(process_group)
+        ):
+            return
+        time.sleep(0.02)
+    raise AssertionError("watchdog left a worker process group running")
+
+
+def _lifecycle_worker_process(
+    lifecycle_read_fd: int,
+    lifecycle_write_fd: int,
+    report_write_fd: int,
+    ignore_sigterm: bool,
+    exit_worker: bool,
+) -> None:
+    process_group, _watchdog_pid = browser_module._establish_process_group_lifecycle(
+        lifecycle_read_fd,
+        lifecycle_write_fd,
+        inherited_fds=(report_write_fd,),
+    )
+    descendant = os.fork()
+    if descendant == 0:
+        _close_test_fd(report_write_fd)
+        if ignore_sigterm:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        while True:
+            signal.pause()
+    os.write(
+        report_write_fd,
+        f"{os.getpid()} {descendant} {process_group}".encode("ascii"),
+    )
+    _close_test_fd(report_write_fd)
+    if exit_worker:
+        os._exit(0)
+    while True:
+        signal.pause()
+
+
+def _close_test_fd(descriptor: int) -> None:
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _premature_parent_process(report_write_fd: int) -> None:
+    lifecycle_read_fd, lifecycle_write_fd = os.pipe2(os.O_CLOEXEC)
+    inner_read_fd, inner_write_fd = os.pipe2(os.O_CLOEXEC)
+    worker = os.fork()
+    if worker == 0:
+        _close_test_fd(inner_read_fd)
+        _close_test_fd(report_write_fd)
+        _lifecycle_worker_process(
+            lifecycle_read_fd,
+            lifecycle_write_fd,
+            inner_write_fd,
+            True,
+            False,
+        )
+        os._exit(127)
+    _close_test_fd(lifecycle_read_fd)
+    _close_test_fd(inner_write_fd)
+    try:
+        reported_worker, descendant, process_group = _read_process_report(inner_read_fd)
+        if reported_worker != worker:
+            os._exit(126)
+        os.write(
+            report_write_fd,
+            f"{worker} {descendant} {process_group}".encode("ascii"),
+        )
+    finally:
+        _close_test_fd(inner_read_fd)
+        _close_test_fd(report_write_fd)
+    # Holding lifecycle_write_fd represents the live service parent. The test
+    # kills this process with SIGKILL; kernel FD closure must trigger cleanup.
+    while True:
+        signal.pause()
+
+
+def _startup_race_parent_process(report_write_fd: int) -> None:
+    """Delay the worker before setsid so the service parent dies in that window."""
+    lifecycle_read_fd, lifecycle_write_fd = os.pipe2(os.O_CLOEXEC)
+    worker = os.fork()
+    if worker == 0:
+        time.sleep(0.25)
+        process_group, _watchdog_pid = browser_module._establish_process_group_lifecycle(
+            lifecycle_read_fd,
+            lifecycle_write_fd,
+            inherited_fds=(report_write_fd,),
+        )
+        descendant = os.fork()
+        if descendant == 0:
+            _close_test_fd(report_write_fd)
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            while True:
+                signal.pause()
+        os.write(
+            report_write_fd,
+            f"D {worker} {descendant} {process_group}\n".encode("ascii"),
+        )
+        _close_test_fd(report_write_fd)
+        while True:
+            signal.pause()
+    _close_test_fd(lifecycle_read_fd)
+    os.write(report_write_fd, f"S {worker}\n".encode("ascii"))
+    _close_test_fd(report_write_fd)
+    # Keep only lifecycle_write_fd open until the test kills this parent.
+    while True:
+        signal.pause()
 
 
 class FakeApi:
@@ -533,17 +676,156 @@ def test_browser_command_stall_expires_without_second_command():
     assert calls == ["started"]
 
 
-def test_stalled_browser_worker_is_killed_at_outer_deadline(monkeypatch, tmp_path):
-    def stalled_worker(_connection, _config, _credentials):
-        os.setsid()
-        time.sleep(10)
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux process lifecycle test")
+@pytest.mark.parametrize("ignore_sigterm", (False, True))
+def test_worker_exit_reaps_real_descendants_including_sigterm_resistant(ignore_sigterm):
+    lifecycle_read_fd, lifecycle_write_fd = os.pipe2(os.O_CLOEXEC)
+    report_read_fd, report_write_fd = os.pipe2(os.O_CLOEXEC)
+    context = browser_module.multiprocessing.get_context("fork")
+    process = context.Process(
+        target=_lifecycle_worker_process,
+        args=(
+            lifecycle_read_fd,
+            lifecycle_write_fd,
+            report_write_fd,
+            ignore_sigterm,
+            True,
+        ),
+    )
+    process.start()
+    _close_test_fd(lifecycle_read_fd)
+    _close_test_fd(report_write_fd)
+    worker = descendant = process_group = -1
+    try:
+        worker, descendant, process_group = _read_process_report(report_read_fd)
+        assert worker == process.pid == process_group
+        process.join(3)
+        assert not process.is_alive()
+        # Keep the service-parent lifecycle writer open: this specifically proves
+        # that watchdog detection of worker exit is sufficient on its own.
+        _wait_for_group_cleanup(worker, descendant, process_group)
+    finally:
+        _close_test_fd(report_read_fd)
+        _close_test_fd(lifecycle_write_fd)
+        if process_group > 0 and browser_module._process_group_exists(process_group):
+            os.killpg(process_group, signal.SIGKILL)
+        if process.is_alive():
+            process.kill()
+        process.join(1)
 
-    monkeypatch.setattr(browser_module, "_worker", stalled_worker)
-    monkeypatch.setattr(browser_module, "BROWSER_TOTAL_TIMEOUT_SECONDS", 0.01)
-    monkeypatch.setattr(browser_module, "BROWSER_CLEANUP_TIMEOUT_SECONDS", 0.1)
-    browser = SeleniumOAuthBrowser(_config(tmp_path))
-    with pytest.raises(BrowserSessionUnresolved):
-        browser.acquire_code(SimpleNamespace())
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux process lifecycle test")
+def test_parent_cleanup_kills_real_sigterm_resistant_descendant():
+    lifecycle_read_fd, lifecycle_write_fd = os.pipe2(os.O_CLOEXEC)
+    report_read_fd, report_write_fd = os.pipe2(os.O_CLOEXEC)
+    context = browser_module.multiprocessing.get_context("fork")
+    process = context.Process(
+        target=_lifecycle_worker_process,
+        args=(lifecycle_read_fd, lifecycle_write_fd, report_write_fd, True, False),
+    )
+    process.start()
+    _close_test_fd(lifecycle_read_fd)
+    _close_test_fd(report_write_fd)
+    worker = descendant = process_group = -1
+    lifecycle_open = True
+    try:
+        worker, descendant, process_group = _read_process_report(report_read_fd)
+        assert worker == process.pid == process_group
+        browser_module._terminate_process_group(
+            process,
+            lifecycle_write_fd,
+            process_group,
+        )
+        lifecycle_open = False
+        assert not _pid_is_running(worker)
+        assert not _pid_is_running(descendant)
+        assert not browser_module._process_group_exists(process_group)
+    finally:
+        _close_test_fd(report_read_fd)
+        if lifecycle_open:
+            _close_test_fd(lifecycle_write_fd)
+        if process_group > 0 and browser_module._process_group_exists(process_group):
+            os.killpg(process_group, signal.SIGKILL)
+        if process.is_alive():
+            process.kill()
+        process.join(1)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux process lifecycle test")
+def test_premature_service_parent_death_reaps_worker_and_resistant_descendant():
+    report_read_fd, report_write_fd = os.pipe2(os.O_CLOEXEC)
+    supervisor = os.fork()
+    if supervisor == 0:
+        _close_test_fd(report_read_fd)
+        _premature_parent_process(report_write_fd)
+        os._exit(127)
+
+    _close_test_fd(report_write_fd)
+    worker = descendant = process_group = -1
+    try:
+        worker, descendant, process_group = _read_process_report(report_read_fd)
+        assert worker == process_group
+        assert _pid_is_running(worker)
+        assert _pid_is_running(descendant)
+        os.kill(supervisor, signal.SIGKILL)
+        os.waitpid(supervisor, 0)
+        supervisor = -1
+        _wait_for_group_cleanup(worker, descendant, process_group)
+    finally:
+        _close_test_fd(report_read_fd)
+        if supervisor > 0:
+            try:
+                os.kill(supervisor, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(supervisor, 0)
+        if process_group > 0 and browser_module._process_group_exists(process_group):
+            os.killpg(process_group, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="Linux process lifecycle test")
+def test_parent_death_before_setsid_cannot_leave_a_process_group():
+    report_read_fd, report_write_fd = os.pipe2(os.O_CLOEXEC)
+    supervisor = os.fork()
+    if supervisor == 0:
+        _close_test_fd(report_read_fd)
+        _startup_race_parent_process(report_write_fd)
+        os._exit(127)
+
+    _close_test_fd(report_write_fd)
+    worker = descendant = -1
+    stream = os.fdopen(report_read_fd, "rb", buffering=0)
+    try:
+        readable, _, _ = select.select([stream], [], [], 3)
+        assert readable
+        first = stream.readline().decode("ascii").split()
+        assert first[0] == "S"
+        worker = int(first[1])
+        os.kill(supervisor, signal.SIGKILL)
+        os.waitpid(supervisor, 0)
+        supervisor = -1
+
+        # The delayed worker may be killed before it can spawn its probe child,
+        # or it may report the child just before the watchdog's SIGTERM. Both
+        # schedules must converge to an empty pid==pgid process group.
+        readable, _, _ = select.select([stream], [], [], 1)
+        if readable:
+            second = stream.readline().decode("ascii").split()
+            if second:
+                assert second[0] == "D"
+                assert int(second[1]) == worker == int(second[3])
+                descendant = int(second[2])
+        _wait_for_group_cleanup(worker, descendant if descendant > 0 else worker, worker)
+    finally:
+        stream.close()
+        if supervisor > 0:
+            try:
+                os.kill(supervisor, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(supervisor, 0)
+        if worker > 0 and browser_module._process_group_exists(worker):
+            os.killpg(worker, signal.SIGKILL)
 
 
 def test_authentication_wall_clock_deadline_expires():
@@ -574,10 +856,13 @@ def test_provider_transport_forces_connection_and_read_timeouts():
 def test_maximum_timeout_budget_matches_hardened_systemd_unit():
     service = Path("deploy/oracle/m25/stock-gplm-auth.service").read_text(encoding="utf-8")
     assert AUTH_OPERATION_TIMEOUT_SECONDS == 360
-    assert CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS == 30
+    assert browser_module.PROCESS_GROUP_BOOTSTRAP_TIMEOUT_SECONDS == 5
+    assert CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS == 25
     assert PAGE_READY_TIMEOUT_SECONDS == 150
     assert BROWSER_TOTAL_TIMEOUT_SECONDS == 280
     assert BROWSER_CLEANUP_TIMEOUT_SECONDS == 10
+    assert browser_module.PROCESS_GROUP_SIGTERM_GRACE_SECONDS < BROWSER_CLEANUP_TIMEOUT_SECONDS
+    assert 5 + 25 + 150 + 90 + 10 == BROWSER_TOTAL_TIMEOUT_SECONDS
     assert "TimeoutStartSec=390" in service
     assert "TimeoutStopSec=30" in service
     assert "KillMode=control-group" in service

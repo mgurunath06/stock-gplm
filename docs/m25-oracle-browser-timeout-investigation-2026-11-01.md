@@ -89,7 +89,8 @@ No revised package was built or deployed during that review. The findings are
 corrected in the local M2.5.1 feature revision documented in
 [the remediation report](m251-authentication-safety-remediation-2026-11-01.md):
 one guarded submission, exact origin/page identity, complete control readiness,
-process-group isolation for unresolved WebDriver commands, explicit provider
-timeouts, a 360 s application deadline, and a 390 s systemd start ceiling plus
-30 s termination allowance. This is synthetic evidence only. The authentication
-service and timer must remain disabled, and live OAuth remains unapproved.
+watchdog-protected process-group isolation for unresolved WebDriver commands,
+explicit provider timeouts, a 360 s application deadline, and a 390 s systemd
+start ceiling plus 30 s termination allowance. This is synthetic evidence only.
+The authentication service and timer must remain disabled, and live OAuth
+remains unapproved.

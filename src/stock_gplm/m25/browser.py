@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import select
 import signal
 import tempfile
 import time
@@ -35,10 +36,14 @@ APPROVED_HTTPS_REDIRECT_PATHS = frozenset({"/OAuthlogin/authorize/oauth"})
 
 # These phase limits form the browser portion of the documented 360-second
 # end-to-end service budget. They are constants so config cannot enlarge it.
-CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS = 30
+CHROMEDRIVER_STARTUP_TIMEOUT_SECONDS = 25
 PAGE_READY_TIMEOUT_SECONDS = 150
 BROWSER_CLEANUP_TIMEOUT_SECONDS = 10
 BROWSER_TOTAL_TIMEOUT_SECONDS = 280
+PROCESS_GROUP_BOOTSTRAP_TIMEOUT_SECONDS = 5
+PROCESS_GROUP_POLL_SECONDS = 0.05
+PROCESS_GROUP_SIGTERM_GRACE_SECONDS = 2
+PROCESS_GROUP_READY = "PROCESS_GROUP_READY"
 
 
 class AuthenticationState(Enum):
@@ -343,9 +348,152 @@ def authenticate_once(
     raise BrowserPageNotReady("Shoonya OAuth flow exceeded the authentication bound")
 
 
-def _worker(connection: Any, config: AuthConfigV1, credentials: Credentials) -> None:
-    """Own Selenium and all descendants in a disposable process group."""
+def _close_fd(descriptor: int) -> None:
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _watch_process_group(
+    lifecycle_read_fd: int,
+    ready_write_fd: int,
+    worker_pid: int,
+    process_group: int,
+    inherited_fds: tuple[int, ...],
+) -> None:
+    """Kill the complete worker group if its worker or service parent disappears."""
+    for descriptor in inherited_fds:
+        if descriptor not in {lifecycle_read_fd, ready_write_fd}:
+            _close_fd(descriptor)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        os.write(ready_write_fd, b"1")
+    finally:
+        _close_fd(ready_write_fd)
+
+    while True:
+        if os.getppid() != worker_pid:
+            break
+        readable, _, _ = select.select(
+            [lifecycle_read_fd], [], [], PROCESS_GROUP_POLL_SECONDS,
+        )
+        if readable:
+            # The service parent never writes. EOF, data, or a descriptor error
+            # is therefore a terminal lifecycle signal.
+            try:
+                os.read(lifecycle_read_fd, 1)
+            except OSError:
+                pass
+            break
+
+    _close_fd(lifecycle_read_fd)
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        os._exit(0)
+    time.sleep(PROCESS_GROUP_SIGTERM_GRACE_SECONDS)
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    # SIGKILL includes this watchdog. Reaching the exit is harmless if the
+    # process group disappeared between the two signal operations.
+    os._exit(0)
+
+
+def _establish_process_group_lifecycle(
+    lifecycle_read_fd: int,
+    lifecycle_write_fd: int,
+    *,
+    inherited_fds: tuple[int, ...] = (),
+) -> tuple[int, int]:
+    """Create a new session and a verified watchdog before any descendant starts."""
+    # The forked worker inherited the service parent's write end. Closing it is
+    # the first operation, so parent death is observable even before setsid().
+    _close_fd(lifecycle_write_fd)
     os.setsid()
+    worker_pid = os.getpid()
+    process_group = os.getpgrp()
+    if process_group != worker_pid:
+        raise BrowserSessionUnresolved("browser worker did not become its process-group leader")
+
+    ready_read_fd, ready_write_fd = os.pipe2(os.O_CLOEXEC)
+    watchdog_pid = os.fork()
+    if watchdog_pid == 0:
+        _close_fd(ready_read_fd)
+        _watch_process_group(
+            lifecycle_read_fd,
+            ready_write_fd,
+            worker_pid,
+            process_group,
+            inherited_fds,
+        )
+        os._exit(127)
+
+    _close_fd(ready_write_fd)
+    try:
+        readable, _, _ = select.select(
+            [ready_read_fd], [], [], PROCESS_GROUP_BOOTSTRAP_TIMEOUT_SECONDS,
+        )
+        if not readable or os.read(ready_read_fd, 1) != b"1":
+            raise BrowserSessionUnresolved("browser lifecycle watchdog did not become ready")
+    finally:
+        _close_fd(ready_read_fd)
+    _close_fd(lifecycle_read_fd)
+    return process_group, watchdog_pid
+
+
+def _worker(
+    connection: Any,
+    config: AuthConfigV1,
+    credentials: Credentials,
+    lifecycle_read_fd: int,
+    lifecycle_write_fd: int,
+    result_parent_fd: int,
+    bootstrap_ack_read_fd: int,
+    bootstrap_ack_write_fd: int,
+) -> None:
+    """Own Selenium and all descendants in a watchdog-protected process group."""
+    _close_fd(result_parent_fd)
+    _close_fd(bootstrap_ack_write_fd)
+    try:
+        process_group, _watchdog_pid = _establish_process_group_lifecycle(
+            lifecycle_read_fd,
+            lifecycle_write_fd,
+            inherited_fds=(
+                connection.fileno(),
+                result_parent_fd,
+                bootstrap_ack_read_fd,
+            ),
+        )
+        connection.send((PROCESS_GROUP_READY, str(process_group)))
+        readable, _, _ = select.select(
+            [bootstrap_ack_read_fd], [], [], PROCESS_GROUP_BOOTSTRAP_TIMEOUT_SECONDS,
+        )
+        if not readable or os.read(bootstrap_ack_read_fd, 1) != b"1":
+            raise BrowserSessionUnresolved("browser parent did not confirm process-group identity")
+    except BaseException:
+        try:
+            connection.send((BrowserSessionUnresolved.classification, ""))
+        except BaseException:
+            pass
+        connection.close()
+        _close_fd(bootstrap_ack_read_fd)
+        return
+    _close_fd(bootstrap_ack_read_fd)
+
     driver = None
     session_resolved = True
     result: tuple[str, str] = (BrowserSessionUnresolved.classification, "")
@@ -412,19 +560,48 @@ _ERRORS = {
 }
 
 
-def _terminate_process_group(process: multiprocessing.Process) -> None:
-    """Bound cleanup of the browser worker, ChromeDriver, and Chrome children."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-    process.join(BROWSER_CLEANUP_TIMEOUT_SECONDS / 2)
-    if process.is_alive():
+def _terminate_process_group(
+    process: multiprocessing.Process,
+    lifecycle_write_fd: int,
+    process_group: int | None,
+) -> None:
+    """Trigger watchdog cleanup, enforce SIGKILL, and prove the group is empty."""
+    deadline = time.monotonic() + BROWSER_CLEANUP_TIMEOUT_SECONDS
+    _close_fd(lifecycle_write_fd)
+
+    if process_group is None:
+        # Before PROCESS_GROUP_READY, _worker() is forbidden from spawning
+        # Selenium or any other descendant. Terminating only the worker is safe.
+        if process.is_alive():
+            process.terminate()
+        process.join(max(0.0, deadline - time.monotonic()) / 2)
+        if process.is_alive():
+            process.kill()
+        process.join(max(0.0, deadline - time.monotonic()))
+        if process.is_alive():
+            raise BrowserSessionUnresolved("unready browser worker survived forced cleanup")
+        return
+
+    # The readiness handshake proves setsid() completed and pgid == worker pid.
+    # Closing the lifecycle pipe asks the watchdog to send SIGTERM. After its
+    # grace period, both watchdog and parent independently enforce SIGKILL.
+    grace_deadline = min(
+        deadline,
+        time.monotonic() + PROCESS_GROUP_SIGTERM_GRACE_SECONDS + PROCESS_GROUP_POLL_SECONDS,
+    )
+    while _process_group_exists(process_group) and time.monotonic() < grace_deadline:
+        process.join(min(PROCESS_GROUP_POLL_SECONDS, grace_deadline - time.monotonic()))
+    if _process_group_exists(process_group):
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
             pass
-        process.join(BROWSER_CLEANUP_TIMEOUT_SECONDS / 2)
+
+    while _process_group_exists(process_group) and time.monotonic() < deadline:
+        process.join(min(PROCESS_GROUP_POLL_SECONDS, deadline - time.monotonic()))
+    process.join(max(0.0, deadline - time.monotonic()))
+    if _process_group_exists(process_group) or process.is_alive():
+        raise BrowserSessionUnresolved("browser process group did not terminate within cleanup bound")
 
 
 class SeleniumOAuthBrowser:
@@ -439,11 +616,61 @@ class SeleniumOAuthBrowser:
         except ValueError as exc:
             raise RuntimeError("M2.5 requires Linux fork isolation for Selenium") from exc
         parent, child = context.Pipe(duplex=False)
-        process = context.Process(target=_worker, args=(child, self.config, credentials))
+        lifecycle_read_fd, lifecycle_write_fd = os.pipe2(os.O_CLOEXEC)
+        bootstrap_ack_read_fd, bootstrap_ack_write_fd = os.pipe2(os.O_CLOEXEC)
+        process = context.Process(
+            target=_worker,
+            args=(
+                child,
+                self.config,
+                credentials,
+                lifecycle_read_fd,
+                lifecycle_write_fd,
+                parent.fileno(),
+                bootstrap_ack_read_fd,
+                bootstrap_ack_write_fd,
+            ),
+        )
         process.start()
         child.close()
+        _close_fd(lifecycle_read_fd)
+        _close_fd(bootstrap_ack_read_fd)
+        process_group: int | None = None
+        started = time.monotonic()
         try:
-            if not parent.poll(BROWSER_TOTAL_TIMEOUT_SECONDS):
+            bootstrap_timeout = min(
+                PROCESS_GROUP_BOOTSTRAP_TIMEOUT_SECONDS,
+                BROWSER_TOTAL_TIMEOUT_SECONDS,
+            )
+            if not parent.poll(bootstrap_timeout):
+                raise BrowserSessionUnresolved("browser process-group bootstrap timed out")
+            try:
+                classification, payload = parent.recv()
+            except (EOFError, OSError) as exc:
+                raise BrowserSessionUnresolved(
+                    "browser worker exited before its lifecycle handshake"
+                ) from exc
+            if classification != PROCESS_GROUP_READY:
+                raise BrowserSessionUnresolved("browser process-group bootstrap failed closed")
+            try:
+                process_group = int(payload)
+            except (TypeError, ValueError) as exc:
+                raise BrowserSessionUnresolved("browser worker returned an invalid process group") from exc
+            if process_group != process.pid:
+                process_group = None
+                raise BrowserSessionUnresolved("browser process-group identity did not match worker")
+            try:
+                os.write(bootstrap_ack_write_fd, b"1")
+            except OSError as exc:
+                raise BrowserSessionUnresolved(
+                    "browser process-group acknowledgment failed"
+                ) from exc
+            finally:
+                _close_fd(bootstrap_ack_write_fd)
+                bootstrap_ack_write_fd = -1
+
+            remaining = BROWSER_TOTAL_TIMEOUT_SECONDS - (time.monotonic() - started)
+            if remaining <= 0 or not parent.poll(remaining):
                 raise BrowserSessionUnresolved("isolated browser exceeded its wall-clock bound")
             try:
                 classification, payload = parent.recv()
@@ -457,4 +684,5 @@ class SeleniumOAuthBrowser:
             raise error("isolated browser authentication failed closed")
         finally:
             parent.close()
-            _terminate_process_group(process)
+            _close_fd(bootstrap_ack_write_fd)
+            _terminate_process_group(process, lifecycle_write_fd, process_group)
