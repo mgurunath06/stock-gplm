@@ -1,0 +1,7 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Replace @CHROME_BINARY@ with the canonical, root-controlled Chrome binary path.
+profile stock-gplm-m25-chrome @CHROME_BINARY@ flags=(unconfined) {
+  userns,
+}

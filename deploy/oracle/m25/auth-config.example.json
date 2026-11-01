@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "contract": "stock-gplm.m25-oracle-auth.v1",
+  "client_id": "REPLACE_CLIENT_ID",
+  "user_id": "REPLACE_USER_ID",
+  "expected_account_id": "REPLACE_ACCOUNT_ID",
+  "cache_path": "/home/ubuntu/.config/stock-gplm/shoonya_token.json",
+  "lock_path": "/home/ubuntu/.config/stock-gplm/shoonya_auth.lock",
+  "audit_path": "/home/ubuntu/.config/stock-gplm/shoonya_auth.jsonl",
+  "status_path": "/home/ubuntu/.config/stock-gplm/shoonya_auth_status.json",
+  "chrome_binary": "/usr/bin/google-chrome-stable",
+  "chromedriver_path": "/usr/bin/chromedriver",
+  "raw_roots": [
+    "/home/ubuntu/StockGPLMDownloads/data/daily",
+    "/home/ubuntu/StockGPLMDownloads/data/minute"
+  ],
+  "allowed_redirect_hosts": [
+    "api.shoonya.com",
+    "trade.shoonya.com"
+  ],
+  "cache_max_age_seconds": 82800,
+  "lock_timeout_seconds": 30,
+  "browser_timeout_seconds": 90,
+  "totp_min_valid_seconds": 8
+}

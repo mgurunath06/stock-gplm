@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "horizons": [
+    {
+      "name": "accepted-segment-window",
+      "start_date": "2026-10-01",
+      "end_date": "2026-10-07"
+    }
+  ],
+  "corporate_action_catalog": {
+    "symbol": "RELIANCE-EQ",
+    "coverage_status": "UNKNOWN",
+    "coverage_start": null,
+    "coverage_end": null,
+    "provenance": null,
+    "actions": []
+  },
+  "provider_unavailable": []
+}

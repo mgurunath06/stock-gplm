@@ -1,0 +1,44 @@
+{
+  "synthetic_only": true,
+  "based_on_sanitized_record": true,
+  "source_path_redacted": true,
+  "report": {
+    "source": "<temporary synthetic root>/data/daily/shoonya/NSE/RELIANCE-EQ/2026-10-01_2026-10-07.json.gz",
+    "symbol": "RELIANCE-EQ",
+    "segment_start": "2026-10-01",
+    "segment_end": "2026-10-07",
+    "publication_integrity": {
+      "status": "PASS",
+      "sha256": "1678a85f068c78d0da9c79cff9ba63a24e8ba8e82e68a614662a37d50b389531",
+      "compressed_bytes": 122,
+      "records": 1,
+      "metadata_quality_status": "UNVALIDATED_RAW",
+      "issues": []
+    },
+    "content_quality": {
+      "status": "PASS",
+      "schema": "ShoonyaDailyV1",
+      "schema_confirmed_from_real_sample": true,
+      "timestamp_policy": "ssboe_posix_seconds_utc_date_equals_trading_date",
+      "records_seen": 1,
+      "chronology": "undetermined",
+      "normalized_candles": [
+        {
+          "trading_date": "2026-10-07",
+          "source_timestamp_utc": "2026-10-07T00:00:00Z",
+          "open": "1212.00",
+          "high": "1220.80",
+          "low": "1203.50",
+          "close": "1207.70",
+          "volume": 11880731
+        }
+      ],
+      "issues": []
+    },
+    "publication_integrity_valid": true,
+    "content_quality_valid": true,
+    "ready_for_normalization": true,
+    "disposition": "ACCEPT",
+    "missing_history": "not assessed; absence is not a zero-volume candle and current instrument masters do not prove historical membership"
+  }
+}

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-gplm"
+version = "0.1.0"
+description = "Local, reproducible Indian equity research foundation"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+oracle-auth = ["selenium==4.52.0"]
+
+[project.scripts]
+stock-gplm = "stock_gplm.cli:main"
+stock-gplm-accept = "stock_gplm.acceptance_cli:main"
+stock-gplm-quality = "stock_gplm.m2.cli:main"
+stock-gplm-reference = "stock_gplm.m2.reference_cli:main"
+stock-gplm-master-validate = "stock_gplm.m2.master_cli:main"
+stock-gplm-inventory = "stock_gplm.m2.inventory_cli:main"
+stock-gplm-sync = "stock_gplm.m24.cli:main"
+stock-gplm-auth = "stock_gplm.m25.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

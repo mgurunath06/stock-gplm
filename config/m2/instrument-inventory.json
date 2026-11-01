@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "as_of_date": "2026-10-31",
+  "instruments": [
+    {
+      "nse_symbol": "RELIANCE-EQ",
+      "isin": null,
+      "shoonya_token": null,
+      "listing_date": null,
+      "delisting_date": null,
+      "membership_verified_through": null,
+      "aliases": [],
+      "alias_history_status": "UNKNOWN",
+      "field_provenance": {
+        "nse_symbol": {
+          "source": "accepted local Shoonya publication path",
+          "as_of_date": "2026-10-31",
+          "reference": "data/raw/shoonya/NSE/RELIANCE-EQ/2026-10-01_2026-10-07.json.gz"
+        }
+      }
+    }
+  ]
+}

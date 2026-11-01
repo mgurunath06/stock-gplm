@@ -1,0 +1,36 @@
+[Unit]
+Description=Stock GPLM Shoonya session assurance
+Documentation=file:/home/ubuntu/StockGPLMDownloads/docs/m25-oracle-authentication.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/StockGPLMDownloads
+UMask=0077
+Environment=HOME=/home/ubuntu
+Environment=PYTHONUNBUFFERED=1
+LoadCredentialEncrypted=shoonya_password:/etc/credstore.encrypted/stock-gplm/shoonya_password
+LoadCredentialEncrypted=shoonya_totp_secret:/etc/credstore.encrypted/stock-gplm/shoonya_totp_secret
+LoadCredentialEncrypted=shoonya_api_secret:/etc/credstore.encrypted/stock-gplm/shoonya_api_secret
+ExecStart=/home/ubuntu/stock-gplm-auth-venv/bin/stock-gplm-auth ensure --config /etc/stock-gplm/m25-auth.json --allow-oauth-login
+TimeoutStartSec=360
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/.config/stock-gplm
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "exchange": "NSE",
+  "timezone": "Asia/Kolkata",
+  "coverage_start": null,
+  "coverage_end": null,
+  "coverage_complete": false,
+  "days": []
+}
