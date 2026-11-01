@@ -484,6 +484,7 @@ def pull_plan(
     checkpoint_root: Path, audit_root: Path, execute_plan_id: str,
     sleeper: Callable[[float], None] = time.sleep,
     after_publish: Callable[[str], None] | None = None,
+    source_evidence: dict[str, Any] | None = None,
 ) -> Path:
     """Execute or resume one immutable plan; safe reruns reuse checkpoints."""
     manifest = json.loads((Path(plan_dir) / "plan-manifest.json").read_text(encoding="utf-8"))
@@ -534,6 +535,7 @@ def pull_plan(
     if state.get("run_id") != plan_id or state.get("plan") != str(Path(plan_dir).resolve()):
         raise ValueError("checkpoint belongs to another plan")
     completed = set(state.get("completed", []))
+    resumed_triplets = len(completed)
     pending = [
         row for row in rows
         if row["action"] != "SKIP_IDENTICAL" and row["triplet_id"] not in completed
@@ -638,6 +640,12 @@ def pull_plan(
     _write_json(partial_audit / "run-manifest.json", {
         "schema_version": 1, "contract": "stock-gplm.m24-run.v1", "run_id": plan_id,
         "plan_sha256": _sha256(plan_path), "request_sha256": request.digest(),
+        # Triplets already checkpointed came through whichever source ran before.
+        "final_invocation": {
+            "source": source_evidence or {"source": "SFTP"},
+            "checkpointed_before_invocation": resumed_triplets,
+            "transferred_in_invocation": len(pending),
+        },
         "classifications": {
             "source": "REPORTED_PER_TRIPLET", "transfer": counts,
             "content": "REPORTED_PER_TRIPLET", "historical": "NOT_EVALUATED",

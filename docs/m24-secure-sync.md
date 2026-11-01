@@ -184,6 +184,42 @@ The marker is therefore the commit point. Recovery verifies and completes a
 matching subset. Hidden files left by a crash are reused only when their checksum
 matches the plan.
 
+## Local archive import
+
+A separately downloaded tar can replace SFTP transfer without weakening any check:
+
+```bash
+.venv/bin/python -m stock_gplm.m24.cli archive-stage --request <request> \
+  --archive <file.tar> --sha256 <sha256> --staging-root <outside-raw>
+.venv/bin/python -m stock_gplm.m24.cli archive-reconcile --request <request> \
+  --stage <stage> --catalog <catalog> --output-root <reports>
+.venv/bin/python -m stock_gplm.m24.cli pull-archive --request <request> --plan <plan> \
+  --stage <stage> --archive-reconciliation <report> --checkpoint-root <checkpoints> \
+  --audit-root <reports> --execute-plan <id>
+```
+
+The archive is untrusted. Staging hashes it and validates every header before writing:
+only an uncompressed tar with regular files and directories under `NSE/`, with
+publication names, within the size and count limits, no duplicate or case-colliding
+paths, and no links, special files, sparse members or privileged modes. One bad member
+rejects the whole archive. Files are written by name, read-only, and the stage appears
+by atomic rename.
+
+`archive-discover` builds a catalog from the stage alone. Catalog IDs are deterministic,
+so an ID equal to one from SFTP discovery shows both sources describe identical
+publications, and the local path can bootstrap from an archive. SFTP remains the path
+for incremental updates.
+
+The checksum proves only that the bytes are the ones supplied. Reconciliation is the
+provenance check: the stage must equal the catalog plus its exceptions with nothing
+missing or extra, every catalog file must match the SHA-256 from independent discovery,
+and every triplet must pass M1 publication validation. Exceptional publications are
+reported but stay in staging only.
+
+`pull-archive` uses the normal plan, checkpoint and publication path, resumes a stopped
+SFTP run from its checkpoint, and records the archive evidence and the split between
+checkpointed and newly transferred triplets in the run manifest.
+
 ## Reports and classifications
 
 M2.4 writes checksum-bound catalogs, plans, execution audits, validation reports

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from stock_gplm.m2.master_validation import read_shoonya_nse_eq_inventory_v1
 
+from .archive import ArchiveTransport, archive_evidence, reconcile_archive, stage_archive
 from .models import SyncRequestV1
 from .sync import build_plan, discover_catalog, pull_plan, reconcile_run, validate_run
 from .transport import TransportConfigV1, TransportError, WindowsOpenSSHTransport
@@ -57,6 +58,33 @@ def main() -> int:
     resume.add_argument("--transport-config", required=True, type=Path)
     resume.add_argument("--checkpoint-root", required=True, type=Path)
     resume.add_argument("--audit-root", required=True, type=Path)
+
+    stage = commands.add_parser("archive-stage")
+    stage.add_argument("--request", required=True, type=Path)
+    stage.add_argument("--archive", required=True, type=Path)
+    stage.add_argument("--sha256", required=True)
+    stage.add_argument("--staging-root", required=True, type=Path)
+
+    archive_discover = commands.add_parser("archive-discover")
+    archive_discover.add_argument("--request", required=True, type=Path)
+    archive_discover.add_argument("--master", required=True, type=Path)
+    archive_discover.add_argument("--stage", required=True, type=Path)
+    archive_discover.add_argument("--output-root", required=True, type=Path)
+
+    archive_reconcile = commands.add_parser("archive-reconcile")
+    archive_reconcile.add_argument("--request", required=True, type=Path)
+    archive_reconcile.add_argument("--stage", required=True, type=Path)
+    archive_reconcile.add_argument("--catalog", required=True, type=Path)
+    archive_reconcile.add_argument("--output-root", required=True, type=Path)
+
+    pull_archive = commands.add_parser("pull-archive")
+    pull_archive.add_argument("--request", required=True, type=Path)
+    pull_archive.add_argument("--plan", required=True, type=Path)
+    pull_archive.add_argument("--stage", required=True, type=Path)
+    pull_archive.add_argument("--archive-reconciliation", required=True, type=Path)
+    pull_archive.add_argument("--checkpoint-root", required=True, type=Path)
+    pull_archive.add_argument("--audit-root", required=True, type=Path)
+    pull_archive.add_argument("--execute-plan", required=True)
 
     validate = commands.add_parser("validate")
     validate.add_argument("--request", required=True, type=Path)
@@ -116,6 +144,28 @@ def main() -> int:
                 transport=_transport(args.transport_config),
                 checkpoint_root=args.checkpoint_root, audit_root=args.audit_root,
                 execute_plan_id=args.run_id,
+            )
+        elif args.command == "archive-stage":
+            output = stage_archive(
+                archive_path=args.archive, expected_sha256=args.sha256, request=request,
+                staging_root=args.staging_root,
+            )
+        elif args.command == "archive-discover":
+            output = discover_catalog(
+                request=request, master_path=args.master, transport=ArchiveTransport(args.stage),
+                output_root=args.output_root,
+            )
+        elif args.command == "archive-reconcile":
+            output = reconcile_archive(
+                stage_dir=args.stage, catalog_dir=args.catalog, request=request,
+                output_root=args.output_root,
+            )
+        elif args.command == "pull-archive":
+            output = pull_plan(
+                request=request, plan_dir=args.plan, transport=ArchiveTransport(args.stage),
+                checkpoint_root=args.checkpoint_root, audit_root=args.audit_root,
+                execute_plan_id=args.execute_plan,
+                source_evidence=archive_evidence(args.stage, args.archive_reconciliation),
             )
         elif args.command == "validate":
             output = validate_run(request=request, run_dir=args.run, output_root=args.output_root)
