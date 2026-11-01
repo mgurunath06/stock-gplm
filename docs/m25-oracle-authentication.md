@@ -98,6 +98,9 @@ TOTP rollover, timeout, missing redirect or ambiguous click result.
 - The exact login-page identity and complete control set are checked with one
   browser-side predicate. Credential filling and the single click each repeat
   that origin/page/control predicate atomically in the browser context.
+  A credential-free 2026-11-01 GET verified that the exact portless HTTPS path
+  returned without redirect and declared `<title>SHOONYA</title>`; it did not
+  verify the rendered SPA controls.
 - Selenium and Chrome run in a dedicated process group. A stalled WebDriver
   command is never retried. The parent terminates the whole group, first with
   `SIGTERM` and then `SIGKILL` within the cleanup allowance, so no later command

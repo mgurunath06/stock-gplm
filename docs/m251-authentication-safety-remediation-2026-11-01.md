@@ -46,12 +46,16 @@ Local verification on the feature worktree:
   because the Oracle-only `/home/ubuntu/stock-gplm-auth-venv/bin/stock-gplm-auth`
   executable is intentionally absent. This is not claimed as a passing check;
   the unit must be re-verified in an approved Oracle offline preflight.
+- A credential-free HTTPS GET to the exact login path, with no query parameters
+  and redirects forbidden, returned the public bootstrap HTML with
+  `<title>SHOONYA</title>`. No credential entry or authentication was attempted.
 
 ## Residual risks
 
-- The current Shoonya title/DOM and the JavaScript value-setter compatibility are
-  not live-verified. A provider change fails closed and needs a separately
-  authorized credential-free readiness check before any canary.
+- The public bootstrap title is verified, but the rendered Shoonya control DOM
+  and JavaScript value-setter compatibility are not live-verified. A provider
+  change fails closed and needs a separately authorized credential-free browser
+  readiness check before any canary.
 - A browser can receive credentials and then fail before the redirect is observed.
   The result remains intentionally ambiguous and requires operator investigation;
   automated retry is forbidden.
