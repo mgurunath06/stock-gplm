@@ -22,6 +22,7 @@ stock-gplm-master-validate = "stock_gplm.m2.master_cli:main"
 stock-gplm-inventory = "stock_gplm.m2.inventory_cli:main"
 stock-gplm-sync = "stock_gplm.m24.cli:main"
 stock-gplm-auth = "stock_gplm.m25.cli:main"
+stock-gplm-readiness = "stock_gplm.m3.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

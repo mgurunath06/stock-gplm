@@ -38,3 +38,7 @@ M2.5 provides a synthetically tested Oracle deployment package for cache-first
 Shoonya OAuth/TOTP renewal. The offline runtime and encrypted credentials are
 deployed, but live authentication and scheduling remain disabled. See
 [docs/m25-oracle-authentication.md](docs/m25-oracle-authentication.md).
+
+M3 builds deterministic local descriptive datasets and exploratory SVG reports
+from validated immutable publications while keeping missing reference evidence
+explicitly incomplete. See [docs/m3-data-readiness.md](docs/m3-data-readiness.md).

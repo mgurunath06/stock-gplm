@@ -72,3 +72,11 @@ Oracle owns protected credential input, cached OAuth sessions, headless
 Selenium/TOTP renewal, audit state and proposed scheduling. The login command
 requires an explicit authorization flag, and all service/timer templates remain
 disabled pending deployment and scheduling approval.
+
+M3 adds a local-only, checksum-bound derived-dataset pipeline over accepted M1
+publications. It produces descriptive OHLCV and causal indicators only when
+lookback suffices, refuses an active M2.4 publication lock, rechecks every input
+hash before publication, and never writes inside the raw tree. Current-master
+identity remains separate from point-in-time membership, calendar, alias, and
+corporate-action evidence; missing evidence keeps historical coverage incomplete
+and training readiness `NOT_READY`.
