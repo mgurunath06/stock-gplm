@@ -93,8 +93,8 @@ class AuthConfigV1:
             if not isinstance(host, str) or _HOST.fullmatch(host) is None:
                 raise ValueError("allowed redirect host is invalid")
         _positive_int(self.cache_max_age_seconds, "cache_max_age_seconds", 23 * 3600)
-        _positive_int(self.lock_timeout_seconds, "lock_timeout_seconds", 300)
-        _positive_int(self.browser_timeout_seconds, "browser_timeout_seconds", 300)
+        _positive_int(self.lock_timeout_seconds, "lock_timeout_seconds", 30)
+        _positive_int(self.browser_timeout_seconds, "browser_timeout_seconds", 90)
         _positive_int(self.totp_min_valid_seconds, "totp_min_valid_seconds", 20)
 
     @classmethod

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .credentials import FileCredentialProvider
+from .deadline import authentication_deadline
 from .errors import (
     AuthError, LoginRequired, SecurityBoundaryError, TokenExchangeRejected,
     ValidationInconclusive,
@@ -93,7 +94,9 @@ class AuthManager:
         run_id = new_run_id()
         self.audit.event("AUTH_STARTED", run_id=run_id)
         try:
-            with ExclusiveAuthLock(Path(self.config.lock_path), self.config.lock_timeout_seconds):
+            with authentication_deadline(), ExclusiveAuthLock(
+                Path(self.config.lock_path), self.config.lock_timeout_seconds,
+            ):
                 self.audit.event("AUTH_LOCK_ACQUIRED", run_id=run_id)
                 record = self.cache.load()
                 now = self.clock()

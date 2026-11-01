@@ -169,3 +169,12 @@ The `CANARY_FAIL` was investigated credential-free; the cause was CPU steal maki
 the login form take about 90 s to render, against a 30 s bound. See the
 [browser timeout investigation](m25-oracle-browser-timeout-investigation-2026-11-01.md).
 The fix is in the repository but not deployed; the live canary remains unapproved.
+
+## M2.5.1 remediation note
+
+The original timeout-only fix was subsequently rejected by independent review.
+The local M2.5.1 feature revision replaces it with the fail-closed controls and
+fixed budget documented in
+[the remediation report](m251-authentication-safety-remediation-2026-11-01.md).
+No M2.5.1 package was deployed, no additional canary ran, and the service and
+timer remain disabled. This note does not alter the historical `CANARY_FAIL`.

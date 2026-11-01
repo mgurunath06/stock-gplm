@@ -15,8 +15,7 @@
     "/home/ubuntu/StockGPLMDownloads/data/minute"
   ],
   "allowed_redirect_hosts": [
-    "api.shoonya.com",
-    "trade.shoonya.com"
+    "api.shoonya.com"
   ],
   "cache_max_age_seconds": 82800,
   "lock_timeout_seconds": 30,

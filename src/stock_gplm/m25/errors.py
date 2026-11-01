@@ -31,3 +31,19 @@ class SecurityBoundaryError(AuthError):
 
 class BrowserPageNotReady(AuthError):
     classification = "BROWSER_PAGE_NOT_READY"
+
+
+class AmbiguousAuthenticationOutcome(AuthError):
+    classification = "AUTH_OUTCOME_AMBIGUOUS"
+
+
+class BrowserSessionUnresolved(AuthError):
+    classification = "BROWSER_SESSION_UNRESOLVED"
+
+
+class OperationDeadlineExceeded(AuthError):
+    classification = "OPERATION_DEADLINE_EXCEEDED"
+
+
+class ProviderTimeout(AuthError):
+    classification = "PROVIDER_TIMEOUT"
