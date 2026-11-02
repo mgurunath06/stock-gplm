@@ -1,8 +1,8 @@
 """Intraday label contract. It accepts real minute bars only.
 
-No minute schema is confirmed yet, so production calls refuse every series until
-a sanitized provider sample supports a versioned adapter. Minute bars are never
-derived from daily candles.
+M3.4 adds the ``ShoonyaMinuteV1`` ingestion adapter, but its coverage and session
+gates are blocked, so no schema is confirmed for labels and production calls refuse
+every series. Minute bars are never derived from daily candles.
 """
 from __future__ import annotations
 

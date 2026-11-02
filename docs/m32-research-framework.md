@@ -99,7 +99,8 @@ An action on the entry date is allowed because that session's open already refle
 
 ### Intraday
 
-Intraday requires real minute bars. `build_daily_labels` refuses the intraday
+M3.4 now ingests real minute bars through its own adapter, but this label path stays closed
+until its gates pass; see [M3.4](m34-minute-ingestion-fusion.md). Intraday requires real minute bars. `build_daily_labels` refuses the intraday
 contract, and a series with too few bars per session is rejected, so daily candles
 cannot pose as minute data. No minute schema is confirmed, so
 `CONFIRMED_MINUTE_SCHEMAS` is empty and production calls refuse every series. Tests

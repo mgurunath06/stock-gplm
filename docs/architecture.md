@@ -85,3 +85,8 @@ M3.2 reads a manifest-verified M3.1 run and adds causal features, separate label
 contracts, per-horizon purged walk-forward plans and quality gates. It consumes M2
 reference models, never reads raw files and performs no training. See
 [m32-research-framework.md](m32-research-framework.md).
+
+M3.4 adds `stock_gplm.m3.minute`, `minute_publish`, `minute_run` and `fusion`. Minute files live
+in their own raw root, and fused rows read only prior-session daily values. Publication, content,
+session policy, coverage, reconciliation and leakage are separate gates, and none can make
+training ready.

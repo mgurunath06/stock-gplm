@@ -12,4 +12,6 @@
 - [M2.5 Oracle browser timeout investigation — 2026-11-01](m25-oracle-browser-timeout-investigation-2026-11-01.md)
 - [M3 local data readiness](m3-data-readiness.md)
 - [M3.2 point-in-time research framework](m32-research-framework.md)
+- [M3.4 minute ingestion and fusion](m34-minute-ingestion-fusion.md)
+- [M3.4 evidence report — 2026-11-01](m34-evidence-report-2026-11-01.md)
 - [Architecture and milestone boundaries](architecture.md)

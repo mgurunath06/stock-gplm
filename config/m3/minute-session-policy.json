@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "exchange": "NSE",
+  "timezone": "Asia/Kolkata",
+  "regular_first_bar": "09:15",
+  "regular_last_bar": "15:29",
+  "status": "OBSERVED_NOT_AUTHORITATIVE",
+  "provenance": "Oracle collector request window 09:15-15:30 and bars observed in the 2026-11-01 RELIANCE-EQ/TCS-EQ snapshot; no exchange document or checksum manifest was supplied. Valid only through 2026-08-02 because bar behaviour changes from 2026-08-03 and no authoritative session definition for that regime was supplied.",
+  "valid_through": "2026-08-02"
+}

@@ -44,3 +44,7 @@ from validated immutable publications while keeping missing reference evidence
 explicitly incomplete. See [docs/m3-data-readiness.md](docs/m3-data-readiness.md).
 M3.2 adds point-in-time feature, label and evaluation contracts without training any
 model. See [docs/m32-research-framework.md](docs/m32-research-framework.md).
+
+M3.4 adds separate immutable minute ingestion, quality checks, and causal fusion with
+prior-session daily features. Coverage is partial and training stays `NOT_READY`. See
+[docs/m34-minute-ingestion-fusion.md](docs/m34-minute-ingestion-fusion.md).
