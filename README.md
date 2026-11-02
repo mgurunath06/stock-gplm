@@ -66,3 +66,10 @@ M3.7 trains LightGBM, logistic and momentum baselines on the existing daily data
 separate `EXPLORATORY_BIASED` pipeline. It leaves the locked holdout unread, writes no
 ranking and is never promoted. Its trials count against the shared 20-per-horizon research
 budget. See [docs/m37-exploratory-biased-training.md](docs/m37-exploratory-biased-training.md).
+
+M3.8 explains why the M3.7 ranking skill does not survive costs, using development data
+only and no new model trials. It finds that full-turnover costs consume the small 1-7d
+gross edge, that the median-based labels do not reflect returns that beat the mean after
+costs, and that unadjusted corporate actions distort labels. No pre-registered hypothesis
+survives multiple-testing correction. See
+[docs/m38-evidence-report-2026-11-02.md](docs/m38-evidence-report-2026-11-02.md).

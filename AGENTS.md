@@ -16,6 +16,10 @@
   separate `EXPLORATORY_BIASED` pipeline. It shares the 20-trial-per-horizon research
   ledger, never reads the locked holdout, writes no ranking, never edits gates and is
   never promoted. ETFs stay out of the equity universe.
+- M3.8 diagnostics replay already-counted trials only, after verifying them against stored
+  metrics. They leave the trial ledger byte-identical. Hypotheses are pre-registered and
+  logged, with Bonferroni correction over every test. Promoting any of them into a model
+  is a new trial.
 - LLM assistance (`stock_gplm.llm`) is opt-in and advisory. Keys come only from
   environment variables or a secret store. Never send raw market datasets, private
   strategies or credentials to a remote provider without explicit approval. LLM

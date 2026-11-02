@@ -20,5 +20,7 @@
 - [M3.6 evidence report — 2026-11-02](m36-evidence-report-2026-11-02.md)
 - [M3.7 EXPLORATORY_BIASED daily training](m37-exploratory-biased-training.md)
 - [M3.7 evidence report — 2026-11-02](m37-evidence-report-2026-11-02.md)
+- [M3.8 signal discovery and data-quality audit](m38-signal-discovery.md)
+- [M3.8 evidence report — 2026-11-02](m38-evidence-report-2026-11-02.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)

@@ -30,6 +30,7 @@ stock-gplm-research = "stock_gplm.m3.research_cli:main"
 stock-gplm-train = "stock_gplm.m35.cli:main"
 stock-gplm-evidence = "stock_gplm.m36.cli:main"
 stock-gplm-explore = "stock_gplm.m37.cli:main"
+stock-gplm-diagnose = "stock_gplm.m38.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
