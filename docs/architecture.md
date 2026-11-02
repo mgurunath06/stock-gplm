@@ -90,3 +90,10 @@ M3.4 adds `stock_gplm.m3.minute`, `minute_publish`, `minute_run` and `fusion`. M
 in their own raw root, and fused rows read only prior-session daily values. Publication, content,
 session policy, coverage, reconciliation and leakage are separate gates, and none can make
 training ready.
+
+M3.5 adds `stock_gplm.m35`, made up of `policy`, `data`, `models`, `metrics`, `run` and
+`cli`. It reads manifest-verified M3.1/M3.2 outputs and reuses the M3.2 split plans,
+purge and embargo checks, and label contracts. It fits LightGBM only when every required
+daily gate passes. Its numeric dependencies are confined to the `m35` extra. The separate
+`stock_gplm.llm` package is opt-in and advisory, and no training or validation module
+imports it.

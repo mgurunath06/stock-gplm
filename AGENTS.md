@@ -1,8 +1,16 @@
 # Stock GPLM project rules
 
-- Scope: local M1 ingestion and M2/M2.1 historical/reference-data validation only.
-  No training, predictions, orders, remote synchronization, Oracle changes, or
-  credential access.
+- Scope: local M1 ingestion and M2/M2.1 historical/reference-data validation, plus
+  M3.5 research-only daily model training (authorized by the user on 2026-11-02).
+  No orders, live signals, remote synchronization, Oracle changes, or credential
+  access. M3.5 training runs on local CPU from manifest-verified M3.1/M3.2 runs only,
+  fits LightGBM only when every required daily gate passes, otherwise runs only the
+  policy's exploratory baselines, and never scores a locked holdout twice. Minute
+  fusion is not a prerequisite for daily-only training.
+- LLM assistance (`stock_gplm.llm`) is opt-in and advisory. Keys come only from
+  environment variables or a secret store. Never send raw market datasets, private
+  strategies or credentials to a remote provider without explicit approval. LLM
+  output cannot change gates, splits, labels, metrics, rankings or risk rules.
 - Use Python 3.12 and the workspace .venv. Keep dependencies minimal, code typed,
   interfaces documented, and tests synthetic and reproducible.
 - Raw provider files, metadata, and publication markers are immutable. Open them

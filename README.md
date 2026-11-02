@@ -48,3 +48,9 @@ model. See [docs/m32-research-framework.md](docs/m32-research-framework.md).
 M3.4 adds separate immutable minute ingestion, quality checks, and causal fusion with
 prior-session daily features. Coverage is partial and training stays `NOT_READY`. See
 [docs/m34-minute-ingestion-fusion.md](docs/m34-minute-ingestion-fusion.md).
+
+M3.5 adds research-only daily training on local CPU, with daily-only gates, a trial
+ledger, a one-time locked holdout, a cost model and a calibrated, evidence-labelled
+ranking. Reference evidence is still missing, so only exploratory baselines have run on
+real data. See [docs/m35-daily-training.md](docs/m35-daily-training.md). Optional,
+advisory LLM assistance is described in [docs/llm-assistance.md](docs/llm-assistance.md).

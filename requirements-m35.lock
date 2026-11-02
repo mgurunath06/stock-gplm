@@ -1,0 +1,11 @@
+# M3.5 research training extra (pip install -e '.[m35]'), resolved 2026-11-02 on Python 3.12
+joblib==1.6.0
+lightgbm==4.7.0
+numpy==2.5.4
+pandas==2.3.3
+python-dateutil==4.0.0
+pytz==2026.6
+scikit-learn==1.9.1
+scipy==1.18.1
+threadpoolctl==3.7.0
+tzdata==2026.6

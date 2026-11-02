@@ -14,4 +14,7 @@
 - [M3.2 point-in-time research framework](m32-research-framework.md)
 - [M3.4 minute ingestion and fusion](m34-minute-ingestion-fusion.md)
 - [M3.4 evidence report — 2026-11-01](m34-evidence-report-2026-11-01.md)
+- [M3.5 research-only daily training](m35-daily-training.md)
+- [M3.5 evidence report — 2026-11-02](m35-evidence-report-2026-11-02.md)
+- [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)

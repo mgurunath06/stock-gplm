@@ -1,0 +1,23 @@
+{
+  "contract": "stock-gplm.llm-config.v1",
+  "enabled": false,
+  "audit_log": "reports/llm/audit.jsonl",
+  "limits": {
+    "max_output_tokens": 1024,
+    "daily_token_limit": 200000,
+    "daily_usd_limit": 2.0,
+    "max_market_rows_remote": 0,
+    "timeout_seconds": 60
+  },
+  "providers": {
+    "ollama": {
+      "kind": "ollama", "base_url": "http://127.0.0.1:11434", "local": true, "enabled": false,
+      "models": {"qwen2.5:14b-instruct": {"input_per_1k": 0, "output_per_1k": 0}}
+    },
+    "openrouter": {
+      "kind": "openai_compatible", "base_url": "https://openrouter.ai/api/v1", "local": false,
+      "enabled": false, "api_key_env": "OPENROUTER_API_KEY",
+      "models": {"example/approved-model": {"input_per_1k": 0.003, "output_per_1k": 0.015}}
+    }
+  }
+}

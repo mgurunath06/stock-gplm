@@ -12,6 +12,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
 oracle-auth = ["selenium==4.52.0"]
+# Research-only daily training (M3.5); core ingestion and validation stay dependency-free.
+m35 = ["numpy>=2,<3", "pandas>=2.2,<3", "scikit-learn>=1.5,<2", "lightgbm>=4.5,<5"]
 
 [project.scripts]
 stock-gplm = "stock_gplm.cli:main"
@@ -25,6 +27,7 @@ stock-gplm-minute = "stock_gplm.m3.minute_cli:main"
 stock-gplm-auth = "stock_gplm.m25.cli:main"
 stock-gplm-readiness = "stock_gplm.m3.cli:main"
 stock-gplm-research = "stock_gplm.m3.research_cli:main"
+stock-gplm-train = "stock_gplm.m35.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
