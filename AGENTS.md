@@ -12,6 +12,10 @@
   get around its access controls. Registered sources are immutable and hash-bound.
   The weekend rule needs a registered NSE schedule document. The locked holdout is
   scored only after the policy's predefined promotion criteria pass.
+- M3.7 (authorized 2026-11-02) may fit LightGBM on blocked-gate daily data only as a
+  separate `EXPLORATORY_BIASED` pipeline. It shares the 20-trial-per-horizon research
+  ledger, never reads the locked holdout, writes no ranking, never edits gates and is
+  never promoted. ETFs stay out of the equity universe.
 - LLM assistance (`stock_gplm.llm`) is opt-in and advisory. Keys come only from
   environment variables or a secret store. Never send raw market datasets, private
   strategies or credentials to a remote provider without explicit approval. LLM

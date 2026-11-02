@@ -61,3 +61,8 @@ manifest-bound reference bundle with a counted gap report, ETF separation, and p
 criteria that must pass before the locked holdout is scored. No NSE file has been
 supplied yet, so every reference gate stays blocked. See
 [docs/m36-reference-evidence.md](docs/m36-reference-evidence.md).
+
+M3.7 trains LightGBM, logistic and momentum baselines on the existing daily data as a
+separate `EXPLORATORY_BIASED` pipeline. It leaves the locked holdout unread, writes no
+ranking and is never promoted. Its trials count against the shared 20-per-horizon research
+budget. See [docs/m37-exploratory-biased-training.md](docs/m37-exploratory-biased-training.md).
