@@ -14,7 +14,11 @@ contracts, not anything about the market.
 
 Optional evidence comes in checksum-bound M2.1 form: `--calendar` with
 `--calendar-manifest`, `--corporate-actions` with `--corporate-actions-manifest`,
-and `--inventory` for a merged inventory with per-field provenance.
+and `--inventory` for a merged inventory with per-field provenance. Alternatively,
+`--reference-bundle` takes an [M3.6 bundle](m36-reference-evidence.md) and uses only its
+validated components. M3.2 binds a calendar axis as `session-axis.csv` and supplied
+classes as `instrument-classes.csv`. It also gates `instrument_classification`, which
+passes only when ETF/equity classes cover every symbol.
 
 The run refuses an M3.1 run whose outputs do not match its manifest, a run that
 lacks the current M3.1 outputs, an output root inside the raw tree, and an existing

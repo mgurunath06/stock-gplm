@@ -7,6 +7,11 @@
   fits LightGBM only when every required daily gate passes, otherwise runs only the
   policy's exploratory baselines, and never scores a locked holdout twice. Minute
   fusion is not a prerequisite for daily-only training.
+- M3.6 reference evidence enters only as files a person downloaded in a browser.
+  NSE's Terms of Use prohibit automated collection, so never script NSE downloads or
+  get around its access controls. Registered sources are immutable and hash-bound.
+  The weekend rule needs a registered NSE schedule document. The locked holdout is
+  scored only after the policy's predefined promotion criteria pass.
 - LLM assistance (`stock_gplm.llm`) is opt-in and advisory. Keys come only from
   environment variables or a secret store. Never send raw market datasets, private
   strategies or credentials to a remote provider without explicit approval. LLM

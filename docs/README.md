@@ -16,5 +16,7 @@
 - [M3.4 evidence report — 2026-11-01](m34-evidence-report-2026-11-01.md)
 - [M3.5 research-only daily training](m35-daily-training.md)
 - [M3.5 evidence report — 2026-11-02](m35-evidence-report-2026-11-02.md)
+- [M3.6 external reference evidence](m36-reference-evidence.md)
+- [M3.6 evidence report — 2026-11-02](m36-evidence-report-2026-11-02.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)

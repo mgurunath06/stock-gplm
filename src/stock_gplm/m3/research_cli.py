@@ -9,6 +9,7 @@ from pathlib import Path
 
 from stock_gplm.m2.models import InstrumentInventory
 from stock_gplm.m2.reference_data import import_corporate_actions_v1, import_nse_calendar_v1
+from stock_gplm.m36.bundle import load_bundle
 
 from .evidence import ReferenceEvidence, SessionAxis
 from .research import build_research_run
@@ -28,14 +29,27 @@ def main() -> int:
     parser.add_argument("--corporate-actions", type=Path)
     parser.add_argument("--corporate-actions-manifest", type=Path)
     parser.add_argument("--inventory", type=Path, help="merged M2.1 inventory JSON with per-field provenance")
+    parser.add_argument("--reference-bundle", type=Path,
+                        help="M3.6 bundle; only its validated components are used")
     args = parser.parse_args()
     _pair(parser, args.calendar, args.calendar_manifest, "calendar")
     _pair(parser, args.corporate_actions, args.corporate_actions_manifest, "corporate-actions")
+    if args.reference_bundle is not None and (args.calendar or args.corporate_actions or args.inventory):
+        parser.error("--reference-bundle replaces --calendar, --corporate-actions and --inventory")
     try:
         hashes: dict[str, str] = {}
         axis = None
         catalogs = {}
         inventory = None
+        classes = None
+        if args.reference_bundle is not None:
+            readiness_id = json.loads((args.readiness_run / "run-manifest.json").read_text(encoding="utf-8"))["run_id"]
+            bundle = load_bundle(args.reference_bundle, readiness_id)
+            hashes["m36_bundle"] = bundle.bundle_id
+            args.calendar, args.calendar_manifest = bundle.calendar or (None, None)
+            args.corporate_actions, args.corporate_actions_manifest = bundle.corporate_actions or (None, None)
+            args.inventory = bundle.inventory
+            classes = bundle.instrument_classes
         if args.calendar is not None:
             axis = SessionAxis.from_calendar(
                 import_nse_calendar_v1(args.calendar, args.calendar_manifest).calendar
@@ -51,6 +65,7 @@ def main() -> int:
         run = build_research_run(
             readiness_run=args.readiness_run, output_root=args.output_root,
             evidence=ReferenceEvidence(inventory, catalogs), axis=axis, evidence_hashes=hashes,
+            instrument_classes=classes,
         )
         gates = json.loads((run / "quality-gates.json").read_text(encoding="utf-8"))
     except (FileExistsError, KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:

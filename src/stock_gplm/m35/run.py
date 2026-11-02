@@ -3,7 +3,10 @@
 A run either trains (every required daily gate passes for a horizon) or runs
 only the policy's exploratory baselines. Exploratory runs never fit LightGBM and
 never score the locked holdout. Trials are reserved in an append-only ledger
-before any fit, and a holdout is evaluated at most once per M3.2 run and horizon.
+before any fit and count against one budget per horizon for the whole output root,
+so rebuilding M3.2 cannot reset it. A trained horizon's holdout is scored only when
+the policy's predefined promotion criteria hold on walk-forward evidence, and at most
+once per horizon in the output root.
 Outputs are research artefacts: no order, signal feed or Oracle write exists here.
 """
 from __future__ import annotations
@@ -29,9 +32,9 @@ from .data import (
 )
 from .metrics import evaluate
 from .models import Calibrator, LightGBMModel, make_model
-from .policy import Mode, TrainingPolicy, evaluate_daily_gates, load_policy
+from .policy import Mode, TrainingPolicy, evaluate_daily_gates, load_policy, promotion_decision
 
-M35_VERSION = 2
+M35_VERSION = 3
 RUN_CONTRACT = "stock-gplm.m35-daily-training-run.v1"
 TRIAL_LEDGER = "trial-ledger.jsonl"
 # A ranking probability is shown as supported only when its bin has this much out-of-sample
@@ -151,6 +154,29 @@ def _rank(
     return out, as_of
 
 
+def evaluate_gates(inputs: Inputs, policy: TrainingPolicy) -> tuple[pd.DataFrame, set[str], dict[str, Any]]:
+    """Static universe and daily gate report; reads verified inputs only and writes nothing."""
+    universe = static_universe(inputs.coverage, policy, inputs.instrument_classes)
+    eligible = set(universe.loc[universe["static_status"] == "ELIGIBLE", "symbol"])
+    gate_report = evaluate_daily_gates(
+        inputs.m32_gates, scoped_raw_acceptance=raw_acceptance_scoped(inputs, eligible),
+        folds={h: len(p.folds) for h, p in inputs.plans.items()}, horizons=policy.horizons,
+    )
+    return universe, eligible, gate_report
+
+
+def gate_check(*, m31_run: Path, m32_run: Path, policy_path: Path) -> dict[str, Any]:
+    """Rerun daily eligibility gates without reserving a trial, fitting a model or writing a file."""
+    policy = load_policy(policy_path)
+    inputs = load_inputs(m31_run, m32_run, policy.horizons)
+    universe, eligible, report = evaluate_gates(inputs, policy)
+    return {**report, "m31_run_id": inputs.m31_run_id, "m32_run_id": inputs.m32_run_id,
+            "session_source": inputs.axis.source,
+            "static_status_counts": universe["static_status"].value_counts().sort_index().to_dict(),
+            "static_eligible_symbols": len(eligible),
+            "instrument_classification": "SUPPLIED" if inputs.instrument_classes is not None else "NOT_ESTABLISHED"}
+
+
 def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, output_root: Path) -> Path:
     """Run gates, walk-forward evaluation, (gated) holdout and ranking; return the run directory."""
     policy = load_policy(policy_path)
@@ -171,12 +197,7 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
         raise FileExistsError(f"M3.5 run already exists: {run_id}")
     output_root.mkdir(parents=True, exist_ok=True)
 
-    universe = static_universe(inputs.coverage, policy)
-    eligible = set(universe.loc[universe["static_status"] == "ELIGIBLE", "symbol"])
-    gate_report = evaluate_daily_gates(
-        inputs.m32_gates, scoped_raw_acceptance=raw_acceptance_scoped(inputs, eligible),
-        folds={h: len(p.folds) for h, p in inputs.plans.items()}, horizons=policy.horizons,
-    )
+    universe, eligible, gate_report = evaluate_gates(inputs, policy)
     modes: dict[str, Mode] = {h: gate_report["horizons"][h]["mode"] for h in policy.horizons}
 
     # Reserve every trial before fitting anything; refuse rather than exceed the budget.
@@ -185,22 +206,20 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
     budget = int(policy.evaluation["trial_budget_per_horizon"])
     reservations = []
     for horizon in policy.horizons:
-        used = sum(1 for e in spent if e["m32_run_id"] == inputs.m32_run_id and e["horizon"] == horizon)
+        # Every earlier trial in this root counts, whichever M3.2 rebuild it ran on.
+        used = sum(1 for e in spent if e["horizon"] == horizon)
         wanted = policy.models_for(modes[horizon])
         if used + len(wanted) > budget:
             raise TrialBudgetExceeded(f"{horizon}: {used} trials used, {len(wanted)} more exceed budget {budget}")
-        reservations += [{"m32_run_id": inputs.m32_run_id, "horizon": horizon, "model": m,
-                          "mode": modes[horizon], "run_id": run_id, "trial": used + i + 1}
+        reservations += [{"m31_run_id": inputs.m31_run_id, "m32_run_id": inputs.m32_run_id, "horizon": horizon,
+                          "model": m, "mode": modes[horizon], "run_id": run_id, "trial": used + i + 1}
                          for i, m in enumerate(wanted)]
     for entry in reservations:
         _append(ledger_path, entry)
 
-    # A holdout is reserved before evaluation, so a crash cannot make it reusable.
+    # One holdout look per horizon for the whole root, whatever M3.2 rebuild or window it was on.
     holdout_path = output_root / HOLDOUT_LEDGER
-    holdout_used = {(e["m32_run_id"], e["horizon"]): e["run_id"] for e in _ledger(holdout_path)}
-    for horizon in policy.horizons:
-        if modes[horizon] == "MODEL_TRAINING" and (inputs.m32_run_id, horizon) not in holdout_used:
-            _append(holdout_path, {"m32_run_id": inputs.m32_run_id, "horizon": horizon, "run_id": run_id})
+    holdout_used = {e["horizon"]: e["run_id"] for e in _ledger(holdout_path)}
     partial = Path(tempfile.mkdtemp(prefix=f".{run_id}.partial-", dir=output_root))
     try:
         panel = build_panel(inputs, policy, eligible)
@@ -217,6 +236,7 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
             frame = horizon_frame(panel, inputs.labels[horizon], horizon)
             step = CONTRACTS_BY_NAME[horizon].max_offset
             horizon_metrics: dict[str, Any] = {"mode": mode, "labelled_eligible_rows": int(len(frame)), "models": {}}
+            finals: dict[str, tuple[Any, Calibrator, pd.DataFrame, float]] = {}
             for name in policy.models_for(mode):
                 per_fold = []
                 for fold in plan.folds:
@@ -247,18 +267,9 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
                 _write(partial / "models" / horizon / f"{name}.calibration.json", calibrator.artefact())
                 if isinstance(model, LightGBMModel):
                     _write(partial / "models" / horizon / f"{name}.importance.json", model.importance())
-                holdout_result: Any = "NOT_EVALUATED_EXPLORATORY_MODE"
-                if mode == "MODEL_TRAINING":
-                    previous = holdout_used.get((inputs.m32_run_id, horizon))
-                    if previous is not None:
-                        holdout_result = f"ALREADY_CONSUMED_BY_RUN {previous}"
-                    else:
-                        raw = model.score(holdout)
-                        holdout_result = evaluate(
-                            holdout, raw, calibrator(raw), base_rate=float(train["target"].mean()),
-                            cost=cost, top_fraction=top, bins=bins, step_sessions=step, axis_positions=positions)
+                finals[name] = (model, calibrator, holdout, float(train["target"].mean()))
                 horizon_metrics["models"][name] = {"walk_forward": summary, "folds": per_fold,
-                                                   "locked_holdout": holdout_result,
+                                                   "locked_holdout": "NOT_EVALUATED_EXPLORATORY_MODE",
                                                    "final_fit": {"train_rows": int(len(train)),
                                                                  "calibration_rows": int(len(validation))}}
                 if name == policy.ranking_model(mode):
@@ -270,6 +281,28 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
                         "model": name, "as_of": as_of, "symbols": int(len(ranking)),
                         "probability_supported_rows": int((ranking["probability_support"] == "SUPPORTED").sum()),
                     }
+            if mode == "MODEL_TRAINING":
+                decision = promotion_decision(policy.promotion, {
+                    n: m["walk_forward"] for n, m in horizon_metrics["models"].items()})
+                horizon_metrics["promotion"] = decision
+                previous = holdout_used.get(horizon)
+                if previous is not None:
+                    outcome = f"ALREADY_CONSUMED_BY_RUN {previous}"
+                elif not decision["promoted"]:
+                    outcome = "NOT_EVALUATED_PROMOTION_CRITERIA_NOT_MET"
+                else:
+                    # Reserved before scoring, so a crash cannot make the holdout reusable.
+                    _append(holdout_path, {"m32_run_id": inputs.m32_run_id, "horizon": horizon, "run_id": run_id,
+                                           "window": [plan.locked_holdout.first_as_of, plan.locked_holdout.last_as_of]})
+                    outcome = None
+                for name, (model, calibrator, holdout, base_rate) in finals.items():
+                    if outcome is not None:
+                        horizon_metrics["models"][name]["locked_holdout"] = outcome
+                        continue
+                    raw = model.score(holdout)
+                    horizon_metrics["models"][name]["locked_holdout"] = evaluate(
+                        holdout, raw, calibrator(raw), base_rate=base_rate, cost=cost, top_fraction=top,
+                        bins=bins, step_sessions=step, axis_positions=positions)
             metrics[horizon] = horizon_metrics
 
         _write(partial / "gates.json", gate_report)
@@ -283,7 +316,9 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
             "rows_excluded_flag_in_lookback": int((panel["static_eligible"] & panel["liquid"] & panel["flag_in_lookback"]).sum()),
             "latest_session": latest,
             "eligible_symbols_on_latest_session": int(panel.loc[panel["as_of_date"] == latest, "eligible"].sum()),
-            "survivorship": "current-master symbols only; point-in-time membership NOT_ESTABLISHED",
+            "instrument_class_counts": universe["instrument_class"].value_counts().sort_index().to_dict(),
+            "survivorship": "current-master symbols only; point-in-time membership "
+                            + gate_report["gates"]["point_in_time_membership"]["status"],
         })
         _write(partial / "fold-metrics.csv", pd.DataFrame(fold_rows).to_csv(index=False, lineterminator="\n"))
         _write(partial / "metrics.json", metrics)

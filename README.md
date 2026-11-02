@@ -54,3 +54,10 @@ ledger, a one-time locked holdout, a cost model and a calibrated, evidence-label
 ranking. Reference evidence is still missing, so only exploratory baselines have run on
 real data. See [docs/m35-daily-training.md](docs/m35-daily-training.md). Optional,
 advisory LLM assistance is described in [docs/llm-assistance.md](docs/llm-assistance.md).
+
+M3.6 adds an offline intake for NSE reference files that you download in a browser,
+because NSE's terms prohibit automated collection. It also adds strict adapters, a
+manifest-bound reference bundle with a counted gap report, ETF separation, and promotion
+criteria that must pass before the locked holdout is scored. No NSE file has been
+supplied yet, so every reference gate stays blocked. See
+[docs/m36-reference-evidence.md](docs/m36-reference-evidence.md).

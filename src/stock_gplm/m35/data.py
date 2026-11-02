@@ -32,6 +32,8 @@ M31_USED = (
     "inventory.json", "coverage-quality.json",
 )
 M32_USED = ("features.csv", "labels.csv", "split-plan.json", "quality-gates.json")
+# Written by M3.2 only when evidence exists; verified against the manifest whenever listed.
+M32_OPTIONAL = ("session-axis.csv", "instrument-classes.csv")
 # Price-level columns are in rupees and not comparable across symbols; they stay out of models.
 PRICE_LEVEL = frozenset({
     "sma_5", "sma_10", "sma_20", "sma_50", "sma_100", "sma_200",
@@ -65,6 +67,7 @@ class Inputs:
     m31_issues: list[dict[str, Any]]
     m31_raw_acceptance: str
     raw_root: Path
+    instrument_classes: dict[str, str] | None = None
 
 
 def _manifest(run: Path, contract: str, used: tuple[str, ...]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -96,14 +99,25 @@ def load_inputs(m31_run: Path, m32_run: Path, horizons: tuple[str, ...]) -> Inpu
     m31_run, m32_run = Path(m31_run).resolve(), Path(m32_run).resolve()
     m31, m31_hashes = _manifest(m31_run, M31_CONTRACT, M31_USED)
     m32, m32_hashes = _manifest(m32_run, M32_CONTRACT, M32_USED)
+    present = tuple(name for name in M32_OPTIONAL if name in m32.get("outputs", {}))
+    m32_hashes |= _manifest(m32_run, M32_CONTRACT, present)[1]
     if m31.get("raw_inputs_mutated") is not False or m32.get("raw_inputs_read") is not False:
         raise ValueError("upstream runs do not attest untouched raw inputs")
     if m32.get("readiness_run_id") != m31["run_id"]:
         raise ValueError("M3.2 run was not built from this M3.1 run")
     if m32.get("readiness_outputs") != m31["outputs"]:
         raise ValueError("M3.2 run binds different M3.1 outputs")
-    sessions = pd.read_csv(m31_run / "observed-sessions.csv", dtype=str)["trading_date"]
+    if "session-axis.csv" in present:
+        sessions = pd.read_csv(m32_run / "session-axis.csv", dtype=str)["trading_date"]
+    elif m32["session_source"] == "EMPIRICAL_UNION":
+        sessions = pd.read_csv(m31_run / "observed-sessions.csv", dtype=str)["trading_date"]
+    else:
+        raise ValueError("M3.2 run uses an authoritative calendar but does not bind its session axis")
     axis = SessionAxis(tuple(sessions), m32["session_source"])
+    classes = None
+    if "instrument-classes.csv" in present:
+        frame = pd.read_csv(m32_run / "instrument-classes.csv", dtype=str, keep_default_na=False)
+        classes = dict(zip(frame["symbol"], frame["instrument_class"]))
     split = json.loads((m32_run / "split-plan.json").read_text(encoding="utf-8"))
     stored = {item["horizon"]: item for item in split["plans"]}
     plans = {h: _plan_from_split(axis, h, stored[h]) for h in horizons}
@@ -136,12 +150,19 @@ def load_inputs(m31_run: Path, m32_run: Path, horizons: tuple[str, ...]) -> Inpu
     return Inputs(
         m31["run_id"], m32["run_id"], axis, plans, gates["gates"], coverage, prices, flags,
         features, labels, hashes, list(inventory["issues"]), quality["raw_candle_acceptance"],
-        Path(inventory["raw_root"]).resolve(),
+        Path(inventory["raw_root"]).resolve(), classes,
     )
 
 
-def static_universe(coverage: pd.DataFrame, policy: TrainingPolicy) -> pd.DataFrame:
-    """Per-symbol data-quality eligibility; uses no return or performance information."""
+def static_universe(
+    coverage: pd.DataFrame, policy: TrainingPolicy, classes: Mapping[str, str] | None = None,
+) -> pd.DataFrame:
+    """Per-symbol data-quality and instrument-class eligibility; uses no return information.
+
+    With classification evidence, only the policy's classes stay (ordinary equities by default):
+    ETFs and symbols of UNKNOWN class are excluded. Without it nothing is removed, and the
+    instrument-classification gate keeps the run exploratory.
+    """
     minimum = int(policy.universe["minimum_observations"])
     frame = coverage[["symbol", "observed_candles", "non_accepted_segments", "first_observed_date",
                       "last_observed_date", "large_close_moves"]].copy()
@@ -150,6 +171,12 @@ def static_universe(coverage: pd.DataFrame, policy: TrainingPolicy) -> pd.DataFr
         np.where(frame["non_accepted_segments"] > 0, "NON_ACCEPTED_SEGMENT",
                  np.where(frame["observed_candles"] < minimum, f"FEWER_THAN_{minimum}_OBSERVATIONS", "ELIGIBLE")),
     )
+    if classes is not None:
+        frame["instrument_class"] = frame["symbol"].map(classes).fillna("UNKNOWN")
+        excluded = (reasons == "ELIGIBLE") & ~frame["instrument_class"].isin(policy.instrument_classes)
+        reasons = np.where(excluded, "EXCLUDED_INSTRUMENT_CLASS_" + frame["instrument_class"], reasons)
+    else:
+        frame["instrument_class"] = "NOT_ESTABLISHED"
     frame["static_status"] = reasons
     return frame.sort_values("symbol", ignore_index=True)
 

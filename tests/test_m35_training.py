@@ -20,7 +20,7 @@ from stock_gplm.m35.data import (
     build_panel, horizon_frame, load_inputs, raw_acceptance_scoped, select, static_universe,
 )
 from stock_gplm.m35.policy import evaluate_daily_gates, load_policy
-from stock_gplm.m35.run import HOLDOUT_LEDGER, TRIAL_LEDGER, TrialBudgetExceeded, build_training_run
+from stock_gplm.m35.run import HOLDOUT_LEDGER, TRIAL_LEDGER, TrialBudgetExceeded, build_training_run, gate_check
 
 SESSIONS = 680
 SYMBOLS = 24
@@ -99,15 +99,28 @@ def _policy(root: Path, **changes) -> Path:
     return path
 
 
-def _pass_evidence_gates(m32: Path) -> None:
-    """Test-only stand-in for supplied calendar, listing, alias and corporate-action evidence."""
+PERMISSIVE = {"candidate_model": "lightgbm", "baseline_model": "logistic", "top_excess_net_mean_above": -1.0,
+              "positive_fold_share_at_least": 0.01, "auc_mean_at_least": 0.0, "auc_must_exceed_baseline": False,
+              "log_loss_must_beat_base_rate": False, "ece_mean_at_most": 0.49}
+ETF = "SYN23-EQ"
+
+
+def _pass_evidence_gates(m32: Path, run_id: str | None = None) -> None:
+    """Test-only stand-in for supplied calendar, listing, alias, corporate-action and class evidence."""
     path = m32 / "quality-gates.json"
     gates = json.loads(path.read_text())
-    for name in ("authoritative_calendar", "point_in_time_membership", "alias_history", "corporate_action_coverage"):
+    for name in ("authoritative_calendar", "point_in_time_membership", "alias_history", "corporate_action_coverage",
+                 "instrument_classification"):
         gates["gates"][name] = {"status": "PASS"}
     path.write_text(json.dumps(gates))
+    classes = m32 / "instrument-classes.csv"
+    classes.write_text("symbol,instrument_class\n" + "".join(
+        f"SYN{i:02d}-EQ,{'ETF' if f'SYN{i:02d}-EQ' == ETF else 'EQUITY'}\n" for i in range(SYMBOLS)))
     manifest = json.loads((m32 / "run-manifest.json").read_text())
     manifest["outputs"]["quality-gates.json"] = _sha(path)
+    manifest["outputs"]["instrument-classes.csv"] = _sha(classes)
+    if run_id is not None:
+        manifest["run_id"] = run_id
     (m32 / "run-manifest.json").write_text(json.dumps(manifest))
 
 
@@ -134,7 +147,8 @@ def test_blocked_evidence_runs_only_exploratory_baselines_and_never_scores_holdo
     assert gates["gates"]["raw_candle_acceptance"]["status"] == "PASS_SCOPED_TO_ELIGIBLE_UNIVERSE"
     assert gates["gates"]["minute_data"]["status"] == "NOT_REQUIRED_FOR_DAILY_ONLY_TRAINING"
     assert set(gates["horizons"]["1-7d"]["blockers"]) == {
-        "authoritative_calendar", "point_in_time_membership", "alias_history", "corporate_action_coverage"}
+        "authoritative_calendar", "point_in_time_membership", "alias_history", "corporate_action_coverage",
+        "instrument_classification"}
     metrics = json.loads((run / "metrics.json").read_text())["1-7d"]
     assert set(metrics["models"]) == {"heuristic_momentum", "logistic"}
     assert all(m["locked_holdout"] == "NOT_EVALUATED_EXPLORATORY_MODE" for m in metrics["models"].values())
@@ -156,18 +170,81 @@ def test_passing_daily_gates_train_lightgbm_and_consume_the_holdout_once(runs):
     m31, m32, root = runs
     _pass_evidence_gates(m32)
     out = root / "out"
-    run = build_training_run(m31_run=m31, m32_run=m32, policy_path=_policy(root), output_root=out)
+    run = build_training_run(m31_run=m31, m32_run=m32, policy_path=_policy(root, promotion_criteria=PERMISSIVE),
+                             output_root=out)
     manifest = json.loads((run / "run-manifest.json").read_text())
     assert manifest["training_status"] == {"1-7d": "MODEL_TRAINED"}
     assert (run / "models/1-7d/lightgbm.txt").read_text().startswith("tree")
-    lgbm = json.loads((run / "metrics.json").read_text())["1-7d"]["models"]["lightgbm"]
+    metrics = json.loads((run / "metrics.json").read_text())["1-7d"]
+    assert metrics["promotion"]["promoted"] is True
+    lgbm = metrics["models"]["lightgbm"]
     assert isinstance(lgbm["locked_holdout"], dict) and lgbm["locked_holdout"]["rows"] > 0
-    assert pd.read_csv(run / "ranking-1-7d.csv")["model"].eq("lightgbm").all()
+    ranking = pd.read_csv(run / "ranking-1-7d.csv")
+    assert ranking["model"].eq("lightgbm").all()
+    assert ETF not in set(ranking["symbol"])
+    universe = pd.read_csv(run / "universe.csv").set_index("symbol")
+    assert universe.loc[ETF, "static_status"] == "EXCLUDED_INSTRUMENT_CLASS_ETF"
     # A second policy on the same M3.2 run may not look at the holdout again.
-    again = build_training_run(m31_run=m31, m32_run=m32, policy_path=_policy(root, seed=8), output_root=out)
+    again = build_training_run(m31_run=m31, m32_run=m32, policy_path=_policy(root, seed=8,
+                               promotion_criteria=PERMISSIVE), output_root=out)
     second = json.loads((again / "metrics.json").read_text())["1-7d"]["models"]["lightgbm"]
     assert second["locked_holdout"] == f"ALREADY_CONSUMED_BY_RUN {run.name}"
     assert len((out / HOLDOUT_LEDGER).read_text().splitlines()) == 1
+
+
+def test_unmet_promotion_criteria_train_but_never_reserve_or_score_the_holdout(runs):
+    m31, m32, root = runs
+    _pass_evidence_gates(m32)
+    strict = PERMISSIVE | {"top_excess_net_mean_above": 1.0}
+    run = build_training_run(m31_run=m31, m32_run=m32, policy_path=_policy(root, promotion_criteria=strict),
+                             output_root=root / "out")
+    metrics = json.loads((run / "metrics.json").read_text())["1-7d"]
+    assert metrics["promotion"]["promoted"] is False
+    assert metrics["promotion"]["checks"]["top_excess_net_mean"]["passed"] is False
+    assert {m["locked_holdout"] for m in metrics["models"].values()} == {"NOT_EVALUATED_PROMOTION_CRITERIA_NOT_MET"}
+    assert not (root / "out" / HOLDOUT_LEDGER).exists()
+
+
+def test_rebuilt_m32_cannot_reset_the_trial_budget_or_reopen_the_holdout(runs):
+    m31, m32, root = runs
+    _pass_evidence_gates(m32)
+    out = root / "out"
+    policy = json.loads(_policy(root, promotion_criteria=PERMISSIVE).read_text())
+    policy["evaluation"]["trial_budget_per_horizon"] = 5
+    path = root / "budget.json"
+    path.write_text(json.dumps(policy))
+    first = build_training_run(m31_run=m31, m32_run=m32, policy_path=path, output_root=out)
+    rebuilt = shutil.copytree(m32, root / "m32-rebuilt")
+    _pass_evidence_gates(rebuilt, run_id="a-rebuilt-m32-run")
+    with pytest.raises(TrialBudgetExceeded):
+        build_training_run(m31_run=m31, m32_run=rebuilt, policy_path=path, output_root=out)
+    policy["evaluation"]["trial_budget_per_horizon"] = 6
+    path.write_text(json.dumps(policy))
+    again = build_training_run(m31_run=m31, m32_run=rebuilt, policy_path=path, output_root=out)
+    lgbm = json.loads((again / "metrics.json").read_text())["1-7d"]["models"]["lightgbm"]
+    assert lgbm["locked_holdout"] == f"ALREADY_CONSUMED_BY_RUN {first.name}"
+    entries = [json.loads(line) for line in (out / TRIAL_LEDGER).read_text().splitlines()]
+    assert [e["trial"] for e in entries] == [1, 2, 3, 4, 5, 6]
+
+
+def test_gate_check_reports_without_reserving_fitting_or_writing(runs):
+    m31, m32, root = runs
+    policy = _policy(root)
+    before = sorted(p.name for p in root.rglob("*"))
+    report = gate_check(m31_run=m31, m32_run=m32, policy_path=policy)
+    assert report["horizons"]["1-7d"]["mode"] == "EXPLORATORY_BASELINE_ONLY"
+    assert report["gates"]["instrument_classification"]["status"] == "BLOCKED"
+    assert report["instrument_classification"] == "NOT_ESTABLISHED"
+    assert sorted(p.name for p in root.rglob("*")) == before
+
+
+def test_authoritative_m32_without_a_bound_axis_is_refused(runs):
+    m31, m32, root = runs
+    manifest = json.loads((m32 / "run-manifest.json").read_text())
+    manifest["session_source"] = "AUTHORITATIVE_CALENDAR"
+    (m32 / "run-manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="does not bind its session axis"):
+        load_inputs(m31, m32, ("1-7d",))
 
 
 def test_trial_budget_is_reserved_before_fitting_and_enforced(runs):
@@ -257,6 +334,11 @@ def test_gate_scoping_cannot_pass_reference_evidence_or_hide_other_issues(runs):
     report = evaluate_daily_gates(blocked, scoped_raw_acceptance=True, folds={"1-7d": 2}, horizons=("1-7d",))
     assert report["horizons"]["1-7d"]["mode"] == "EXPLORATORY_BASELINE_ONLY"
     assert "FEWER_THAN_3_WALK_FORWARD_FOLDS" in report["horizons"]["1-7d"]["blockers"]
+    # An M3.2 run that predates a gate cannot pass it by omission.
+    passing = {name: {"status": "PASS"} for name in blocked}
+    report = evaluate_daily_gates(passing, scoped_raw_acceptance=False, folds={"1-7d": 3}, horizons=("1-7d",))
+    assert report["horizons"]["1-7d"]["blockers"] == ["instrument_classification"]
+    assert "predates" in report["gates"]["instrument_classification"]["blocker"]
 
 
 @pytest.mark.parametrize("mutate, message", [
@@ -264,6 +346,9 @@ def test_gate_scoping_cannot_pass_reference_evidence_or_hide_other_issues(runs):
     (lambda p: p.__setitem__("horizons", ["intraday"]), "not a daily"),
     (lambda p: p["costs"]["buy_bps"].__setitem__("stt", -1), "nonnegative"),
     (lambda p: p["evaluation"].__setitem__("trial_budget_per_horizon", 0), "trial budget"),
+    (lambda p: p["universe"].__setitem__("instrument_classes", ["STOCK"]), "instrument_classes"),
+    (lambda p: p.pop("promotion_criteria"), "promotion_criteria"),
+    (lambda p: p["promotion_criteria"].__setitem__("baseline_model", "lightgbm"), "another training model"),
 ])
 def test_invalid_policies_are_refused(tmp_path, mutate, message):
     raw = json.loads((REPO / "config/m35/daily-training-policy.json").read_text())

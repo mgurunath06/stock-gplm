@@ -16,7 +16,8 @@ from .labels import DAILY_LABEL_CONTRACTS, LABEL_CONTRACT, LABEL_CONTRACTS, Labe
 from .readiness import DatasetRow, _canonical_hash, _stream_sha256, _write_json
 from .splits import build_walk_forward, verify_plan
 
-RESEARCH_VERSION = 1
+RESEARCH_VERSION = 2
+INSTRUMENT_CLASSES = frozenset({"EQUITY", "ETF", "UNKNOWN"})
 FEATURE_PREFIX = ("symbol", "as_of_date", "run_index", "run_observation", "source_path", "source_sha256")
 LABEL_FIELDS = tuple(LabelRow.__dataclass_fields__)
 MINIMUM_LABELLED_SAMPLES_PER_HORIZON = 1
@@ -51,13 +52,20 @@ def load_readiness_run(run: Path) -> tuple[dict[str, list[DatasetRow]], SessionA
     return symbols, SessionAxis(sessions, "EMPIRICAL_UNION"), {"manifest": manifest, "quality": quality}
 
 
+def _write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
+    with path.open("x", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
 def _gate(passed: bool, blocker: str) -> dict[str, str]:
     return {"status": "PASS"} if passed else {"status": "BLOCKED", "blocker": blocker}
 
 
 def _reference_gates(
     symbols: Mapping[str, list[DatasetRow]], axis: SessionAxis, evidence: ReferenceEvidence,
-    quality: dict[str, Any],
+    quality: dict[str, Any], classes: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, str]]:
     covered = bool(symbols) and all(
         evidence.corporate_action_coverage(symbol, rows[0].trading_date, rows[-1].trading_date) == "COMPLETE"
@@ -85,6 +93,11 @@ def _reference_gates(
         "corporate_action_coverage": _gate(
             covered, "complete corporate-action coverage must span every symbol's history",
         ),
+        # Supplied classes separate ETFs from ordinary equities; UNKNOWN symbols are excluded downstream.
+        "instrument_classification": _gate(
+            classes is not None and set(symbols) <= set(classes),
+            "ETF/equity classification evidence must cover every symbol",
+        ),
         "minute_data": _gate(False, "no confirmed real minute-level schema or data exists"),
     }
 
@@ -92,6 +105,7 @@ def _reference_gates(
 def build_research_run(
     *, readiness_run: Path, output_root: Path, evidence: ReferenceEvidence | None = None,
     axis: SessionAxis | None = None, evidence_hashes: Mapping[str, str] | None = None,
+    instrument_classes: Mapping[str, str] | None = None,
 ) -> Path:
     """Write features, labels, splits and gates; training readiness stays NOT_READY."""
     evidence = evidence or ReferenceEvidence()
@@ -104,6 +118,8 @@ def build_research_run(
         raise ValueError("output root must be outside the immutable raw tree")
     if not symbols:
         raise ValueError("M3.1 run contains no validated candles")
+    if instrument_classes is not None and not set(instrument_classes.values()) <= INSTRUMENT_CLASSES:
+        raise ValueError("unsupported instrument class")
     contracts = {
         "features": {"contract": FEATURE_CONTRACT, "specs": [asdict(item) for item in FEATURE_SPECS]},
         "labels": {"contract": LABEL_CONTRACT, "horizons": [item.to_dict() for item in LABEL_CONTRACTS]},
@@ -116,6 +132,9 @@ def build_research_run(
         "session_source": axis.source,
         "sessions_sha256": _canonical_hash(list(axis.sessions)),
         "evidence": dict(sorted((evidence_hashes or {}).items())),
+        "instrument_classes_sha256": (
+            None if instrument_classes is None else _canonical_hash(dict(sorted(instrument_classes.items())))
+        ),
         "contracts_sha256": _canonical_hash(contracts),
     }
     run_id = _canonical_hash(binding)
@@ -154,7 +173,13 @@ def build_research_run(
             "schema_version": 1, "plans": [plan.to_dict() for plan in plans],
         })
         _write_json(partial / "contracts.json", {"schema_version": 1, **contracts})
-        gates = _reference_gates(symbols, axis, evidence, m31["quality"])
+        if axis.source == "AUTHORITATIVE_CALENDAR":
+            # Downstream runs must rebuild plans on this axis, not on the observed union.
+            _write_csv(partial / "session-axis.csv", ["trading_date"], [[day] for day in axis.sessions])
+        if instrument_classes is not None:
+            _write_csv(partial / "instrument-classes.csv", ["symbol", "instrument_class"],
+                       [[name, instrument_classes[name]] for name in sorted(instrument_classes)])
+        gates = _reference_gates(symbols, axis, evidence, m31["quality"], instrument_classes)
         references_pass = all(
             gates[name]["status"] == "PASS" for name in gates if name != "minute_data"
         )

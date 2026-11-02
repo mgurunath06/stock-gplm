@@ -719,7 +719,8 @@ def test_run_is_deterministic_read_only_and_blocks_without_evidence(tmp_path):
     gates = json.loads((run / "quality-gates.json").read_text())
     assert gates["training_readiness"] == "NOT_READY" and gates["model_training"] == "NOT_PERFORMED"
     assert gates["session_source"] == "EMPIRICAL_UNION"
-    for name in ("authoritative_calendar", "point_in_time_membership", "alias_history", "corporate_action_coverage", "minute_data"):
+    for name in ("authoritative_calendar", "point_in_time_membership", "alias_history", "corporate_action_coverage",
+                 "instrument_classification", "minute_data"):
         assert gates["gates"][name]["status"] == "BLOCKED", name
     assert gates["gates"]["raw_candle_acceptance"]["status"] == "PASS"
     assert {item["decision"] for item in gates["horizons"].values()} == {"BLOCKED"}
@@ -810,9 +811,14 @@ def test_supplied_evidence_can_pass_reference_gates_but_never_training(tmp_path)
     run = build_research_run(
         readiness_run=m31, output_root=tmp_path / "out",
         evidence=ReferenceEvidence(_inventory(instrument), {"RELIANCE-EQ": catalog}),
-        axis=SessionAxis.from_calendar(calendar),
+        axis=SessionAxis.from_calendar(calendar), instrument_classes={"RELIANCE-EQ": "EQUITY"},
     )
     gates = json.loads((run / "quality-gates.json").read_text())
+    outputs = json.loads((run / "run-manifest.json").read_text())["outputs"]
+    # The calendar axis and classes are bound so M3.5 rebuilds plans on the same sessions.
+    assert {"session-axis.csv", "instrument-classes.csv"} <= set(outputs)
+    assert (run / "session-axis.csv").read_text().splitlines()[1:] == [d.date for d in days]
+    assert gates["gates"]["instrument_classification"]["status"] == "PASS"
     assert gates["gates"]["authoritative_calendar"]["status"] == "PASS"
     assert gates["gates"]["point_in_time_membership"]["status"] == "PASS"
     assert gates["gates"]["corporate_action_coverage"]["status"] == "PASS"
