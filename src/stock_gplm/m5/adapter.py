@@ -144,6 +144,55 @@ def _share_factor(event: CorporateActionEvent) -> Fraction:
     return split_factor(new_shares=event.new_shares, old_shares=event.base_shares)
 
 
+# M5.1.1 strict authority policy. Markers that identify synthetic, fixture or test evidence.
+SYNTHETIC_MARKERS = ("synthetic", "fixture", "test", "example", "dummy", "fake", "mock", "sample")
+_SOURCE_FIELDS = frozenset({"source", "source_reference", "reference", "source_identifier", "source_url"})
+
+
+def asserted_sources(value: Any, _depth: int = 0) -> list[str]:
+    """Every source/reference string asserted anywhere inside ``value`` (bounded walk)."""
+    if _depth > 6:
+        return []
+    found: list[str] = []
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif hasattr(value, "__dataclass_fields__"):
+        items = [(name, getattr(value, name, None)) for name in value.__dataclass_fields__]
+    elif isinstance(value, (list, tuple)):
+        items = [("", item) for item in value]
+    else:
+        return found
+    for name, item in items:
+        if name in _SOURCE_FIELDS and isinstance(item, str):
+            found.append(item)
+        elif not isinstance(item, (str, bytes, int, float, bool)) and item is not None:
+            found.extend(asserted_sources(item, _depth + 1))
+    return found
+
+
+def strict_authority_failures(evidence: ReferenceEvidence) -> list[tuple[str, str]]:
+    """Authority gaps that keep ``STRICT_RESEARCH`` BLOCKED (audit criteria 3-5).
+
+    Each gap is an EVIDENCE failure, so DIAGNOSTIC_ONLY runs are unaffected. No
+    verified approval bundle, authoritative instrument classification or
+    registered cost schedule exists yet, so those three gates always fail: strict
+    status cannot be self-asserted by local files, a naming heuristic or caller bps.
+    """
+    gaps: list[tuple[str, str]] = []
+    synthetic = sorted({s for s in asserted_sources(evidence)
+                        if any(marker in s.lower() for marker in SYNTHETIC_MARKERS)})
+    if synthetic:
+        gaps.append(("EVIDENCE_SYNTHETIC", f"evidence declares synthetic/test sources {synthetic[:5]}; "
+                     "it supports diagnostics only"))
+    gaps.append(("EVIDENCE_AUTHORITY_UNAPPROVED", "source, licence and validation status are self-asserted by "
+                 "local files; no verified reviewer-approval bundle exists"))
+    gaps.append(("INSTRUMENT_CLASSIFICATION_UNVERIFIED", "equity/ETF status rests on the M3.7 naming heuristic; "
+                 "no authoritative exchange classification is registered"))
+    gaps.append(("COST_SCHEDULE_UNREGISTERED", "no registered, checksum-bound transaction-cost schedule covers "
+                 "the request; caller bps and free-text cost bases are not authoritative"))
+    return gaps
+
+
 class HistoricalDataAdapter:
     """Assess one symbol and date range; release bars only for usable decisions."""
 
@@ -209,6 +258,10 @@ class HistoricalDataAdapter:
         if adjustment_events and request.mode == EligibilityMode.STRICT_RESEARCH:
             fail("CORPORATE_ACTION_EVENTS_CALLER_SUPPLIED", "STRICT_RESEARCH uses only adjustment events from "
                  "the evidence-paths file; caller-supplied events are diagnostic only")
+
+        if request.mode == EligibilityMode.STRICT_RESEARCH:
+            for code, message in strict_authority_failures(self.evidence):
+                fail(code, message)
 
         # 1. Request-level integrity gates: series, holdout, publication lock, symbol directory.
         if request.series not in SUPPORTED_SERIES:

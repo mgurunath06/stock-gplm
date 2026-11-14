@@ -66,6 +66,17 @@ evidence-paths document.
   Importing a package symbol therefore cannot seal a forged decision. Reading
   closure cells or patching the package is still possible and stays out of
   scope. Only `verify_seal` is public.
+- *Strict authority gates (M5.1.1):* `adapter.strict_authority_failures` adds
+  EVIDENCE-class failures to every `STRICT_RESEARCH` request:
+  `EVIDENCE_SYNTHETIC` (any asserted source or reference containing a synthetic,
+  fixture, test, example, dummy, fake, mock or sample marker),
+  `EVIDENCE_AUTHORITY_UNAPPROVED`, `INSTRUMENT_CLASSIFICATION_UNVERIFIED` and
+  `COST_SCHEDULE_UNREGISTERED`. No verified approval bundle, authoritative
+  ETF classification or registered cost schedule exists yet, so strict requests
+  are always `BLOCKED` today. `DIAGNOSTIC_ONLY` is unaffected. Synthetic test
+  modules that exercise the strict run machinery opt into the explicit
+  `waive_strict_authority` monkeypatch fixture. `tests/test_m511_authority.py`
+  runs without it.
 - *Not yet closed (see `docs/handover/m511-to-codex.md`):* sealed objects are
   not revalidated against their source files before strict classification
   (freshness), and seals prove which loader ran, not whether the evidence is

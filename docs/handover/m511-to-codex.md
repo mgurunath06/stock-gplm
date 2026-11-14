@@ -21,8 +21,8 @@ corporate actions or provider price basis evidence.
 | Worktree | `/home/mgurunath/projects/stock-gplm-m45` |
 | Branch | `fix/m511-strict-authorization` (local only, never pushed) |
 | Base | `feature/m51-integrity-hardening` @ `0a25f864dd4ea255a828a4ff6cce3a66d02c04bc` |
-| HEAD | `667ab61` fix(m511): remove the directly importable seal signer (audit finding A.1) |
-| Handover docs | committed in the commit after `667ab61` (docs only); working tree otherwise clean |
+| HEAD | the `fix(m511): add strict authority gates` commit (see `git log`); prior: `39e55d1` docs, `667ab61` A.1 |
+| Working tree | clean after the authority-gates commit |
 
 The main checkout `/home/mgurunath/projects/stock-gplm` is on
 `feature/v1-configurable-strategy-engine` and has the audit untracked under
@@ -34,8 +34,8 @@ The main checkout `/home/mgurunath/projects/stock-gplm` is on
 | --- | --- | --- |
 | A.1 importable signer | **FIXED** (`667ab61`) | See §4. |
 | A.2 freshness / revalidation | NOT STARTED | P0. Design in §6.2. |
-| A.3 heuristic ETF + unverified costs not gated | NOT STARTED | P0. Design in §6.1. |
-| A.4 synthetic/unapproved evidence can reach strict | NOT STARTED | P0/P1. Design in §6.1. |
+| A.3 heuristic ETF + unverified costs not gated | **FIXED (gate)** | Strict always BLOCKED until authoritative sources exist. See §4b. |
+| A.4 synthetic/unapproved evidence can reach strict | **FIXED (gate)** | See §4b. The positive approval path is C (§6.4). |
 | B atomic universes | PASS in audit, no work needed | |
 | C evidence authority | NOT STARTED | P1. Design in §6.4. |
 | D fabrication/ranking | PASS in audit, no work needed | |
@@ -71,6 +71,42 @@ signer. `from stock_gplm.m5.issuance import _seal` let a caller seal a hand-buil
 **Risk.** `importlib.reload` of `adapter` or `evidence` now raises because the kind is
 already claimed. That is intentional. Do not add a reset hook.
 
+## 4b. Completed: A.3/A.4 — strict authority gates
+
+**Root cause.** Strict eligibility accepted any structurally valid local evidence.
+`synthetic://` manifests, the M3.7 ETF naming heuristic and caller-asserted (even zero)
+costs could all yield an `ELIGIBLE`, investable strict run.
+
+**Remedy.**
+- `src/stock_gplm/m5/adapter.py`: `asserted_sources()` walks the evidence (dicts,
+  dataclasses, sequences; depth ≤ 6) for `source`, `source_reference`, `reference`,
+  `source_identifier` and `source_url` strings. `strict_authority_failures()` returns
+  `EVIDENCE_SYNTHETIC` when any of them contains a `SYNTHETIC_MARKERS` word, and
+  **always** returns `EVIDENCE_AUTHORITY_UNAPPROVED`, `INSTRUMENT_CLASSIFICATION_UNVERIFIED`
+  and `COST_SCHEDULE_UNREGISTERED`, because no authoritative source for those exists in
+  code yet. `assess` applies them only in `STRICT_RESEARCH`.
+- `src/stock_gplm/m5/models.py`: the four codes are EVIDENCE class, so strict →
+  `BLOCKED` and diagnostics are unaffected.
+- `tests/m5_fixtures.py`: TEST-ONLY `waive_strict_authority` fixture (monkeypatches the
+  policy to `[]`). `tests/test_m51_integrity.py` and `tests/test_m5_historical_adapter.py`
+  opt in with `pytestmark` because they test strict run, replay, ranking and accounting
+  machinery on synthetic fixtures.
+- `tests/test_m511_authority.py` (9 tests, no waiver): synthetic evidence → BLOCKED with
+  all four codes; strict universe and zero-cost strict run fail before writing; diagnostic
+  run still succeeds; clean-looking sources are still unapproved; nested markers found.
+- Docs: `docs/m51-integrity-hardening.md`.
+
+**To lift a gate later (Codex):** replace the unconditional entry with a check of a
+loaded, checksum-bound authoritative source. For example, add `cost_schedule` and
+`instrument_classification` keys to the evidence-paths contract, load and hash them in
+`load_reference_evidence`, and verify coverage for the symbol and range. Never delete a
+gate without that replacement. When a positive path exists, add a non-waived test for it.
+
+**Residual risks.** Marker matching is a denylist and only one layer of defence. The real
+protection is that `EVIDENCE_AUTHORITY_UNAPPROVED` always fails until C is built. Words
+such as `test` can appear in legitimate references; that fails closed (BLOCKED), which is
+acceptable. The waiver fixture must never move into `src/` or a non-test conftest.
+
 ## 5. Test results
 
 Command (the worktree has no `.venv`; without `PYTHONPATH=src` the **main checkout** is
@@ -83,6 +119,7 @@ imported instead and results are meaningless):
 | --- | --- |
 | `0a25f86` baseline | 734 passed, 2 skipped |
 | `667ab61` | **736 passed, 2 skipped, 0 failed** |
+| authority-gates commit | **745 passed, 2 skipped, 0 failed** |
 
 The two skips (`test_m22_master_validation.py:95`, `test_m2_quality.py:272`) need local
 real-data files that are not in this worktree. The audit's 736/0-skip figure came from an
@@ -91,6 +128,9 @@ environment that had them. All evidence here is synthetic.
 ## 6. Remaining work, in priority order
 
 ### 6.1 P0 — strict authority gates (audit criteria 3, 4, 5)
+
+**DONE as blocking gates (§4b).** Remaining here: the positive paths (registered cost
+schedule and authoritative classification loaders). The notes below are kept for that work.
 
 - **ETF classification.** `adapter.py` (~line 237) always appends
   `EligibilityEvidence("instrument_classification", "HEURISTIC", …)` and only fails

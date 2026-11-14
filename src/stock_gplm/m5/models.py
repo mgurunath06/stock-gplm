@@ -55,6 +55,9 @@ FAILURE_CLASSES: dict[str, FailureClass] = {
         "PROVIDER_PRICE_BASIS_UNVERIFIED",
         # M5.1: evidence or events that did not come through the file-backed evidence pipeline.
         "EVIDENCE_NOT_ISSUED", "CORPORATE_ACTION_EVENTS_CALLER_SUPPLIED", "CORPORATE_ACTION_STATUS_UNRESOLVED",
+        # M5.1.1: strict authority gates (see adapter.strict_authority_failures).
+        "EVIDENCE_SYNTHETIC", "EVIDENCE_AUTHORITY_UNAPPROVED", "INSTRUMENT_CLASSIFICATION_UNVERIFIED",
+        "COST_SCHEDULE_UNREGISTERED",
     )
 }
 

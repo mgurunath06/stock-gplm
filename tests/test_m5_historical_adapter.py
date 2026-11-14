@@ -21,6 +21,10 @@ from m5_fixtures import (
     write_segment,
     write_symbol,
 )
+from m5_fixtures import waive_strict_authority  # noqa: F401 - fixture
+
+# Synthetic fixtures: the strict authority gates are waived here and enforced in test_m511_authority.py.
+pytestmark = pytest.mark.usefixtures("waive_strict_authority")
 
 from stock_gplm.m39b import CorporateActionEvent, SourceEvidence
 from stock_gplm.m5 import (

@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from stock_gplm.m5.evidence import ReferenceEvidence, load_reference_evidence
 from stock_gplm.m5.models import canonical_hash
 
@@ -242,3 +244,17 @@ def tree_hash(root: Path) -> str:
             digest.update(path.relative_to(root).as_posix().encode())
             digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
+
+
+@pytest.fixture
+def waive_strict_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """TEST-ONLY: waive the M5.1.1 strict authority gates for synthetic fixtures.
+
+    These fixtures are synthetic by design, so the real policy keeps every strict
+    request BLOCKED. Modules that exercise the strict run, replay, ranking and
+    accounting machinery opt in explicitly. Only in-process patching can do this,
+    which is out of scope for the seal threat model. ``tests/test_m511_authority.py``
+    runs without the waiver and proves the gates hold.
+    """
+    import stock_gplm.m5.adapter as adapter
+    monkeypatch.setattr(adapter, "strict_authority_failures", lambda evidence: [])
