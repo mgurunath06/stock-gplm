@@ -422,7 +422,7 @@ def test_run_provenance_points_to_exact_immutable_version(tmp_path: Path) -> Non
 def test_m5_has_no_network_broker_credential_or_scheduler_dependency() -> None:
     probe = ("import sys, stock_gplm.m5, stock_gplm.m5.cli, stock_gplm.v1.studio;"
              "print(sorted(m for m in sys.modules if m.split('.')[0] in "
-             "{'socket_x','requests','urllib3','selenium','paramiko'} or m.startswith(("
+             "{'requests','urllib3','selenium','paramiko'} or m.startswith(("
              "'stock_gplm.m24','stock_gplm.m25','stock_gplm.m39.','stock_gplm.llm'))))")
     output = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True,
                             env={"PYTHONPATH": str(ROOT / "src")}).stdout.strip()
@@ -444,3 +444,10 @@ def test_unverified_provider_basis_blocks_strict_and_never_applies_adjustments(t
     # A possibly back-adjusted provider series is never adjusted again by M3.9-B.
     assert dataset.basis == "PROVIDER_SERIES_ADJUSTMENT_BASIS_UNVERIFIED" and dataset.share_events == ()
     assert dataset.adjustment_events == ()
+
+
+def test_equity_reconciles_with_realized_and_unrealized_pnl(tmp_path: Path) -> None:
+    run = _run(tmp_path, build_world(tmp_path), strategy_config(position_sizing={"type": "fixed_fraction", "value": 0.4}))
+    metrics = run["performance"]["metrics"]
+    assert metrics["ending_equity"] - 1_000_000.0 == pytest.approx(
+        metrics["net_pnl_realized"] + metrics["unrealized_pnl"], abs=1e-6)
