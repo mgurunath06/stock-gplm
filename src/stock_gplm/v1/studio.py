@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -102,6 +103,15 @@ refresh().catch(e=>out(e.message));
 class StudioHandler(BaseHTTPRequestHandler):
     registry: StrategyRegistry
 
+    def _trusted_origin(self) -> bool:
+        """Reject DNS-rebinding and cross-site requests to the loopback API."""
+        port = self.server.server_address[1]
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.headers.get("Host") not in allowed:
+            return False
+        origin = self.headers.get("Origin")
+        return origin is None or origin in {f"http://{host}" for host in allowed}
+
     def _json(self, status: int, value: Any) -> None:
         payload = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
@@ -131,6 +141,9 @@ class StudioHandler(BaseHTTPRequestHandler):
         return validate_strategy(load_document(body["document"], str(body["format"])))
 
     def do_GET(self) -> None:  # noqa: N802
+        if not self._trusted_origin():
+            self._json(403, {"error": "untrusted Host or Origin"})
+            return
         path = urlparse(self.path).path
         try:
             if path == "/":
@@ -155,6 +168,9 @@ class StudioHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._trusted_origin():
+            self._json(403, {"error": "untrusted Host or Origin"})
+            return
         path = urlparse(self.path).path
         try:
             if path in {"/api/validate", "/api/export", "/api/strategies"}:
@@ -190,6 +206,8 @@ class StudioHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
         except (json.JSONDecodeError, KeyError, StrategyValidationError, TypeError, ValueError) as exc:
             self._json(400, {"error": str(exc)})
+        except sqlite3.Error as exc:
+            self._json(409, {"error": f"registry rejected the change: {exc}"})
 
     def log_message(self, format: str, *args: object) -> None:
         return

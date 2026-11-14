@@ -1,4 +1,9 @@
-"""Deterministic, long-only research backtest using the generic evaluator."""
+"""Deterministic, long-only single-instrument backtest using the generic evaluator.
+
+Candles passed here are caller-supplied, so every result is classified
+``CALLER_SUPPLIED_UNVERIFIED``. Historical research runs must go through
+``stock_gplm.m5``, which obtains eligibility from manifest-verified inputs.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +12,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 from .evaluator import evaluate_strategy, normalize_candles
+from .execution import EXECUTION_POLICY, resting_exit
 from .schema import ValidatedStrategy, validate_strategy
+
+DATA_CLASSIFICATION = "CALLER_SUPPLIED_UNVERIFIED"
 
 
 @dataclass(frozen=True)
@@ -33,6 +41,7 @@ class BacktestResult:
     execution_policy: str
     trades: tuple[Trade, ...]
     total_net_return: float
+    data_classification: str = DATA_CLASSIFICATION
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,7 +59,12 @@ def run_backtest(
     strategy_version: int | None = None,
     data_quality_eligible: bool,
 ) -> BacktestResult:
-    """Backtest one instrument; signals at close can enter only next session open."""
+    """Backtest one instrument; close decisions execute only at the next session open.
+
+    ``data_quality_eligible`` is the caller's acknowledgement for synthetic
+    engineering data. It is not provenance evidence and cannot make a result
+    eligible for research ranking.
+    """
     if not data_quality_eligible:
         raise ValueError("data-quality eligibility gate failed")
     validated = strategy if isinstance(strategy, ValidatedStrategy) else validate_strategy(strategy)
@@ -65,69 +79,60 @@ def run_backtest(
     trades: list[Trade] = []
     pending_signal: int | None = None
     open_trade: dict[str, Any] | None = None
-    for index, candle in enumerate(candles):
-        if pending_signal is not None and open_trade is None:
-            raw_open = candle["open"]
-            open_trade = {
-                "signal": pending_signal,
-                "entry_index": index,
-                "entry_price": raw_open * (1.0 + costs),
-            }
-            pending_signal = None
-        if open_trade is not None:
-            entry = float(open_trade["entry_price"])
-            held = index - int(open_trade["entry_index"]) + 1
-            stop_price = entry * (1.0 - float(stop["value"]) / 100.0)
-            target_price = entry * (1.0 + float(target["value"]) / 100.0)
-            exit_price: float | None = None
-            reason = ""
-            # When both intraday bounds are touched, the conservative stop-first rule applies.
-            if candle["low"] <= stop_price:
-                exit_price, reason = stop_price * (1.0 - costs), "STOP_LOSS"
-            elif candle["high"] >= target_price:
-                exit_price, reason = target_price * (1.0 - costs), "TAKE_PROFIT"
-            elif evaluation.exit_signals[index]:
-                exit_price, reason = candle["close"] * (1.0 - costs), "EXIT_CONDITION"
-            elif held >= maximum:
-                exit_price, reason = candle["close"] * (1.0 - costs), "MAX_HOLDING"
-            if exit_price is not None:
-                raw_entry = candles[int(open_trade["entry_index"])]["open"]
-                gross_exit = exit_price / (1.0 - costs) if costs < 1 else exit_price
-                trades.append(
-                    Trade(
-                        entry_signal_date=candles[int(open_trade["signal"])]["date"],
-                        entry_date=candles[int(open_trade["entry_index"])]["date"],
-                        entry_price=entry,
-                        exit_date=candle["date"],
-                        exit_price=exit_price,
-                        exit_reason=reason,
-                        holding_sessions=held,
-                        gross_return=gross_exit / raw_entry - 1.0,
-                        net_return=exit_price / entry - 1.0,
-                    )
-                )
-                open_trade = None
-        if open_trade is None and index + 1 < len(candles) and evaluation.entry_signals[index]:
-            pending_signal = index
-    if open_trade is not None:
-        index = len(candles) - 1
-        candle = candles[index]
+    pending_exit: str | None = None
+
+    def close_trade(index: int, raw_exit: float, reason: str) -> None:
+        assert open_trade is not None
         entry = float(open_trade["entry_price"])
-        exit_price = candle["close"] * (1.0 - costs)
         raw_entry = candles[int(open_trade["entry_index"])]["open"]
+        exit_price = raw_exit * (1.0 - costs)
         trades.append(
             Trade(
                 entry_signal_date=candles[int(open_trade["signal"])]["date"],
                 entry_date=candles[int(open_trade["entry_index"])]["date"],
                 entry_price=entry,
-                exit_date=candle["date"],
+                exit_date=candles[index]["date"],
                 exit_price=exit_price,
-                exit_reason="END_OF_DATA",
+                exit_reason=reason,
                 holding_sessions=index - int(open_trade["entry_index"]) + 1,
-                gross_return=candle["close"] / raw_entry - 1.0,
+                gross_return=raw_exit / raw_entry - 1.0,
                 net_return=exit_price / entry - 1.0,
             )
         )
+
+    for index, candle in enumerate(candles):
+        # Session open: orders decided at the previous completed close execute here.
+        if pending_exit is not None and open_trade is not None:
+            close_trade(index, candle["open"], pending_exit)
+            open_trade, pending_exit = None, None
+        if pending_signal is not None and open_trade is None:
+            open_trade = {
+                "signal": pending_signal,
+                "entry_index": index,
+                "entry_price": candle["open"] * (1.0 + costs),
+                # Levels reference the observed market fill, not the cost-inflated price.
+                "stop_price": candle["open"] * (1.0 - float(stop["value"]) / 100.0),
+                "target_price": candle["open"] * (1.0 + float(target["value"]) / 100.0),
+            }
+            pending_signal = None
+        # Intrabar: resting stop and target orders.
+        if open_trade is not None:
+            fill = resting_exit(candle, float(open_trade["stop_price"]), float(open_trade["target_price"]))
+            if fill is not None:
+                close_trade(index, fill[0], fill[1])
+                open_trade = None
+        # Session close: decisions for the next open; the close itself is never a fill.
+        if open_trade is not None:
+            held = index - int(open_trade["entry_index"]) + 1
+            if evaluation.exit_signals[index]:
+                pending_exit = "EXIT_CONDITION"
+            elif held >= maximum:
+                pending_exit = "MAX_HOLDING"
+        elif index + 1 < len(candles) and evaluation.entry_signals[index]:
+            pending_signal = index
+    if open_trade is not None:
+        # Not a fill: the position is marked at the final completed close.
+        close_trade(len(candles) - 1, candles[-1]["close"], "END_OF_DATA_MARK")
     total = 1.0
     for trade in trades:
         total *= 1.0 + trade.net_return * allocation
@@ -136,7 +141,8 @@ def run_backtest(
         "strategy_version": strategy_version,
         "strategy_hash": validated.config_hash,
         "data_hash": _data_hash(candles),
-        "execution_policy": "completed_close_signal_next_session_open_v1",
+        "execution_policy": EXECUTION_POLICY,
+        "data_classification": DATA_CLASSIFICATION,
         "trades": [asdict(value) for value in trades],
         "total_net_return": total - 1.0,
     }

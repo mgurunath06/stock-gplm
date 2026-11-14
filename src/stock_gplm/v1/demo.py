@@ -9,6 +9,7 @@ from typing import Any
 
 from .backtest import run_backtest
 from .evaluator import evaluate_strategy
+from .execution import EXECUTION_POLICY
 from .registry import StrategyRegistry
 
 
@@ -80,7 +81,7 @@ def run_demo(output_dir: Path, config_dir: Path) -> dict[str, Any]:
     report = {
         "schema_version": 1,
         "classification": "SYNTHETIC_ENGINEERING_DEMO_NOT_MARKET_EVIDENCE",
-        "execution_policy": "completed_close_signal_next_session_open_v1",
+        "execution_policy": EXECUTION_POLICY,
         "candle_count": len(rows),
         "strategies": demonstrations,
     }

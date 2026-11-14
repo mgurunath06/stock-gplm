@@ -27,5 +27,7 @@
 - [M3.9-B corporate-action remediation engine](m39b-corporate-actions.md)
 - [M3.9-B engineering evidence report — 2026-11-14](m39b-evidence-report-2026-11-14.md)
 - [V1 declarative strategy engine and Strategy Studio](v1-strategy-engine.md)
+- [M4 integration inventory — 2026-11-14](m4-integration-inventory.md)
+- [M4 consolidation report — 2026-11-14](m4-consolidation-report.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)

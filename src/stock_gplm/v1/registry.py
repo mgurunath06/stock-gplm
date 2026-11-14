@@ -80,6 +80,14 @@ class StrategyRegistry:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(strategy_id, strategy_version) REFERENCES strategy_versions(strategy_id, version)
                 );
+                CREATE TRIGGER IF NOT EXISTS strategy_versions_no_update BEFORE UPDATE ON strategy_versions
+                BEGIN SELECT RAISE(ABORT, 'strategy versions are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS strategy_versions_no_delete BEFORE DELETE ON strategy_versions
+                BEGIN SELECT RAISE(ABORT, 'strategy versions are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS backtest_results_no_update BEFORE UPDATE ON backtest_results
+                BEGIN SELECT RAISE(ABORT, 'backtest results are immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS backtest_results_no_delete BEFORE DELETE ON backtest_results
+                BEGIN SELECT RAISE(ABORT, 'backtest results are immutable'); END;
                 """
             )
 
@@ -98,6 +106,8 @@ class StrategyRegistry:
         validated = strategy if isinstance(strategy, ValidatedStrategy) else validate_strategy(strategy)
         timestamp = _now()
         with self._connect() as connection:
+            # Serialize version allocation so concurrent saves cannot race MAX(version) + 1.
+            connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT version FROM strategy_versions WHERE strategy_id = ? AND config_hash = ?",
                 (validated.strategy_id, validated.config_hash),
@@ -161,11 +171,21 @@ class StrategyRegistry:
         record = self.get(result.strategy_id, result.strategy_version)
         if record.config_hash != result.strategy_hash:
             raise ValueError("backtest strategy hash does not match immutable registry version")
+        payload = json.dumps(result.to_dict(), sort_keys=True, allow_nan=False)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT result_json FROM backtest_results WHERE result_hash = ?", (result.result_hash,)
+            ).fetchone()
+            if existing is not None:
+                # Deterministic reruns are idempotent; a differing payload under one hash is corruption.
+                if existing["result_json"] != payload:
+                    raise ValueError("stored backtest differs from a result with the same hash")
+                return
             connection.execute(
                 "INSERT INTO backtest_results VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (result.result_hash, result.strategy_id, result.strategy_version, result.strategy_hash,
-                 result.data_hash, json.dumps(result.to_dict(), sort_keys=True, allow_nan=False), _now()),
+                 result.data_hash, payload, _now()),
             )
 
     def create_paper_intent(

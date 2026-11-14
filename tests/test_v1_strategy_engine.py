@@ -166,7 +166,8 @@ def test_backtest_and_paper_intent_reference_exact_version_hash(tmp_path: Path) 
     result = run_backtest(record.config, candles(8), strategy_version=record.version, data_quality_eligible=True)
     assert result.strategy_hash == record.config_hash
     assert result.strategy_version == record.version
-    assert result.execution_policy == "completed_close_signal_next_session_open_v1"
+    assert result.execution_policy == "completed_close_signal_next_session_open_v2"
+    assert result.data_classification == "CALLER_SUPPLIED_UNVERIFIED"
     assert result.trades[0].entry_signal_date < result.trades[0].entry_date
     registry.record_backtest(result)
     active = registry.activate(record.strategy_id, record.version)

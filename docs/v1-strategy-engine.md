@@ -54,26 +54,42 @@ at index `t` read at most `t`; offsets can only read `t` or earlier. Rolling
 windows are trailing windows. A signal calculated from the completed close at
 `t` can enter no earlier than the open at `t+1`.
 
-The V1 backtester is deliberately small and conservative:
+The single-instrument V1 backtester is deliberately small and conservative. Its
+execution policy is `completed_close_signal_next_session_open_v2` (M4 replaced
+v1, which filled exit-condition and holding-period exits at the same close that
+produced the decision):
 
 - it is long-only and processes one instrument at a time;
-- percent stops and targets are supported by the runner;
+- entry signals, exit-condition signals and the maximum-holding rule are all
+  decided at a completed close and execute at the next session open;
+- percent stops and targets are resting orders measured from the observed fill
+  open. Rules shared with the M5 portfolio simulator live in
+  `stock_gplm.v1.execution`: an open through the stop fills at that worse open
+  (`STOP_LOSS_GAP`); an open through the target fills at the target, never the
+  better open (`TAKE_PROFIT_GAP`); if one bar touches both, the stop fills first;
 - sequential trade returns are weighted by the configured fixed fraction;
-- if stop and target are both touched in one candle, stop is assumed first;
 - configured one-way commission and slippage are applied on entry and exit;
-- an explicit data-quality eligibility gate must pass;
+- a position still open after the last candle is marked at the final close as
+  `END_OF_DATA_MARK`, which is a valuation, not a fill;
 - the input data hash, exact strategy version and canonical configuration hash
   are stored with the result.
 
-The Studio's pasted-candle facility is for synthetic demonstrations. It does not
+Candles passed to `run_backtest` are caller-supplied, so every result carries
+`data_classification: CALLER_SUPPLIED_UNVERIFIED`. The `data_quality_eligible`
+flag is an acknowledgement for synthetic engineering data, not evidence. The
+Studio's pasted-candle facility is for synthetic demonstrations. It does not
 turn pasted data into accepted M1/M2/M3 evidence, prove historical completeness
-or make data training-ready. A production-quality backtest adapter must obtain
-eligibility from manifest-verified, accepted local inputs rather than a UI claim.
+or make data training-ready. Historical research backtests must obtain
+eligibility from manifest-verified local inputs rather than a UI claim.
 
 ## Immutable registry
 
 `StrategyRegistry` creates a local SQLite database with append-only strategy
-versions. Saving a changed configuration increments its version. Saving the exact
+versions. Saving a changed configuration increments its version inside a
+`BEGIN IMMEDIATE` transaction, so concurrent saves cannot allocate the same
+version. Database triggers abort any `UPDATE` or `DELETE` of stored strategy
+versions or backtest results. Recording an identical backtest again is a no-op;
+a different payload under an existing result hash is rejected. Saving the exact
 same ID and hash twice is rejected. The canonical JSON and SHA-256 configuration
 hash never change. Activation is stored separately, so selecting a newer version
 does not rewrite old definitions.
@@ -102,7 +118,10 @@ structured document editor; the schema makes the indicator and nested rule
 structure explicit. Invalid configurations are never saved or activated.
 
 The server binds only to `127.0.0.1`/`localhost`, caps request sizes and stores no
-credentials. Do not expose it through a public interface.
+credentials. Every request must carry a `Host` of `127.0.0.1:<port>` or
+`localhost:<port>`, and any `Origin` header must match; other requests get 403.
+This blocks DNS-rebinding and cross-site requests from browser pages. Registry
+conflicts return 409. Do not expose the server through a public interface.
 
 ## Verification
 
