@@ -104,3 +104,11 @@ bounded sample over RELIANCE, INFY, or TCS before the locked holdout. Comparison
 accepted Shoonya yearly segment whose filename ends before the holdout. MCP data and reports
 cannot enter raw, dataset, feature, training, model, or backtest paths, and no research/training
 module imports M3.9. This boundary does not validate M3.6 evidence or any M3.2/M3.5 gate.
+
+M3.9-B adds `stock_gplm.m39b` as a dependency-free, in-memory corporate-action
+calculation boundary. Frozen canonical records carry explicit availability and
+licence state; exact rational factors produce separate derived candles with
+complete lineage. The package has no file loader, network client, CLI or training
+import. It refuses non-raw inputs, unavailable facts, conflicting sources,
+duplicates, rights and complex restructurings. Synthetic verification does not
+correct historical data or make it training-ready.

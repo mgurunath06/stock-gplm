@@ -1,0 +1,80 @@
+{
+  "contract": "stock-gplm.m39b-engineering-report.v1",
+  "milestone": "M3.9-B",
+  "report_date": "2026-11-14",
+  "evidence_scope": "SYNTHETIC_ONLY",
+  "supported_event_types": {
+    "STOCK_SPLIT": "PRICE_AND_VOLUME",
+    "REVERSE_SPLIT": "PRICE_AND_VOLUME",
+    "BONUS": "PRICE_AND_VOLUME",
+    "CASH_DIVIDEND": "TOTAL_RETURN_PRICE_ONLY_WITH_EXPLICIT_REFERENCE_PRICE"
+  },
+  "formulas": {
+    "split_price_factor": "old_shares/resulting_shares",
+    "split_volume_factor": "resulting_shares/old_shares",
+    "bonus_price_factor": "held_shares/(held_shares+bonus_shares)",
+    "bonus_volume_factor": "(held_shares+bonus_shares)/held_shares",
+    "dividend_price_return_factor": "1",
+    "dividend_total_return_factor": "(cum_dividend_reference_price-cash_per_share)/cum_dividend_reference_price"
+  },
+  "synthetic_examples": [
+    {
+      "event": "1_TO_2_STOCK_SPLIT",
+      "before": {"close": "100", "volume": "10"},
+      "after": {"close": "50", "volume": "20"}
+    },
+    {
+      "event": "1_FOR_2_BONUS",
+      "before": {"close": "100", "volume": "10"},
+      "after": {"close": "66.66666667", "volume": "15"}
+    },
+    {
+      "event": "CASH_DIVIDEND_INR_10_REFERENCE_100",
+      "price_return_factor": "1/1",
+      "total_return_factor": "9/10",
+      "volume_factor": "1/1"
+    }
+  ],
+  "validation_findings": {
+    "invalid_or_ambiguous_metadata": "REJECTED",
+    "conflicting_sources_or_factors": "QUARANTINED_BY_EXCEPTION",
+    "duplicate_source_events": "REJECTED",
+    "unknown_adjustment_status": "PRESERVED_UNKNOWN_AND_REFUSED",
+    "suspicious_price_discontinuity": "FLAGGED_WITH_UNKNOWN_CAUSE",
+    "lookahead_evidence": "REJECTED",
+    "adjusted_series_reapplication": "REJECTED"
+  },
+  "unsupported_or_unresolved": [
+    "RIGHTS",
+    "MERGER",
+    "DEMERGER",
+    "SYMBOL_CHANGE",
+    "UNLICENSED_OR_REFERENCE_ONLY_SOURCE",
+    "DIVIDEND_WITHOUT_EXPLICIT_REFERENCE_PRICE"
+  ],
+  "research_integrity": {
+    "raw_mutated": false,
+    "training_run": false,
+    "research_trial_run": false,
+    "protected_holdout_accessed": false,
+    "external_api_used": false,
+    "nse_mcp_admitted_to_canonical_data": false
+  },
+  "tests": {
+    "command": ".venv/bin/python -m pytest",
+    "python": "3.12.16",
+    "pytest": "8.4.2",
+    "collected": 599,
+    "passed": 599,
+    "failed": 0,
+    "duration_seconds": 33.38,
+    "m39b_focused_tests": 34
+  },
+  "limitations": [
+    "Synthetic evidence does not prove real historical data is corrected or training-ready.",
+    "No real source is currently approved and registered for derivation.",
+    "Dividend reference-price selection is not automated.",
+    "Output rounding is an engine policy, not exchange tick-size rounding."
+  ],
+  "recommended_next_step": "M3.9-C should add immutable checksum-bound human-reviewed intake from a legally approved source and run report-only shadow reconciliation before any downstream integration."
+}

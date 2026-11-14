@@ -24,5 +24,7 @@
 - [M3.8 evidence report — 2026-11-02](m38-evidence-report-2026-11-02.md)
 - [M3.9 NSE MCP reference validation](m39-nse-mcp.md)
 - [M3.9 live evidence report — 2026-11-14](m39-evidence-report-2026-11-14.md)
+- [M3.9-B corporate-action remediation engine](m39b-corporate-actions.md)
+- [M3.9-B engineering evidence report — 2026-11-14](m39b-evidence-report-2026-11-14.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)
