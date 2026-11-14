@@ -20,6 +20,20 @@
   metrics. They leave the trial ledger byte-identical. Hypotheses are pre-registered and
   logged, with Bonferroni correction over every test. Promoting any of them into a model
   is a new trial.
+- M5.2 controlled handover (authorized by the user on 2026-11-14) has four
+  separately governed tiers. T1 metadata-only inventory is authorized. T2
+  byte-level integrity plus metadata and publication-marker validation is
+  authorized. T1 or T2 authorization never implies T3 or T4 authorization.
+  T3 governed development-data preparation is **NOT AUTHORIZED**. T4 protected
+  holdout operations are **PROHIBITED**. Because the independently governed
+  holdout cutoff is unavailable, M5.2 must not decompress or decode any candle
+  payload. It may use read-only commands over the existing Oracle minute tree and
+  collection summary solely to capture hashes and provenance; it must not rerun a
+  collector or download candle files. Local and Oracle raw files, metadata and
+  markers remain immutable. Reconciliation work stops at an import and quarantine
+  plan unless the user separately authorizes execution. No T1/T2 result authorizes
+  data relocation, derived datasets, features, labels, splits, eligibility,
+  training, scoring, rankings, trading, trust-root changes or holdout access.
 - LLM assistance (`stock_gplm.llm`) is opt-in and advisory. Keys come only from
   environment variables or a secret store. Never send raw market datasets, private
   strategies or credentials to a remote provider without explicit approval. LLM
