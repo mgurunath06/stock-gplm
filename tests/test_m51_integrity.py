@@ -684,12 +684,84 @@ def test_E_immutable_v2_run_remains_integrity_readable(tmp_path: Path) -> None:
     assert load_run(target).verification == PRIOR_CONTRACT_VERIFIED
 
 
+# Interpreter startup (site, ``sitecustomize``/``usercustomize``, ``.pth`` hooks such as Debian's
+# apport hook or setuptools' ``_distutils_hack``) can preload non-stdlib modules before any project
+# code runs. The probe purges whatever startup preloaded, then imports the execution path, so every
+# non-stdlib module left in ``sys.modules`` was imported by stock_gplm itself. A module that startup
+# preloaded *and* stock_gplm imports is re-imported and still reported: startup cannot mask it.
+_DEPENDENCY_PROBE = """
+import json, sys
+stdlib = set(sys.stdlib_module_names)
+top = lambda name: name.split('.')[0]
+startup = {top(m) for m in sys.modules} - stdlib - {'__main__'}
+for name in [m for m in sys.modules if top(m) in startup]:
+    del sys.modules[name]
+sys.path.insert(0, SRC)
+import stock_gplm, stock_gplm.m5, stock_gplm.m5.cli, stock_gplm.v1.studio
+print(json.dumps({"startup": sorted(startup), "origin": stock_gplm.__file__,
+                  "third_party": sorted({top(m) for m in sys.modules} - stdlib - {'stock_gplm', '__main__'})}))
+"""
+
+
+def _execution_path_dependencies(python: str | Path, src: Path) -> dict:
+    code = f"SRC = {str(src)!r}\n" + _DEPENDENCY_PROBE
+    result = subprocess.run([str(python), "-I", "-c", code], capture_output=True, text=True, check=True)
+    report = json.loads(result.stdout)
+    assert Path(report["origin"]).resolve().is_relative_to(src.resolve())  # the intended tree was probed
+    return report
+
+
 def test_E_execution_path_imports_only_the_standard_library() -> None:
-    probe = ("import sys, stock_gplm.m5, stock_gplm.m5.cli, stock_gplm.v1.studio;"
-             "print(sorted({m.split('.')[0] for m in sys.modules} - set(sys.stdlib_module_names) - {'stock_gplm', '__main__'}))")
-    output = subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(ROOT / 'src')!r});"
-                             + probe], capture_output=True, text=True, check=True).stdout.strip()
-    assert output == "[]"
+    assert _execution_path_dependencies(sys.executable, ROOT / "src")["third_party"] == []
+
+
+def _startup_hooked_venv(base: Path, sitecustomize: str, packages: dict[str, str]) -> Path:
+    """A throwaway venv whose interpreter startup injects modules, like a distro Python."""
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(base)], check=True)
+    python = base / "bin" / "python"
+    site_packages = Path(subprocess.run([str(python), "-I", "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                                        capture_output=True, text=True, check=True).stdout.strip())
+    (site_packages / "sitecustomize.py").write_text(sitecustomize)
+    (site_packages / "startup_pth_hook.py").write_text("")
+    (site_packages / "startup_pth_hook.pth").write_text("import startup_pth_hook\n")
+    for name, body in packages.items():
+        (site_packages / f"{name}.py").write_text(body)
+    return python
+
+
+def _fake_execution_tree(root: Path, cli_body: str) -> Path:
+    for package in ("stock_gplm", "stock_gplm/m5", "stock_gplm/v1"):
+        (root / package).mkdir(parents=True)
+        (root / package / "__init__.py").write_text("")
+    (root / "stock_gplm/m5/cli.py").write_text(cli_body)
+    (root / "stock_gplm/v1/studio.py").write_text("import json\n")
+    return root
+
+
+def test_E_startup_injected_modules_are_not_reported_as_dependencies(tmp_path: Path) -> None:
+    python = _startup_hooked_venv(tmp_path / "venv", "import os\nimport preloaded_dep\n", {"preloaded_dep": ""})
+    report = _execution_path_dependencies(python, ROOT / "src")  # the real execution path
+    assert report["startup"] == ["preloaded_dep", "sitecustomize", "startup_pth_hook"]
+    assert report["third_party"] == []
+
+
+@pytest.mark.parametrize("sitecustomize", ["", "import fake_dep\n"], ids=["not-preloaded", "preloaded-by-startup"])
+@pytest.mark.parametrize("cli_body", ["import fake_dep\n", "from fake_dep import VALUE\n",
+                                      "try:\n    import fake_dep\nexcept ImportError:\n    pass\n"],
+                         ids=["import", "from-import", "optional-import"])
+def test_E_probe_still_reports_genuine_third_party_imports(tmp_path: Path, sitecustomize: str, cli_body: str) -> None:
+    python = _startup_hooked_venv(tmp_path / "venv", sitecustomize, {"fake_dep": "VALUE = 1\n"})
+    report = _execution_path_dependencies(python, _fake_execution_tree(tmp_path / "src", cli_body))
+    assert report["third_party"] == ["fake_dep"]
+
+
+def test_E_probe_rejects_a_stock_gplm_imported_from_another_tree(tmp_path: Path) -> None:
+    python = _startup_hooked_venv(tmp_path / "venv", "", {})
+    site_packages = next((tmp_path / "venv" / "lib").glob("python*/site-packages"))
+    _fake_execution_tree(site_packages, "")  # a stale installed copy shadows the requested tree
+    (tmp_path / "empty-src").mkdir()
+    with pytest.raises(AssertionError):
+        _execution_path_dependencies(python, tmp_path / "empty-src")
 
 
 # ======================================================================= F: Studio loopback
