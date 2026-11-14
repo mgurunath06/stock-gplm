@@ -1,0 +1,6 @@
+{
+  "contract": "stock-gplm.m5-evidence-paths.v1",
+  "m32_run": "../../reports/m32/26e41d003ff0c3265b3598a7f4b1ea1e51a5dde0a277603796972f7282167213",
+  "etf_heuristic": "../m37/etf-symbol-heuristic.json",
+  "instrument_master": "../../data/reference/source/shoonya/NSE_symbols.txt.zip"
+}

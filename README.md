@@ -80,3 +80,9 @@ causal research backtester and loopback Strategy Studio. The swing-breakout and
 mean-reversion examples are configuration files processed by the same engine;
 activation cannot enable broker orders. See
 [docs/v1-strategy-engine.md](docs/v1-strategy-engine.md).
+
+M4 consolidates V1 with causal next-open exits and an append-only registry. M5
+adds a manifest-verified historical data adapter: strict research eligibility
+fails closed while calendar, listing, alias, corporate-action and price-basis
+evidence is missing, and diagnostic real-data runs are labelled non-investable.
+See [docs/m5-historical-data-adapter.md](docs/m5-historical-data-adapter.md).

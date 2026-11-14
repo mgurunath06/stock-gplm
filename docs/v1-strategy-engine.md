@@ -79,8 +79,9 @@ Candles passed to `run_backtest` are caller-supplied, so every result carries
 flag is an acknowledgement for synthetic engineering data, not evidence. The
 Studio's pasted-candle facility is for synthetic demonstrations. It does not
 turn pasted data into accepted M1/M2/M3 evidence, prove historical completeness
-or make data training-ready. Historical research backtests must obtain
-eligibility from manifest-verified local inputs rather than a UI claim.
+or make data training-ready. Historical research backtests go through
+`stock_gplm.m5` (see [m5-historical-data-adapter.md](m5-historical-data-adapter.md)),
+which obtains eligibility from manifest-verified local inputs rather than a UI claim.
 
 ## Immutable registry
 

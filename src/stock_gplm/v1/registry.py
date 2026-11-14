@@ -142,6 +142,15 @@ class StrategyRegistry:
             config=json.loads(row["canonical_json"]),
         )
 
+    def find(self, strategy_id: str, config_hash: str) -> StrategyVersion | None:
+        """Return the immutable version holding exactly this configuration, if registered."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT version FROM strategy_versions WHERE strategy_id = ? AND config_hash = ?",
+                (strategy_id, config_hash),
+            ).fetchone()
+        return None if row is None else self.get(strategy_id, int(row["version"]))
+
     def list_versions(self) -> list[StrategyVersion]:
         with self._connect() as connection:
             keys = connection.execute(

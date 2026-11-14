@@ -34,6 +34,7 @@ stock-gplm-diagnose = "stock_gplm.m38.cli:main"
 stock-gplm-nse-mcp = "stock_gplm.m39.cli:main"
 stock-gplm-strategy-studio = "stock_gplm.v1.studio:main"
 stock-gplm-strategy-demo = "stock_gplm.v1.demo:main"
+stock-gplm-m5 = "stock_gplm.m5.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

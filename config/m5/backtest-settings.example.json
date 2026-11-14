@@ -1,0 +1,12 @@
+{
+  "contract": "stock-gplm.m5-backtest-settings.v1",
+  "evaluation_start": "2023-11-01",
+  "evaluation_end": "2025-10-20",
+  "initial_capital": 1000000.0,
+  "max_open_positions": 10,
+  "max_position_fraction": 0.2,
+  "max_gross_exposure": 1.0,
+  "buy_statutory_bps": 12.41,
+  "sell_statutory_bps": 10.91,
+  "cost_basis": "ASSUMPTION: NSE equity delivery statutory charges copied from config/m35/daily-training-policy.json (STT 10, exchange 0.3, SEBI 0.01, stamp duty 1.5 on buys, GST 0.6); brokerage and slippage come from each strategy's trading_costs. Verify against current broker and exchange schedules before relying on results."
+}

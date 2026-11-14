@@ -123,3 +123,21 @@ validate, save, clone, import/export, select and synthetically backtest these
 definitions. Activation selects a local research definition only and cannot
 enable broker orders. Existing M1-M3 evidence and locked-holdout gates remain
 authoritative and independent.
+
+M4 committed V1 as found (`0534cc8`) and remediated it: exit decisions fill at
+the next open, stops that gap fill at the worse open, registry rows are
+append-only, and the Studio validates Host/Origin. M3.9-B is integrated by
+ancestry. M2.5-R is not merged; its calendar registration format is consumed
+read-only.
+
+M5 adds `stock_gplm.m5`, the only path from genuine historical files to strategy
+research. `HistoricalDataAdapter` reuses `validate_daily`, the hash-bound M3.2
+holdout, the M2.5-R calendar format, the M2.1 reference importers, the M2.2
+master and M3.9-B events. It returns hash-identified `ELIGIBLE`, `BLOCKED`,
+`REJECTED` or `DIAGNOSTIC_ALLOWED` decisions. Integrity failures reject in every
+mode. Missing evidence blocks `STRICT_RESEARCH`; `DIAGNOSTIC_ONLY` results are
+non-investable and cannot be ranked, promoted, paper traded or used for training.
+`stock_gplm.v1.portfolio` and `stock_gplm.v1.metrics` add a generic portfolio
+simulator and metrics that keep signal generation separate from allocation and
+execution. Runs are immutable, content-addressed directories. See
+[m5-historical-data-adapter.md](m5-historical-data-adapter.md).

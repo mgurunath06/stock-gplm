@@ -69,6 +69,25 @@ pre{white-space:pre-wrap;max-height:420px;overflow:auto;background:#101828;color
 <label>Candles JSON<textarea id="candles" spellcheck="false">[]</textarea></label>
 <label><input id="syntheticEligible" type="checkbox"> I confirm these are synthetic demo candles eligible only for an engineering backtest.</label>
 <button onclick="backtest()">Launch backtest</button><h2>Validation / result</h2><pre id="result">Ready.</pre></section></div>
+<section class="card" style="margin-top:16px"><h2>Historical research (M5)</h2>
+<p>Eligibility is decided on the server by the M5 adapter from manifest-verified local files. This page only displays its decisions.
+<code>DIAGNOSTIC_ONLY</code> runs are non-investable and cannot be ranked, promoted or paper traded.</p>
+<div class="row"><label>Mode<select id="hmode"><option>STRICT_RESEARCH</option><option>DIAGNOSTIC_ONLY</option></select></label>
+<label>Symbols (comma separated, at most 25)<input id="hsymbols" placeholder="RELIANCE-EQ,TCS-EQ"></label></div>
+<div class="row"><label>Data start<input id="hstart" type="date"></label><label>Data end<input id="hend" type="date"></label>
+<label>Evaluation start<input id="hestart" type="date"></label><label>Evaluation end<input id="heend" type="date"></label></div>
+<div class="row"><label>Initial capital (INR)<input id="hcapital" type="number" value="1000000"></label>
+<label>Max open positions<input id="hmaxpos" type="number" value="10"></label>
+<label>Max position fraction<input id="hposfrac" type="number" step="0.01" value="0.2"></label>
+<label>Max gross exposure (no margin)<input id="hexposure" type="number" step="0.01" value="1"></label></div>
+<div class="row"><label>Statutory buy bps<input id="hbuy" type="number" step="0.01" value="12.41"></label>
+<label>Statutory sell bps<input id="hsell" type="number" step="0.01" value="10.91"></label>
+<label>Cost basis note<input id="hbasis" value="ASSUMPTION: NSE delivery statutory charges per M3.5 policy; verify against current schedules"></label></div>
+<div class="row"><button onclick="hDatasets()">Discover datasets</button><button onclick="hEligibility()">Check eligibility</button>
+<button onclick="hBacktest()">Run historical backtest (selected version)</button></div>
+<div class="row"><button onclick="hRuns()">List runs</button><label>Run IDs to compare or export<input id="hruns"></label>
+<button onclick="hCompare()">Compare</button><button onclick="hExport()">Export report</button></div>
+<pre id="hresult">Not run.</pre></section>
 <script>
 const out=x=>document.querySelector('#result').textContent=typeof x==='string'?x:JSON.stringify(x,null,2);
 const byId=id=>document.getElementById(id);
@@ -96,12 +115,28 @@ function removeIndicator(i){working.indicators.splice(i,1);syncDocument();out('I
 function operand(text){let p=text.indexOf(':');if(p<1)throw new Error('Operand must use kind:value');let k=text.slice(0,p),v=text.slice(p+1);if(k==='constant')return {constant:Number(v)};if(k==='field')return {field:v,offset:0};if(k==='indicator')return {indicator:v,offset:0};throw new Error('Operand kind must be field, indicator, or constant')}
 function addRule(){try{if(!working)throw new Error('Load a validated document first');let rule={operator:byId('ruleOp').value,left:operand(byId('ruleLeft').value),right:operand(byId('ruleRight').value)};if(byId('ruleTarget').value==='exit')working.exit.condition=rule;else{if(!['AND','OR'].includes(working.entry.operator))working.entry={operator:byId('entryGroup').value,conditions:[working.entry]};working.entry.operator=byId('entryGroup').value;working.entry.conditions.push(rule)}syncDocument();out('Rule applied. Validate before saving.')}catch(e){out(e.message)}}
 function removeRule(i){if(!working.entry.conditions)throw new Error('Entry root is not a rule group');working.entry.conditions.splice(i,1);syncDocument();out('Entry rule removed. At least one rule is required.')}
+const hout=x=>byId('hresult').textContent=typeof x==='string'?x:JSON.stringify(x,null,2);
+const post=(path,body)=>api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+const hsymbols=()=>byId('hsymbols').value.split(',').map(x=>x.trim()).filter(Boolean);
+async function hDatasets(){try{hout(await api('/api/m5/datasets'))}catch(e){hout(e.message)}}
+async function hEligibility(){try{let rows=[];for(let s of hsymbols())rows.push(await post('/api/m5/eligibility',{symbol:s,start:byId('hstart').value,end:byId('hend').value,mode:byId('hmode').value}));hout(rows.map(d=>({symbol:d.request.symbol,status:d.status,investable:d.investable,failures:d.failures,evidence:d.evidence,warnings:d.warnings})))}catch(e){hout(e.message)}}
+function hSettings(){return {contract:'stock-gplm.m5-backtest-settings.v1',evaluation_start:byId('hestart').value,evaluation_end:byId('heend').value,initial_capital:Number(byId('hcapital').value),max_open_positions:Number(byId('hmaxpos').value),max_position_fraction:Number(byId('hposfrac').value),max_gross_exposure:Number(byId('hexposure').value),buy_statutory_bps:Number(byId('hbuy').value),sell_statutory_bps:Number(byId('hsell').value),cost_basis:byId('hbasis').value}}
+async function hBacktest(){try{let [id,v]=selected();hout('Running...');hout(await post('/api/m5/backtests',{strategy_id:id,version:Number(v),symbols:hsymbols(),start:byId('hstart').value,end:byId('hend').value,mode:byId('hmode').value,settings:hSettings()}))}catch(e){hout(e.message)}}
+async function hRuns(){try{hout(await api('/api/m5/runs'))}catch(e){hout(e.message)}}
+async function hCompare(){try{hout(await post('/api/m5/compare',{run_ids:byId('hruns').value.split(',').map(x=>x.trim()).filter(Boolean)}))}catch(e){hout(e.message)}}
+async function hExport(){try{let id=byId('hruns').value.split(',')[0].trim();hout((await api('/api/m5/runs/'+id)).markdown)}catch(e){hout(e.message)}}
 refresh().catch(e=>out(e.message));
 </script></body></html>"""
 
 
 class StudioHandler(BaseHTTPRequestHandler):
     registry: StrategyRegistry
+    research: Any = None  # stock_gplm.m5.studio_api.HistoricalResearchService when configured
+
+    def _research(self) -> Any:
+        if self.research is None:
+            raise LookupError("historical research is not configured; start with --m5-evidence")
+        return self.research
 
     def _trusted_origin(self) -> bool:
         """Reject DNS-rebinding and cross-site requests to the loopback API."""
@@ -163,8 +198,19 @@ class StudioHandler(BaseHTTPRequestHandler):
                 record = self.registry.get(parts[2], int(parts[3]))
                 self._json(200, {"record": asdict(record), "document": dump_yaml(record.config)})
                 return
+            if path == "/api/m5/datasets":
+                self._json(200, self._research().datasets())
+                return
+            if path == "/api/m5/runs":
+                self._json(200, self._research().runs())
+                return
+            if len(parts) == 4 and parts[:3] == ["api", "m5", "runs"]:
+                self._json(200, self._research().report(parts[3]))
+                return
             self._json(404, {"error": "not found"})
-        except (KeyError, ValueError) as exc:
+        except LookupError as exc:
+            self._json(503 if not isinstance(exc, KeyError) else 404, {"error": str(exc)})
+        except ValueError as exc:
             self._json(400, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -203,9 +249,22 @@ class StudioHandler(BaseHTTPRequestHandler):
                 self.registry.record_backtest(result)
                 self._json(201, result.to_dict())
                 return
+            if path == "/api/m5/eligibility":
+                self._json(200, self._research().eligibility(self._body()))
+                return
+            if path == "/api/m5/backtests":
+                self._json(*self._research().backtest(self._body()))
+                return
+            if path == "/api/m5/compare":
+                self._json(200, self._research().compare(self._body()))
+                return
             self._json(404, {"error": "not found"})
+        except FileExistsError as exc:
+            self._json(409, {"error": str(exc)})
         except (json.JSONDecodeError, KeyError, StrategyValidationError, TypeError, ValueError) as exc:
             self._json(400, {"error": str(exc)})
+        except LookupError as exc:
+            self._json(503, {"error": str(exc)})
         except sqlite3.Error as exc:
             self._json(409, {"error": f"registry rejected the change: {exc}"})
 
@@ -213,8 +272,19 @@ class StudioHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
-    handler = type("BoundStudioHandler", (StudioHandler,), {"registry": StrategyRegistry(registry_path)})
+def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
+          m5_evidence: Path | None = None, raw_root: Path | None = None, m5_reports: Path | None = None) -> None:
+    registry = StrategyRegistry(registry_path)
+    research = None
+    if m5_evidence is not None:
+        # Imported lazily so the V1 engine itself never depends on the M5 data layer.
+        from stock_gplm.m5.evidence import load_reference_evidence
+        from stock_gplm.m5.studio_api import HistoricalResearchService
+
+        if raw_root is None or m5_reports is None:
+            raise ValueError("--m5-evidence requires --raw-root and --m5-reports")
+        research = HistoricalResearchService(raw_root, load_reference_evidence(m5_evidence), m5_reports, registry)
+    handler = type("BoundStudioHandler", (StudioHandler,), {"registry": registry, "research": research})
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Strategy Studio: http://{host}:{port} (local research only)")
     server.serve_forever()
@@ -225,8 +295,12 @@ def main() -> int:
     parser.add_argument("--registry", type=Path, required=True, help="local SQLite registry path")
     parser.add_argument("--host", default="127.0.0.1", choices=["127.0.0.1", "localhost"])
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--m5-evidence", type=Path, help="stock-gplm.m5-evidence-paths.v1 file")
+    parser.add_argument("--raw-root", type=Path, help="published Shoonya NSE daily root (read only)")
+    parser.add_argument("--m5-reports", type=Path, help="new or existing directory for immutable run reports")
     args = parser.parse_args()
-    serve(args.registry, args.host, args.port)
+    serve(args.registry, args.host, args.port, m5_evidence=args.m5_evidence, raw_root=args.raw_root,
+          m5_reports=args.m5_reports)
     return 0
 
 
