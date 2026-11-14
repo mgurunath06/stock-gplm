@@ -237,6 +237,34 @@ def _resolve_release(
     return datasets, mode, record, ADAPTER_ISSUED if issued else CALLER_SUPPLIED
 
 
+def _strict_cost_profile(
+    datasets: Sequence[VerifiedHistoricalDataset],
+    mode: EligibilityMode,
+    strategy_config: Mapping[str, Any],
+    settings: BacktestSettings,
+) -> dict[str, Any] | None:
+    """Require exact registered costs for strict execution; diagnostics remain assumptions."""
+    if mode != EligibilityMode.STRICT_RESEARCH:
+        return None
+    profiles = {canonical_hash(d.decision.cost_profile): d.decision.cost_profile for d in datasets
+                if d.decision.cost_profile is not None}
+    if len(profiles) != 1 or any(d.decision.cost_profile is None for d in datasets):
+        raise ValueError("STRICT_RESEARCH requires one approved cost profile covering every dataset")
+    profile = next(iter(profiles.values()))
+    assert profile is not None
+    requested = {
+        "commission_bps": strategy_config["trading_costs"]["commission_bps"],
+        "slippage_bps": strategy_config["trading_costs"]["slippage_bps"],
+        "buy_statutory_bps": settings.buy_statutory_bps,
+        "sell_statutory_bps": settings.sell_statutory_bps,
+    }
+    if requested != {key: profile[key] for key in requested}:
+        raise ValueError("STRICT_RESEARCH cost components do not match the approved registered profile")
+    if settings.cost_basis != profile["profile_id"]:
+        raise ValueError("STRICT_RESEARCH cost_basis must be the approved registered profile_id")
+    return profile
+
+
 def build_run(
     strategy: StrategyVersion,
     release: UniverseAssessment | Sequence[VerifiedHistoricalDataset],
@@ -255,6 +283,7 @@ def build_run(
     allowed = validated.config["universe"]["symbols"]
     if allowed and set(symbols) - set(allowed):
         raise ValueError(f"symbols outside the strategy universe: {sorted(set(symbols) - set(allowed))}")
+    registered_cost_profile = _strict_cost_profile(datasets, mode, validated.config, settings)
     costs = CostModel(validated.config["trading_costs"]["commission_bps"],
                       validated.config["trading_costs"]["slippage_bps"],
                       settings.buy_statutory_bps, settings.sell_statutory_bps)
@@ -302,6 +331,7 @@ def build_run(
                                    "(price return).",
         "price_basis": sorted({d.basis for d in datasets}),
         "cost_model": asdict(costs) | {"basis": settings.cost_basis},
+        "registered_cost_profile": registered_cost_profile,
         "portfolio_settings": asdict(portfolio),
         "evaluation_range": {"requested": [settings.evaluation_start, settings.evaluation_end],
                              "actual": [evaluated[0], evaluated[-1]], "sessions": len(evaluated),

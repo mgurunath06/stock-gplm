@@ -26,6 +26,7 @@ immutable strategy version ──► shared V1 evaluator ──► generic portf
 | `stock_gplm.m5.models` | Typed request, failure, evidence, decision, canonical bar, dataset, `UniverseRequest` and `UniverseAssessment` contracts |
 | `stock_gplm.m5.issuance` | Process-local HMAC seals that mark adapter-issued decisions and file-loaded evidence |
 | `stock_gplm.m5.evidence` | Read-only, sealed loaders for the holdout, calendar, listing, alias, corporate-action, master, ETF-heuristic, price-basis and adjustment-event evidence |
+| `stock_gplm.m5.authority` | Source-document registrations and separately hash-pinned reviewer trust policy; self-asserted approval is never authoritative |
 | `stock_gplm.m5.adapter` | `HistoricalDataAdapter.assess` / `assess_universe`: the only component that releases historical bars |
 | `stock_gplm.m5.holdout_validation` | M5-only whole-source integrity checks plus pre-cutoff candle validation for straddling segments |
 | `stock_gplm.m5.provenance` | Portable content identity (in `run_id`) and environmental provenance (recorded only) |
@@ -50,6 +51,7 @@ immutable strategy version ──► shared V1 evaluator ──► generic portf
 | Corporate-action economics | M3.9-B validated, licence-approved `CorporateActionEvent` records, read from a `stock-gplm.m51-adjustment-events.v1` file in their own `to_dict` shape |
 | Provider price basis | `stock-gplm.m51-provider-price-basis.v1` reviewed registration (symbols, date range, hash-bound identifier); none exists for real data |
 | ETF exclusion | M3.7 `etf-symbol-heuristic.json`, recorded as `HEURISTIC`, not as evidence |
+| Evidence authority, ETF/equity classification and cost schedule | M5.1.1 registrations and out-of-band hash-pinned trust policy; see `docs/m511-evidence-authority.md` |
 
 The M2.5-R calendar format was checked against the real M2.5-R implementation: a
 synthetic registration produced by `stock_gplm.m25r.calendar.register_calendar`

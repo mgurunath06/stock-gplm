@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import date, timedelta
@@ -47,6 +48,12 @@ from stock_gplm.m39b import CorporateActionEvent, SourceEvidence
 
 from .issuance import _issues, verify_seal
 from .models import canonical_hash
+from .authority import (
+    ApprovalTrustPolicy,
+    EvidenceRegistration,
+    load_evidence_registration,
+    load_trust_policy,
+)
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
 CALENDAR_CONTRACT = "stock-gplm.m25r-registered-calendar.v1"
@@ -56,6 +63,8 @@ ETF_HEURISTIC_CONTRACT = "stock-gplm.m37-etf-symbol-heuristic.v1"
 EVIDENCE_PATHS_CONTRACT = "stock-gplm.m5-evidence-paths.v1"
 PRICE_BASIS_CONTRACT = "stock-gplm.m51-provider-price-basis.v1"
 ADJUSTMENT_EVENTS_CONTRACT = "stock-gplm.m51-adjustment-events.v1"
+INSTRUMENT_CLASSIFICATION_CONTRACT = "stock-gplm.m511-instrument-classification.v1"
+COST_SCHEDULE_CONTRACT = "stock-gplm.m511-cost-schedule.v1"
 PRICE_BASES = frozenset({"RAW_UNADJUSTED", "PROVIDER_BACK_ADJUSTED", "MIXED"})
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _CLOCK = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -203,6 +212,109 @@ def load_etf_heuristic(path: Path) -> EtfHeuristic:
 
 
 @dataclass(frozen=True)
+class InstrumentClassification:
+    classification_id: str
+    effective_start: str
+    effective_end: str
+    classes: dict[str, str]
+    source_sha256: str
+    registration: EvidenceRegistration
+    authority_approved: bool
+
+    def classification_for(self, symbol: str, start: str, end: str) -> str | None:
+        if self.effective_start <= start and end <= self.effective_end:
+            return self.classes.get(symbol)
+        return None
+
+
+def load_instrument_classification(
+    path: Path, registration_path: Path, policy: ApprovalTrustPolicy | None,
+) -> InstrumentClassification:
+    value, digest = read_json(path)
+    if not isinstance(value, dict) or set(value) != {
+        "contract", "schema_version", "classification_id", "effective_start", "effective_end", "records"
+    }:
+        raise ValueError("instrument classification has missing or unsupported fields")
+    if value["contract"] != INSTRUMENT_CLASSIFICATION_CONTRACT or value["schema_version"] != 1:
+        raise ValueError("unsupported instrument-classification contract")
+    classes: dict[str, str] = {}
+    if not isinstance(value["records"], list) or not value["records"]:
+        raise ValueError("instrument classification records must be non-empty")
+    for record in value["records"]:
+        if not isinstance(record, dict) or set(record) != {"symbol", "classification"} or not isinstance(
+            record["symbol"], str) or not record["symbol"].endswith("-EQ") or record[
+            "classification"] not in {"EQUITY", "ETF"} or record["symbol"] in classes:
+            raise ValueError("instrument classification record is invalid or duplicated")
+        classes[record["symbol"]] = record["classification"]
+    start = date.fromisoformat(value["effective_start"]).isoformat()
+    end = date.fromisoformat(value["effective_end"]).isoformat()
+    if start > end:
+        raise ValueError("instrument-classification effective range is reversed")
+    binding = {key: value[key] for key in ("contract", "schema_version", "effective_start", "effective_end", "records")}
+    if value["classification_id"] != canonical_hash(binding):
+        raise ValueError("instrument-classification identifier does not match its content")
+    registration = load_evidence_registration(registration_path)
+    if registration.evidence_type != "INSTRUMENT_CLASSIFICATION" or registration.dependencies != {"payload": digest}:
+        raise ValueError("instrument-classification registration does not bind the payload exactly")
+    return InstrumentClassification(value["classification_id"], start, end, classes, digest, registration,
+                                    policy.approves(registration) if policy else False)
+
+
+@dataclass(frozen=True)
+class RegisteredCostSchedule:
+    profile_id: str
+    effective_start: str
+    effective_end: str
+    commission_bps: float
+    slippage_bps: float
+    buy_statutory_bps: float
+    sell_statutory_bps: float
+    source_sha256: str
+    registration: EvidenceRegistration
+    authority_approved: bool
+
+    def covers(self, start: str, end: str) -> bool:
+        return self.effective_start <= start and end <= self.effective_end
+
+    def components(self) -> dict[str, float]:
+        return {name: getattr(self, name) for name in (
+            "commission_bps", "slippage_bps", "buy_statutory_bps", "sell_statutory_bps"
+        )}
+
+
+def load_cost_schedule(
+    path: Path, registration_path: Path, policy: ApprovalTrustPolicy | None,
+) -> RegisteredCostSchedule:
+    value, digest = read_json(path)
+    fields = {"contract", "schema_version", "profile_id", "effective_start", "effective_end", "components"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("cost schedule has missing or unsupported fields")
+    if value["contract"] != COST_SCHEDULE_CONTRACT or value["schema_version"] != 1:
+        raise ValueError("unsupported cost-schedule contract")
+    names = {"commission_bps", "slippage_bps", "buy_statutory_bps", "sell_statutory_bps"}
+    components = value["components"]
+    if not isinstance(components, dict) or set(components) != names:
+        raise ValueError("cost schedule must state every required component")
+    if any(isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number) or number < 0
+           for number in components.values()):
+        raise ValueError("cost schedule components must be nonnegative numbers")
+    start = date.fromisoformat(value["effective_start"]).isoformat()
+    end = date.fromisoformat(value["effective_end"]).isoformat()
+    if start > end:
+        raise ValueError("cost-schedule effective range is reversed")
+    binding = {key: value[key] for key in ("contract", "schema_version", "effective_start", "effective_end", "components")}
+    if value["profile_id"] != canonical_hash(binding):
+        raise ValueError("cost-schedule profile identifier does not match its content")
+    registration = load_evidence_registration(registration_path)
+    if registration.evidence_type != "COST_SCHEDULE" or registration.dependencies != {"payload": digest}:
+        raise ValueError("cost-schedule registration does not bind the payload exactly")
+    return RegisteredCostSchedule(value["profile_id"], start, end,
+                                  *(float(components[name]) for name in (
+                                      "commission_bps", "slippage_bps", "buy_statutory_bps", "sell_statutory_bps")),
+                                  digest, registration, policy.approves(registration) if policy else False)
+
+
+@dataclass(frozen=True)
 class PriceBasisRegistration:
     """A reviewed statement of one provider's price basis for named symbols and dates.
 
@@ -304,9 +416,15 @@ class ReferenceEvidence:
     # back-adjusted and unadjusted corporate actions (see docs/m5-eligibility-audit.md).
     provider_price_basis: str | None = None
     price_basis_registration: PriceBasisRegistration | None = None
+    trust_policy: ApprovalTrustPolicy | None = None
+    authority_registration: EvidenceRegistration | None = None
+    authority_approved: bool = False
+    instrument_classification: InstrumentClassification | None = None
+    cost_schedule: RegisteredCostSchedule | None = None
     # M5.1.1 freshness: the evidence-paths file this was loaded from (outside the digest, so
     # identities stay relocation-stable). Strict runs reload it before execution.
     config_path: str | None = field(default=None, compare=False)
+    trust_policy_path: str | None = field(default=None, compare=False)
     issuance_seal: str = field(default="", compare=False, repr=False)
 
 
@@ -314,7 +432,7 @@ def _canonical(value: Any) -> Any:
     """Portable JSON form of evidence objects for content hashing."""
     if is_dataclass(value) and not isinstance(value, type):
         return {f.name: _canonical(getattr(value, f.name)) for f in fields(value)
-                if f.name not in {"issuance_seal", "config_path"}}
+                if f.name not in {"issuance_seal", "config_path", "trust_policy_path"}}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Decimal):
@@ -349,17 +467,38 @@ def _pair(paths: dict[str, Any], key: str, base: Path) -> tuple[Path, Path] | No
     return base / item["payload"], base / item["manifest"]
 
 
+def _registered_pair(paths: dict[str, Any], key: str, base: Path) -> tuple[Path, Path] | None:
+    item = paths.get(key)
+    if item is None:
+        return None
+    if not isinstance(item, dict) or set(item) != {"payload", "registration"}:
+        raise ValueError(f"{key} must name exactly payload and registration")
+    return base / item["payload"], base / item["registration"]
+
+
 @_issues("evidence")
-def load_reference_evidence(config_path: Path, *, _sign: Any = None) -> ReferenceEvidence:
+def load_reference_evidence(
+    config_path: Path,
+    *,
+    trust_policy_path: Path | None = None,
+    trust_policy_sha256: str | None = None,
+    _sign: Any = None,
+) -> ReferenceEvidence:
     """Load a ``stock-gplm.m5-evidence-paths.v1`` file; relative paths resolve from its directory."""
     paths, _ = read_json(config_path, 64 * 1024)
     allowed = {"contract", "m32_run", "etf_heuristic", "calendar_registration", "listing_history",
                "symbol_mappings", "corporate_actions", "instrument_master", "provider_price_basis",
-               "adjustment_events"}
+               "adjustment_events", "evidence_authority_registration", "instrument_classification",
+               "cost_schedule"}
     if not isinstance(paths, dict) or paths.get("contract") != EVIDENCE_PATHS_CONTRACT or set(paths) - allowed:
         raise ValueError("unsupported M5 evidence-paths document")
     base = Path(config_path).resolve().parent
     hashes: dict[str, str] = {}
+    policy = None
+    if trust_policy_path is not None or trust_policy_sha256 is not None:
+        if trust_policy_path is None or trust_policy_sha256 is None:
+            raise ValueError("trust policy path and out-of-band SHA-256 must be supplied together")
+        policy = load_trust_policy(trust_policy_path, trust_policy_sha256)
     holdout = load_holdout_boundary(base / paths["m32_run"]) if paths.get("m32_run") else None
     etf = load_etf_heuristic(base / paths["etf_heuristic"])
     hashes["etf_heuristic"] = etf.source_sha256
@@ -389,8 +528,35 @@ def load_reference_evidence(config_path: Path, *, _sign: Any = None) -> Referenc
     events: tuple[CorporateActionEvent, ...] = ()
     if paths.get("adjustment_events"):
         events, hashes["adjustment_events"] = load_adjustment_events(base / paths["adjustment_events"])
+    classification = None
+    pair = _registered_pair(paths, "instrument_classification", base)
+    if pair is not None:
+        classification = load_instrument_classification(*pair, policy)
+        hashes["instrument_classification"] = classification.source_sha256
+        hashes["instrument_classification_registration"] = classification.registration.registration_sha256
+    costs = None
+    pair = _registered_pair(paths, "cost_schedule", base)
+    if pair is not None:
+        costs = load_cost_schedule(*pair, policy)
+        hashes["cost_schedule"] = costs.source_sha256
+        hashes["cost_schedule_registration"] = costs.registration.registration_sha256
+    authoritative_dependencies = dict(sorted(hashes.items()))
+    authority = None
+    authority_approved = False
+    if paths.get("evidence_authority_registration"):
+        authority = load_evidence_registration(base / paths["evidence_authority_registration"])
+        if authority.evidence_type != "REFERENCE_EVIDENCE_BUNDLE":
+            raise ValueError("evidence authority registration has the wrong evidence type")
+        if authority.dependencies != authoritative_dependencies:
+            raise ValueError("evidence authority registration does not bind every loaded dependency exactly")
+        authority_approved = policy.approves(authority) if policy else False
+        hashes["evidence_authority_registration"] = authority.registration_sha256
+    if policy is not None:
+        hashes["approval_trust_policy"] = policy.policy_sha256
     evidence = ReferenceEvidence(holdout, etf, calendar, imported.get("listing_history"),
                                  imported.get("symbol_mappings"), imported.get("corporate_actions"),
-                                 events, tokens, hashes, basis.basis if basis else None, basis)
+                                 events, tokens, hashes, basis.basis if basis else None, basis,
+                                 policy, authority, authority_approved, classification, costs)
     return replace(evidence, config_path=str(Path(config_path).resolve()),
+                   trust_policy_path=str(Path(trust_policy_path).resolve()) if trust_policy_path else None,
                    issuance_seal=_sign(evidence_digest(evidence)))

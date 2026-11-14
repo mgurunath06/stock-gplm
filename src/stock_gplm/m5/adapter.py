@@ -179,13 +179,15 @@ def asserted_sources(value: Any, _depth: int = 0) -> list[str]:
     return found
 
 
-def strict_authority_failures(evidence: ReferenceEvidence) -> list[tuple[str, str]]:
+def strict_authority_failures(
+    evidence: ReferenceEvidence | Any,
+    request: DataEligibilityRequest | None = None,
+) -> list[tuple[str, str]]:
     """Authority gaps that keep ``STRICT_RESEARCH`` BLOCKED (audit criteria 3-5).
 
-    Each gap is an EVIDENCE failure, so DIAGNOSTIC_ONLY runs are unaffected. No
-    verified approval bundle, authoritative instrument classification or
-    registered cost schedule exists yet, so those three gates always fail: strict
-    status cannot be self-asserted by local files, a naming heuristic or caller bps.
+    Each gap is an EVIDENCE failure, so DIAGNOSTIC_ONLY runs are unaffected.
+    Strict status cannot be self-asserted by local files, a naming heuristic or
+    caller bps. Positive authority requires a separately hash-pinned trust policy.
     """
     gaps: list[tuple[str, str]] = []
     synthetic = sorted({s for s in asserted_sources(evidence)
@@ -193,12 +195,22 @@ def strict_authority_failures(evidence: ReferenceEvidence) -> list[tuple[str, st
     if synthetic:
         gaps.append(("EVIDENCE_SYNTHETIC", f"evidence declares synthetic/test sources {synthetic[:5]}; "
                      "it supports diagnostics only"))
-    gaps.append(("EVIDENCE_AUTHORITY_UNAPPROVED", "source, licence and validation status are self-asserted by "
-                 "local files; no verified reviewer-approval bundle exists"))
-    gaps.append(("INSTRUMENT_CLASSIFICATION_UNVERIFIED", "equity/ETF status rests on the M3.7 naming heuristic; "
-                 "no authoritative exchange classification is registered"))
-    gaps.append(("COST_SCHEDULE_UNREGISTERED", "no registered, checksum-bound transaction-cost schedule covers "
-                 "the request; caller bps and free-text cost bases are not authoritative"))
+    registration = getattr(evidence, "authority_registration", None)
+    approved = bool(getattr(evidence, "authority_approved", False))
+    if not approved or (request is not None and registration is not None
+                        and not registration.covers(request.start, request.end)):
+        gaps.append(("EVIDENCE_AUTHORITY_UNAPPROVED", "loaded evidence is not covered by an approved registration "
+                     "in a separately hash-pinned reviewer trust policy"))
+    classification = getattr(evidence, "instrument_classification", None)
+    classified = classification.classification_for(request.symbol, request.start, request.end) if (
+        classification is not None and request is not None) else None
+    if classification is None or not classification.authority_approved or classified is None:
+        gaps.append(("INSTRUMENT_CLASSIFICATION_UNVERIFIED", "equity/ETF status is not covered by an approved, "
+                     "effective-dated instrument-classification registration"))
+    costs = getattr(evidence, "cost_schedule", None)
+    if costs is None or not costs.authority_approved or request is None or not costs.covers(request.start, request.end):
+        gaps.append(("COST_SCHEDULE_UNREGISTERED", "no approved, checksum-bound transaction-cost schedule covers "
+                     "the request; caller bps and free-text cost bases are not authoritative"))
     return gaps
 
 
@@ -228,6 +240,7 @@ class HistoricalDataAdapter:
         holdout = self.evidence.holdout
         issued = evidence_issued(self.evidence)
         registration = self.evidence.price_basis_registration
+        cost_schedule = self.evidence.cost_schedule
         raw_basis = (self.evidence.provider_price_basis == "RAW_UNADJUSTED" and registration is not None
                      and registration.basis == "RAW_UNADJUSTED"
                      and registration.covers(request.symbol, request.start, request.end))
@@ -252,6 +265,9 @@ class HistoricalDataAdapter:
                 bars[0].date if bars else None, bars[-1].date if bars else None,
                 bars_hash(bars) if bars else None, evidence_sha256=evidence_digest(self.evidence),
                 evidence_sources=dict(sorted(self.evidence.source_hashes.items())), price_basis=basis,
+                cost_profile=({"profile_id": cost_schedule.profile_id, **cost_schedule.components()}
+                              if cost_schedule and cost_schedule.authority_approved
+                              and cost_schedule.covers(request.start, request.end) else None),
                 share_events=tuple(share_events), corporate_action_reconciliation=tuple(reconciliation),
             )
             object.__setattr__(decision, "issuance_seal", _sign(decision.decision_id))
@@ -270,7 +286,7 @@ class HistoricalDataAdapter:
                  "the evidence-paths file; caller-supplied events are diagnostic only")
 
         if request.mode == EligibilityMode.STRICT_RESEARCH:
-            for code, message in strict_authority_failures(self.evidence):
+            for code, message in strict_authority_failures(self.evidence, request):
                 fail(code, message)
 
         # 1. Request-level integrity gates: series, holdout, publication lock, symbol directory.
@@ -280,7 +296,10 @@ class HistoricalDataAdapter:
             fail("HOLDOUT_BOUNDARY_UNVERIFIED", "a hash-verified M3.2 split plan is required to prove holdout isolation")
         elif request.end >= holdout.cutoff:
             fail("HOLDOUT_OVERLAP", f"request end {request.end} reaches the locked holdout starting {holdout.cutoff}")
-        if self.evidence.etf_heuristic.is_etf(request.symbol):
+        classification = self.evidence.instrument_classification
+        authoritative_class = classification.classification_for(request.symbol, request.start, request.end) if (
+            classification is not None and classification.authority_approved) else None
+        if authoritative_class == "ETF" or (authoritative_class is None and self.evidence.etf_heuristic.is_etf(request.symbol)):
             fail("ETF_EXCLUDED", "ETFs stay out of the equity universe (M3.7 naming heuristic)")
         if publication_lock_active(self.raw_root):
             fail("PUBLICATION_LOCK_ACTIVE", "an M2.4 publication is in progress")
@@ -293,9 +312,15 @@ class HistoricalDataAdapter:
         evidence.append(EligibilityEvidence("holdout_isolation", "VERIFIED",
                                             f"bars dated on or after {holdout.cutoff} are withheld",
                                             holdout.split_plan_sha256))
-        evidence.append(EligibilityEvidence("instrument_classification", "HEURISTIC",
-                                            "EQ series and not ETF by the unverified M3.7 naming heuristic",
-                                            self.evidence.etf_heuristic.source_sha256))
+        if authoritative_class == "EQUITY":
+            assert classification is not None
+            evidence.append(EligibilityEvidence("instrument_classification", "VERIFIED",
+                                                f"approved classification {classification.classification_id}",
+                                                classification.source_sha256))
+        else:
+            evidence.append(EligibilityEvidence("instrument_classification", "HEURISTIC",
+                                                "EQ series and not ETF by the unverified M3.7 naming heuristic",
+                                                self.evidence.etf_heuristic.source_sha256))
 
         # 2. Identity: current master proves current identifiers only.
         tokens = self.evidence.master_tokens
@@ -584,7 +609,13 @@ class HistoricalDataAdapter:
         if not self.evidence.config_path:
             raise StaleAssessmentError(f"{symbol}: evidence was not loaded from a registered evidence-paths file")
         try:
-            reloaded = load_reference_evidence(Path(self.evidence.config_path))
+            reloaded = load_reference_evidence(
+                Path(self.evidence.config_path),
+                trust_policy_path=(Path(self.evidence.trust_policy_path)
+                                   if self.evidence.trust_policy_path else None),
+                trust_policy_sha256=(self.evidence.trust_policy.policy_sha256
+                                     if self.evidence.trust_policy else None),
+            )
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise StaleAssessmentError(f"{symbol}: registered evidence can no longer be loaded: {exc}") from exc
         if evidence_digest(reloaded) != decision.evidence_sha256:

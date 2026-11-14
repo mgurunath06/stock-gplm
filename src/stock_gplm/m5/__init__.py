@@ -4,7 +4,13 @@ Research only: no orders, broker routing, credentials, collection or network use
 """
 
 from .adapter import HistoricalDataAdapter
-from .evidence import ReferenceEvidence, load_reference_evidence
+from .authority import ApprovalTrustPolicy, EvidenceRegistration, load_evidence_registration, load_trust_policy
+from .evidence import (
+    InstrumentClassification,
+    ReferenceEvidence,
+    RegisteredCostSchedule,
+    load_reference_evidence,
+)
 from .models import (
     DataEligibilityDecision,
     DataEligibilityRequest,
@@ -21,9 +27,12 @@ from .run_store import RunIntegrityError, RunNotFound, VerifiedRun, compare_runs
 from .runner import BacktestSettings, run_historical_backtest
 
 __all__ = [
-    "BacktestSettings", "DataEligibilityDecision", "DataEligibilityRequest", "DecisionStatus",
+    "ApprovalTrustPolicy", "BacktestSettings", "DataEligibilityDecision", "DataEligibilityRequest", "DecisionStatus",
+    "EvidenceRegistration",
     "EligibilityEvidence", "EligibilityFailure", "EligibilityMode", "HistoricalDataAdapter",
-    "ReferenceEvidence", "RunIntegrityError", "RunNotFound", "StaleAssessmentError", "UniverseAssessment", "UniverseRequest",
-    "VerifiedHistoricalDataset", "VerifiedRun", "compare_runs", "load_reference_evidence", "load_run",
+    "InstrumentClassification", "ReferenceEvidence", "RegisteredCostSchedule", "RunIntegrityError", "RunNotFound",
+    "StaleAssessmentError", "UniverseAssessment", "UniverseRequest",
+    "VerifiedHistoricalDataset", "VerifiedRun", "compare_runs", "load_evidence_registration",
+    "load_reference_evidence", "load_run", "load_trust_policy",
     "run_historical_backtest",
 ]

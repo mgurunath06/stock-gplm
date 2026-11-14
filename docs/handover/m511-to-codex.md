@@ -37,12 +37,12 @@ The main checkout `/home/mgurunath/projects/stock-gplm` is on
 | A.3 heuristic ETF + unverified costs not gated | **FIXED (gate)** | Strict always BLOCKED until authoritative sources exist. See §4b. |
 | A.4 synthetic/unapproved evidence can reach strict | **FIXED (gate)** | See §4b. The positive approval path is C (§6.4). |
 | B atomic universes | PASS in audit, no work needed | |
-| C evidence authority | NOT STARTED | P1. Design in §6.4. |
+| C evidence authority | FIXED IN CODE (pending checkpoint commit) | Separate hash-pinned trust policy, structured registrations, classification and cost loaders; genuine approvals remain unavailable. |
 | D fabrication/ranking | PASS in audit, no work needed | |
 | E provenance completeness | NOT STARTED | P1. Design in §6.6. |
 | F local API authentication | NOT STARTED | P1. Design in §6.5. |
 | G accounting | PASS in audit, no work needed | |
-| H holdout validation isolation | FIXED (pending checkpoint commit) | M5 validates whole-source bytes but decodes only pre-cutoff candle content; protected-only metamorphic test added. |
+| H holdout validation isolation | FIXED (`ca3bd4e`) | M5 validates whole-source bytes but decodes only pre-cutoff candle content; protected-only metamorphic test added. |
 
 ## 4. Completed: A.1 — directly importable signer
 
@@ -243,6 +243,19 @@ test that mutates only post-cutoff rows (synthetic) and asserts identical develo
 bars, signals, metrics and ordinary logs. Never decode or score the real holdout to test.
 
 ### 6.4 P1 — evidence authority (C)
+
+**DONE IN CODE in the Codex continuation (commit recorded in the progress log).**
+See `docs/m511-evidence-authority.md`. Registrations verify actual source bytes,
+structured provenance and dependency hashes, but never approve themselves. A
+separate reviewer trust policy is accepted only with an out-of-band exact
+SHA-256. Synthetic registrations remain unapproved even if listed in a policy.
+Effective-dated authoritative instrument classification and cost-schedule
+loaders replace the unconditional gates only when their registrations and the
+whole evidence bundle satisfy that policy. Strict execution also requires exact
+cost component and profile-ID equality. No genuine approval was fabricated;
+strict real-data research remains blocked.
+
+Original design note retained below:
 
 `load_adjustment_events` (`m5/evidence.py:269`) trusts `validation_state` and
 `licence_status=APPROVED_FOR_DERIVATION` written inside the JSON. The evidence-paths

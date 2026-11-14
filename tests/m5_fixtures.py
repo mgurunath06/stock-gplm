@@ -257,4 +257,6 @@ def waive_strict_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     runs without the waiver and proves the gates hold.
     """
     import stock_gplm.m5.adapter as adapter
-    monkeypatch.setattr(adapter, "strict_authority_failures", lambda evidence: [])
+    import stock_gplm.m5.runner as runner
+    monkeypatch.setattr(adapter, "strict_authority_failures", lambda evidence, request=None: [])
+    monkeypatch.setattr(runner, "_strict_cost_profile", lambda datasets, mode, strategy, settings: None)

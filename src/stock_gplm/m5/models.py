@@ -160,6 +160,7 @@ class DataEligibilityDecision:
     evidence_sha256: str | None = None
     evidence_sources: dict[str, str] | None = None
     price_basis: str | None = None
+    cost_profile: dict[str, Any] | None = None
     share_events: tuple[dict[str, Any], ...] = ()
     corporate_action_reconciliation: tuple[dict[str, Any], ...] = ()
     issuance_seal: str = field(default="", compare=False, repr=False)
