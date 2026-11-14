@@ -313,10 +313,8 @@ def build_run(
         "holdout_cutoff": cutoff,
         "holdout_access": {
             "policy": HOLDOUT_POLICY, "cutoff": cutoff,
-            # Rows on or after the cutoff inside a segment that overlaps the request are decoded by
-            # validate_daily (publication checks need the whole file), then withheld.
-            "protected_rows_decoded_during_source_validation": sum(
-                int(s.get("holdout_rows_withheld", 0)) for d in datasets for s in d.decision.segments),
+            "protected_rows_decoded_during_source_validation": 0,
+            "protected_source_byte_integrity_checked": True,
             "protected_rows_released_to_execution": released_protected,
             "protected_rows_scored_or_trained": 0,
         },
@@ -383,7 +381,8 @@ def render_markdown(run: Mapping[str, Any]) -> str:
         f"`{str(run['requested_universe'].get('universe_sha256'))[:16]}`",
         f"- Locked holdout from {run['holdout_access']['cutoff']}: "
         f"{run['holdout_access']['protected_rows_decoded_during_source_validation']} protected row(s) decoded "
-        f"during source validation, {run['holdout_access']['protected_rows_released_to_execution']} released "
+        f"during source validation; full source-byte integrity checked, "
+        f"{run['holdout_access']['protected_rows_released_to_execution']} released "
         f"to execution, {run['holdout_access']['protected_rows_scored_or_trained']} scored or trained", "",
         "| Metric | Value |", "| --- | --- |",
     ]

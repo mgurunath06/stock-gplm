@@ -42,7 +42,7 @@ The main checkout `/home/mgurunath/projects/stock-gplm` is on
 | E provenance completeness | NOT STARTED | P1. Design in §6.6. |
 | F local API authentication | NOT STARTED | P1. Design in §6.5. |
 | G accounting | PASS in audit, no work needed | |
-| H holdout validation isolation | NOT STARTED | P0. Design in §6.3. |
+| H holdout validation isolation | FIXED (pending checkpoint commit) | M5 validates whole-source bytes but decodes only pre-cutoff candle content; protected-only metamorphic test added. |
 
 ## 4. Completed: A.1 — directly importable signer
 
@@ -216,6 +216,21 @@ already hold the adapter, so wiring is small. Tests: rename/delete/modify payloa
 build fails before any run directory is written.
 
 ### 6.3 P0 — holdout validation isolation (audit criterion 6)
+
+**DONE in the Codex continuation (commit recorded in the progress log).**
+`m5/holdout_validation.py` is an M5-only validation path. Segments wholly before
+the cutoff still use the established M1/M2 validator. For a straddling segment,
+the new path verifies compressed bytes, the completion marker, metadata, record
+count and bounded decompression for the entire immutable source, but parses
+candle values only for rows dated before the cutoff. Protected rows never enter
+OHLCV/schema/duplicate/chronology checks, decisions, warnings or ordinary logs.
+`test_H_protected_candle_mutation_cannot_change_development_research` corrupts
+only synthetic protected candle structures and proves identical development
+bars, statuses, failures, warnings, signals, orders, trades, equity, performance
+and benchmark results. Full payload hashes remain provenance and stale-assessment
+guards, so a changed source still rejects a previously issued assessment.
+
+Original design note retained below:
 
 `validate_daily` (`ingestion/daily.py:176-279`) validates whole segments, so a malformed
 protected row can change the disposition of pre-holdout bars, and error messages can

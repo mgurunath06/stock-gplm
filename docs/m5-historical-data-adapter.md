@@ -9,7 +9,8 @@ writes nothing inside raw-data directories.
 M5.1 (see `docs/m51-integrity-hardening.md`) adds trusted issuance of eligibility,
 all-or-nothing requested universes, corporate-action reconciliation, one verified
 run loader, portable provenance, programmatic loopback enforcement in the Studio,
-one terminal valuation policy and precise holdout accounting.
+one terminal valuation policy and precise holdout accounting. M5.1.1 isolates
+development validation from protected candle content.
 
 ```
 published segments ──► HistoricalDataAdapter ──► DataEligibilityDecision (+ VerifiedHistoricalDataset)
@@ -26,6 +27,7 @@ immutable strategy version ──► shared V1 evaluator ──► generic portf
 | `stock_gplm.m5.issuance` | Process-local HMAC seals that mark adapter-issued decisions and file-loaded evidence |
 | `stock_gplm.m5.evidence` | Read-only, sealed loaders for the holdout, calendar, listing, alias, corporate-action, master, ETF-heuristic, price-basis and adjustment-event evidence |
 | `stock_gplm.m5.adapter` | `HistoricalDataAdapter.assess` / `assess_universe`: the only component that releases historical bars |
+| `stock_gplm.m5.holdout_validation` | M5-only whole-source integrity checks plus pre-cutoff candle validation for straddling segments |
 | `stock_gplm.m5.provenance` | Portable content identity (in `run_id`) and environmental provenance (recorded only) |
 | `stock_gplm.m5.run_store` | The one verified run loader: listing, details, reports, export, comparison, replay |
 | `stock_gplm.m5.discovery` | Read-only coverage inventory, optionally re-running `validate_daily` on every segment |
@@ -40,7 +42,7 @@ immutable strategy version ──► shared V1 evaluator ──► generic portf
 
 | Evidence | Contract |
 | --- | --- |
-| Publication integrity and content | `stock_gplm.ingestion.daily.validate_daily` (M1/M2.4 `.done` marker, SHA-256, byte and record counts, `ShoonyaDailyV1`) |
+| Publication integrity and content | `stock_gplm.ingestion.daily.validate_daily` for segments wholly before the cutoff; M5's isolation wrapper preserves whole-file `.done`, SHA-256, byte and record checks while validating candle content only before the cutoff |
 | Locked holdout | M3.2 `split-plan.json`, verified against its `run-manifest.json` hash. The cutoff is the earliest holdout start across horizons. |
 | Trading calendar | M2.5-R `stock-gplm.m25r-registered-calendar.v1`, verified by format: canonical-hash identity, NSE HTTPS source, manual browser acquisition, explicit status for every date |
 | Listing history, symbol mappings, corporate-action coverage | M2.1 `stock-gplm.listing-history.v1`, `…historical-symbol-mappings.v1`, `…corporate-actions.v1` through `stock_gplm.m2.reference_data` |
@@ -117,22 +119,25 @@ cutoff is **2025-10-21** (the 6–12 month horizon; shorter horizons start
 2026-04-29). A request ending on or after the cutoff is `REJECTED`. Segments
 starting after the request end are never opened.
 
-A segment that overlaps the request but straddles the cutoff is decoded in full,
-because `validate_daily` checks the whole published file. Its protected rows
-(dated on or after the cutoff) are therefore **decoded during source
-validation**. They are then dropped before any bar is released, and their count
-is recorded per segment (`holdout_rows_withheld`). Every run records three
-separate numbers in `holdout_access`:
+A segment that overlaps the request but straddles the cutoff is handled by the
+M5-only isolation validator. It verifies the immutable compressed bytes,
+completion marker, metadata and declared record count for the whole source, but
+decodes ShoonyaDailyV1 candle values only for rows dated before the cutoff.
+Protected OHLCV/schema/duplicate/chronology details therefore cannot affect
+development eligibility or research results. Every run records:
 
 | Field | Meaning | Value |
 | --- | --- | --- |
-| `protected_rows_decoded_during_source_validation` | rows on or after the cutoff that `validate_daily` parsed | positive whenever a segment straddles the cutoff |
+| `protected_rows_decoded_during_source_validation` | protected candles parsed as ShoonyaDailyV1 content | always 0 |
+| `protected_source_byte_integrity_checked` | full payload and sidecars remained covered by publication-integrity checks | always true |
 | `protected_rows_released_to_execution` | protected rows given to the evaluator or simulator | always 0 (asserted) |
 | `protected_rows_scored_or_trained` | protected rows scored or used for training | always 0; M5 never scores or trains |
 
 Pre-M5.1 runs recorded `locked_holdout_accessed: false`. That flag meant only
 "not released, scored or trained". It never meant that protected rows were not
-decoded. New runs no longer write it.
+decoded. New runs no longer write it. A payload-byte change after assessment
+still fails freshness revalidation; that provenance guard does not expose or
+use protected candle values.
 
 ## Canonical bars
 

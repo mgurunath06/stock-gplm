@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import gzip
 import json
 import os
 import pickle
@@ -59,6 +60,7 @@ from stock_gplm.m5.run_store import (
     make_replayer,
     scan_runs,
 )
+from stock_gplm.m5.runner import build_run
 from stock_gplm.m5.studio_api import HistoricalResearchService
 from stock_gplm.v1.metrics import TERMINAL_VALUATION_POLICY, equal_weight_buy_and_hold, liquidation_unit_value, \
     performance_metrics
@@ -756,8 +758,65 @@ def test_H_holdout_access_distinguishes_decoded_released_and_scored(tmp_path: Pa
     run, directory, _ = _strict_run(tmp_path)
     access = run["holdout_access"]
     assert access["cutoff"] == run["holdout_cutoff"] == "2024-10-01"
-    assert access["protected_rows_decoded_during_source_validation"] > 0
+    assert access["protected_rows_decoded_during_source_validation"] == 0
+    assert access["protected_source_byte_integrity_checked"] is True
     assert access["protected_rows_released_to_execution"] == 0 and access["protected_rows_scored_or_trained"] == 0
     assert "locked_holdout_accessed" not in run
     assert "decoded during source validation" in (directory / "report.md").read_text()
     assert canonical_hash(run["holdout_access"])  # finite, serializable evidence
+
+
+def _corrupt_only_protected_candle_content(raw_root: Path) -> None:
+    """Rewrite synthetic protected rows and republish matching integrity sidecars."""
+    for symbol in PAIR:
+        payload = raw_root / symbol / "2024-07-01_2024-12-31.json.gz"
+        rows = json.loads(gzip.decompress(payload.read_bytes()))
+        changed = 0
+        for index, serialized in enumerate(rows):
+            row = json.loads(serialized)
+            if row["time"].endswith(("OCT-2024", "NOV-2024", "DEC-2024")):
+                # Preserve only the date used to identify the isolation side.  The
+                # protected candle schema and values are intentionally invalid.
+                rows[index] = json.dumps({"time": row["time"], "protected": "not decoded"})
+                changed += 1
+        assert changed > 0
+        rewritten = gzip.compress(json.dumps(rows).encode(), mtime=0)
+        payload.write_bytes(rewritten)
+        digest = hashlib.sha256(rewritten).hexdigest()
+        meta_path = payload.with_name("2024-07-01_2024-12-31.meta.json")
+        meta = json.loads(meta_path.read_text())
+        meta["sha256_compressed"] = digest
+        meta_path.write_text(json.dumps(meta))
+        done_path = Path(f"{payload}.done")
+        done = json.loads(done_path.read_text())
+        done.update(sha256=digest, bytes=len(rewritten))
+        done_path.write_text(json.dumps(done))
+
+
+def test_H_protected_candle_mutation_cannot_change_development_research(tmp_path: Path) -> None:
+    baseline_world = build_world(tmp_path / "baseline")
+    mutated_world = build_world(tmp_path / "mutated")
+    _corrupt_only_protected_candle_content(mutated_world[0])
+
+    releases = []
+    runs = []
+    files = []
+    registry = StrategyRegistry(tmp_path / "registry.sqlite3")
+    version = registry.save(strategy_config())
+    for raw, evidence in (baseline_world, mutated_world):
+        release = HistoricalDataAdapter(raw, evidence).assess_universe(universe())
+        assert release.status == DecisionStatus.ELIGIBLE
+        releases.append(release)
+        run, analytical = build_run(version, release, settings())
+        runs.append(run)
+        files.append(analytical)
+
+    assert [d.bars for d in releases[0].released] == [d.bars for d in releases[1].released]
+    assert [d.decision.status for d in releases[0].released] == [d.decision.status for d in releases[1].released]
+    assert [d.decision.failures for d in releases[0].released] == [d.decision.failures for d in releases[1].released]
+    assert [d.decision.warnings for d in releases[0].released] == [d.decision.warnings for d in releases[1].released]
+    assert runs[0]["performance"] == runs[1]["performance"]
+    assert runs[0]["benchmark"] == runs[1]["benchmark"]
+    assert runs[0]["holdout_access"] == runs[1]["holdout_access"]
+    for name in ("signals.json", "orders.json", "trades.json", "equity-curve.json"):
+        assert files[0][name] == files[1][name]

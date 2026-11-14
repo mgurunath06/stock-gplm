@@ -18,7 +18,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Sequence
 
-from stock_gplm.ingestion.daily import MAX_SIDECAR, validate_daily
+from stock_gplm.ingestion.daily import MAX_SIDECAR
 from stock_gplm.m39b import (
     CorporateActionEvent,
     EventType,
@@ -39,6 +39,7 @@ from .evidence import (
     read_json,
 )
 from .issuance import _issues
+from .holdout_validation import validate_daily_for_development
 from .models import (
     ADAPTER_VERSION,
     CanonicalDailyBar,
@@ -324,10 +325,10 @@ class HistoricalDataAdapter:
             if ".json.gz.done" not in files or ".meta.json" not in files:
                 fail("UNPUBLISHED_SEGMENT", f"{stem} lacks its completion marker or metadata")
                 continue
-            report = validate_daily(files[".json.gz"])
+            report = validate_daily_for_development(files[".json.gz"], holdout.cutoff)
             record = {"file": files[".json.gz"].name, "sha256": report.publication_integrity.sha256,
                       "records": report.publication_integrity.records, "disposition": report.disposition,
-                      "window": [seg_start, seg_end], "holdout_rows_withheld": 0,
+                      "window": [seg_start, seg_end],
                       "done_sha256": file_sha256(files[".json.gz.done"]),
                       "meta_sha256": file_sha256(files[".meta.json"])}
             segments.append(record)
@@ -348,9 +349,8 @@ class HistoricalDataAdapter:
                 continue
             covered.append((seg_start, seg_end))
             for candle in report.content_quality.normalized_candles:
-                if candle.trading_date >= holdout.cutoff:
-                    record["holdout_rows_withheld"] += 1
-                    continue
+                # The M5-specific validator never returns protected candles.
+                assert candle.trading_date < holdout.cutoff
                 bar = CanonicalDailyBar(candle.trading_date, str(candle.open), str(candle.high), str(candle.low),
                                         str(candle.close), candle.volume, candle.source_timestamp_utc,
                                         files[".json.gz"].name)

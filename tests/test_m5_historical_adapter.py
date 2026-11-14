@@ -61,7 +61,7 @@ def test_complete_evidence_is_strictly_eligible_and_withholds_holdout(tmp_path: 
     decision, dataset = assess(raw, evidence)
     assert decision.status == DecisionStatus.ELIGIBLE and decision.investable
     assert dataset is not None and dataset.bars[-1].date < HOLDOUT
-    assert sum(s["holdout_rows_withheld"] for s in decision.segments) > 0
+    assert all("holdout_rows_withheld" not in s for s in decision.segments)
     assert {e.component for e in decision.evidence if e.status == "VERIFIED"} >= {
         "publication_integrity", "calendar", "pit_membership", "alias_history", "corporate_actions", "identity"}
 
@@ -429,7 +429,8 @@ def test_run_provenance_points_to_exact_immutable_version(tmp_path: Path) -> Non
     assert stored.config_hash == run["strategy_config_hash"] == validate_strategy(run["strategy_config_snapshot"]).config_hash
     assert run["holdout_cutoff"] == HOLDOUT and "locked_holdout_accessed" not in run
     access = run["holdout_access"]
-    assert access["protected_rows_decoded_during_source_validation"] > 0  # decoded by validate_daily, withheld
+    assert access["protected_rows_decoded_during_source_validation"] == 0
+    assert access["protected_source_byte_integrity_checked"] is True
     assert access["protected_rows_released_to_execution"] == access["protected_rows_scored_or_trained"] == 0
     assert all(d["decision"]["status"] == "ELIGIBLE" for d in run["datasets"])
 

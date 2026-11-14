@@ -260,22 +260,31 @@ only open positions receive the estimate, so nothing is counted twice. Costs
 were not weakened. The headline return can only fall: on the genuine diagnostic
 run, −2.462% marked to market became −2.489% after liquidation.
 
-## H — Holdout wording
+## H — Holdout validation isolation
 
 The M3.2 boundaries are unchanged. The five shorter horizons start 2026-04-29,
 6–12m starts 2025-10-21, and M5 uses the earliest, **2025-10-21**. Runs replace
 `locked_holdout_accessed` with `holdout_access`, which reports three separate
 counts:
 
-- `protected_rows_decoded_during_source_validation`: rows that `validate_daily`
-  parsed in segments straddling the cutoff. This is 960 for the genuine
-  20-symbol run.
+- `protected_rows_decoded_during_source_validation`: always 0 in M5.1.1. A
+  dedicated M5 validator verifies the immutable compressed payload, record
+  count, metadata and completion marker for the entire source file, but it
+  decodes candle content only for dated rows before the cutoff.
+- `protected_source_byte_integrity_checked`: true when those whole-source byte
+  and sidecar checks ran.
 - `protected_rows_released_to_execution`: computed from the released bars, and
   asserted to be 0.
 - `protected_rows_scored_or_trained`: always 0.
 
-In pre-M5.1 artifacts, `locked_holdout_accessed: false` means only "not released,
-scored or trained".
+Protected rows remain present only as opaque bytes covered by the full payload
+hash. Their OHLCV fields, schema validity, duplicates and chronology cannot
+change development bars, eligibility failures, warnings, signals, orders,
+trades, metrics or benchmark results. A later source-byte change still makes a
+previous assessment stale before execution. The full-source hash and therefore
+the decision/run identity may change; that is provenance, not a development
+research result. In pre-M5.1 artifacts, `locked_holdout_accessed: false` means
+only "not released, scored or trained".
 
 ## Remediation matrix
 
@@ -293,7 +302,7 @@ with the same script on this branch.
 | E | Narrow provenance | only `v1/` and `m5/` hashed; git state in `run_id` | `m5/provenance.py` (new), `m5/runner.py` | `test_E_*` (3) | five components + Python; environment separated | Python micro version and platform float differences are recorded, not bound |
 | F | Programmatic non-loopback bind | `serve(host="0.0.0.0")` bound `('0.0.0.0', port)` | `v1/studio.py` | `test_F_*` (10) | `ValueError: … binds only to ['127.0.0.1', 'localhost']` | Other local users on the same machine can still reach loopback (unchanged, as before) |
 | G | Terminal valuation mismatch | strategy marked at close without exit costs; benchmark deducted them | `v1/metrics.py`, `m5/runner.py` | `test_G_*` (3) | one policy for both; reconciliation within 4e-10 on genuine data | Final-close liquidation ignores market impact beyond slippage (documented limitation) |
-| H | Holdout wording | `locked_holdout_accessed: false` implied no decoding | `m5/runner.py`, `docs/m5-historical-data-adapter.md`, this file | `test_H_*`, `test_run_provenance_points_to_exact_immutable_version` | decoded / released / scored reported separately | — |
+| H | Holdout validation isolation | protected candle content changed whole-segment validation and development eligibility | `m5/holdout_validation.py`, `m5/adapter.py`, `m5/runner.py`, this file | `test_H_*`, including protected-only metamorphic mutation | whole-source bytes remain integrity-checked; protected candle content is not decoded, released or scored | Full-source hash changes remain visible in provenance and invalidate stale assessments |
 
 ## Genuine-data checks (2026-11-14, read-only)
 
