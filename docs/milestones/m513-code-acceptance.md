@@ -33,7 +33,9 @@ No production source changed between `f29af79` and `102198a`.
 | 8 additional negative tests | PASS |
 | Full suite, developer run (CPython 3.12.16) | 878 passed, 2 skipped, 0 failed |
 | Strict real-data research | **BLOCKED** |
-| Paper and live trading | **BLOCKED** |
+| Paper trading | **BLOCKED** |
+| Live trading | **BLOCKED** |
+| Protected holdout | **LOCKED** |
 
 Reviewer evidence:
 
@@ -43,6 +45,34 @@ Reviewer evidence:
   acceptance.
 - The full-suite figure above is the developer run from
   `docs/m513-conditional-acceptance-closure.md`.
+
+## Evidence status of the audit verdict
+
+The GO verdict is **user-supplied evidence**. The user relayed it on 2026-11-14 as
+"M5.1.3 CODE ACCEPTANCE: GO, accepted commit `102198a`". The original audit report
+is not in this repository or on this host, so its text, its reviewer identity and
+the environment it describes couldn't be checked here.
+`docs/reviews/m51-independent-audit.md` is the earlier M5.1 audit, not this one.
+Keep the original report next to this record if it becomes available.
+
+Checked locally on 2026-11-14:
+
+- `102198a` is an ancestor of the closing commit, and its direct parent.
+- `main` is an ancestor of `102198a`.
+- Only this document changed between `102198a` and the closing commit.
+
+## Code acceptance is not operational authorization
+
+GO means the code at `102198a` meets the M5.1.3 audit conditions. It authorizes
+none of the following, each of which needs its own explicit approval:
+
+- running strict research on real data;
+- installing a trust root;
+- migrating protected partitions;
+- scoring or reading the protected holdout;
+- paper or live trading;
+- merging, pushing or deploying;
+- starting M5.2 or M6.
 
 ## Conditions that remain open
 
