@@ -23,6 +23,7 @@ from m5_fixtures import (
     approval_for,
     build_world,
     install_trust_root,
+    remove_trust_root,
     settings_dict,
     strategy_config,
     trust_policy_value,
@@ -44,7 +45,12 @@ from stock_gplm.m5 import (
 )
 from stock_gplm.m5 import cli as m5_cli
 from stock_gplm.m5.adapter import StaleAssessmentError, strict_authority_failures
-from stock_gplm.m5.authority import ApprovalTrustPolicy, load_evidence_registration, load_trust_policy
+from stock_gplm.m5.authority import (
+    ApprovalTrustPolicy,
+    GovernedHoldout,
+    load_evidence_registration,
+    load_trust_policy,
+)
 from stock_gplm.m5.discovery import discover
 from stock_gplm.m5.evidence import (
     evidence_digest,
@@ -173,7 +179,7 @@ def test_H_protected_content_reaches_no_decoder_across_every_m5_path(tmp_path: P
     raw, evidence, protected = _sentinel_world(tmp_path / "world")
     registry = StrategyRegistry(tmp_path / "registry.sqlite3")
     version = registry.save(strategy_config())
-    holdout = load_holdout_boundary(Path(evidence.config_path).parent / "m32-run")
+    holdout = load_holdout_boundary(Path(evidence.config_path).parent / "m32-run", evidence.trust_policy)
     spy = DecoderSpy(monkeypatch, protected)
 
     adapter = HistoricalDataAdapter(raw, evidence)
@@ -322,7 +328,7 @@ def test_H_run_store_rederives_partition_evidence(tmp_path: Path) -> None:
     forged = json.loads(run_path.read_text())
     forged["holdout_access"]["opened_segment_windows"] = [["2024-01-01", "2024-06-30"]]
     _rewrite_run(directory, forged)
-    with pytest.raises(RunIntegrityError, match="partition evidence"):
+    with pytest.raises(RunIntegrityError, match="holdout access evidence differs"):
         load_run(directory)
 
 
@@ -398,8 +404,10 @@ def test_C_research_interfaces_accept_no_policy_or_checksum() -> None:
         load_trust_policy(_sign=lambda digest: "forged")
 
 
-def test_C_caller_generated_production_registration_and_matching_policy_are_not_authority(tmp_path: Path) -> None:
+def test_C_caller_generated_production_registration_and_matching_policy_are_not_authority(
+        tmp_path: Path, monkeypatch) -> None:
     raw, config, registration = _cost_world(tmp_path)
+    remove_trust_root(tmp_path / "no-admin", monkeypatch)
     evidence_dir = config.parent
     # The attacker writes a PRODUCTION registration, a matching policy and its checksum
     # next to ordinary research inputs. None of them is reachable as authority.
@@ -409,6 +417,7 @@ def test_C_caller_generated_production_registration_and_matching_policy_are_not_
         trust_root_value(json.dumps(policy).encode())))
     loaded = load_reference_evidence(config)
     assert loaded.trust_policy is None and loaded.cost_schedule is not None
+    assert loaded.holdout is None  # M5.1.3: no governed authority means no holdout boundary at all
     assert not loaded.cost_schedule.authority_approved
     assert "administrative_trust_root" not in loaded.source_hashes
     request = DataEligibilityRequest("ALPHA-EQ", "2024-01-01", "2024-09-30", STRICT)
@@ -420,7 +429,8 @@ def test_C_caller_constructed_or_edited_policy_objects_never_approve(tmp_path: P
     registration = load_evidence_registration(registration_path)
     approval = approval_for(raw)
     forged = ApprovalTrustPolicy("p", "0" * 64, frozenset({"test-reviewer"}),
-                                 {registration.registration_id: approval}, "r", "1" * 64, 1)
+                                 {registration.registration_id: approval}, "r", "1" * 64, 1,
+                                 GovernedHoldout("synthetic-m32", "2" * 64, "2099-01-01"))
     assert not forged.governed and not forged.approves(registration)
     install_trust_root(tmp_path / "admin", monkeypatch, trust_policy_value([]))
     genuine = load_trust_policy()

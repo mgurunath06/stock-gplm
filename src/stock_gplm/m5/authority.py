@@ -19,7 +19,11 @@ never by a research argument, and is accepted only when:
 * the trust root's content hash matches its ``root_id``, its status is
   ``ACTIVE``, it pins the policy's exact file SHA-256, and the policy SHA-256 is
   not in its ``revoked_policy_sha256`` list;
-* every reviewer and approval in the policy is authorized by the trust root.
+* every reviewer and approval in the policy is authorized by the trust root;
+* (M5.1.3) the trust root names the one M3.2 split plan, by run id, exact SHA-256
+  and cutoff, that defines the locked holdout. No research input can choose or
+  redefine the cutoff; without a governed trust root there is no holdout
+  boundary and nothing that would open a payload may run.
 
 The loaded :class:`ApprovalTrustPolicy` carries a process-local issuance seal. A
 policy object constructed by a caller never approves anything. No private key
@@ -35,7 +39,7 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -69,8 +73,9 @@ class TrustAnchor:
 _ANCHOR = TrustAnchor(Path("/etc/stock-gplm"), 0, Path("/"))
 _TRUST_ROOT_FIELDS = frozenset({
     "contract", "schema_version", "root_id", "generation", "status", "policy_file", "policy_sha256",
-    "trusted_reviewers", "revoked_policy_sha256", "initialized_at_utc",
+    "trusted_reviewers", "revoked_policy_sha256", "governed_holdout", "initialized_at_utc",
 })
+_GOVERNED_HOLDOUT_FIELDS = frozenset({"m32_run_id", "split_plan_sha256", "cutoff"})
 
 
 def _effective_uid() -> int:
@@ -136,6 +141,18 @@ class EvidenceRegistration:
 
 
 @dataclass(frozen=True)
+class GovernedHoldout:
+    """The one M3.2 split plan the administrator accepts as the locked-holdout authority (M5.1.3).
+
+    Research inputs cannot choose or redefine the cutoff: a split plan is usable only
+    when its run identifier, exact file SHA-256 and derived cutoff all equal these.
+    """
+    m32_run_id: str
+    split_plan_sha256: str
+    cutoff: str
+
+
+@dataclass(frozen=True)
 class ApprovalTrustPolicy:
     policy_id: str
     policy_sha256: str
@@ -144,6 +161,7 @@ class ApprovalTrustPolicy:
     trust_root_id: str
     trust_root_sha256: str
     trust_root_generation: int
+    governed_holdout: GovernedHoldout
     issuance_seal: str = field(default="", compare=False, repr=False)
 
     def digest(self) -> str:
@@ -154,6 +172,7 @@ class ApprovalTrustPolicy:
             "approvals": [self.approvals[key] for key in sorted(self.approvals)],
             "trust_root_id": self.trust_root_id, "trust_root_sha256": self.trust_root_sha256,
             "trust_root_generation": self.trust_root_generation,
+            "governed_holdout": asdict(self.governed_holdout),
         })
 
     @property
@@ -308,6 +327,19 @@ def _load_trust_root(anchor: TrustAnchor) -> tuple[dict[str, Any], str]:
         raise ValueError("administrative trust root revoked_policy_sha256 must list SHA-256 values")
     if value["policy_sha256"] in revoked:
         raise ValueError("administrative trust root pins a revoked policy")
+    holdout = value["governed_holdout"]
+    if not isinstance(holdout, dict) or set(holdout) != _GOVERNED_HOLDOUT_FIELDS:
+        raise ValueError("administrative trust root must govern exactly one M3.2 holdout "
+                         "(m32_run_id, split_plan_sha256, cutoff)")
+    if not isinstance(holdout["m32_run_id"], str) or not holdout["m32_run_id"].strip():
+        raise ValueError("governed holdout m32_run_id must be a non-empty string")
+    if not isinstance(holdout["split_plan_sha256"], str) or _HEX.fullmatch(holdout["split_plan_sha256"]) is None:
+        raise ValueError("governed holdout split_plan_sha256 must be a lowercase SHA-256")
+    try:
+        if date.fromisoformat(holdout["cutoff"]).isoformat() != holdout["cutoff"]:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise ValueError("governed holdout cutoff must be a canonical ISO-8601 date") from exc
     try:
         initialized = datetime.fromisoformat(value["initialized_at_utc"].replace("Z", "+00:00"))
     except (AttributeError, ValueError) as exc:
@@ -362,6 +394,9 @@ def load_trust_policy(*, _sign: Any = None) -> ApprovalTrustPolicy | None:
     binding = {key: value[key] for key in ("contract", "schema_version", "trusted_reviewers", "approvals")}
     if value["policy_id"] != canonical_hash(binding):
         raise ValueError("trust-policy identifier does not match its content")
+    governed = root["governed_holdout"]
     policy = ApprovalTrustPolicy(value["policy_id"], digest, frozenset(reviewers), approvals,
-                                 root["root_id"], root_digest, root["generation"])
+                                 root["root_id"], root_digest, root["generation"],
+                                 GovernedHoldout(governed["m32_run_id"], governed["split_plan_sha256"],
+                                                 governed["cutoff"]))
     return replace(policy, issuance_seal=_sign(policy.digest()))

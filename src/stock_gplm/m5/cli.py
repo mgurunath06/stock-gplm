@@ -11,6 +11,7 @@ from stock_gplm.v1.registry import StrategyRegistry
 from stock_gplm.v1.schema import validate_strategy
 
 from .adapter import HistoricalDataAdapter
+from .authority import load_trust_policy
 from .discovery import discover
 from .evidence import load_etf_heuristic, load_holdout_boundary, load_reference_evidence, read_json
 from .models import DataEligibilityRequest, UniverseRequest, universe_problems
@@ -89,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "discover":
         if args.verify and args.m32_run is None:
             parser.error("--verify requires --m32-run so protected segments are never opened")
-        holdout = load_holdout_boundary(args.m32_run) if args.verify else None
+        holdout = load_holdout_boundary(args.m32_run, load_trust_policy()) if args.verify else None
         report = discover(args.raw_root, load_etf_heuristic(args.etf_heuristic), verify=args.verify,
                           holdout=holdout)
         _write_new(args.output, report, args.raw_root)

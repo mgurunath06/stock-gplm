@@ -160,6 +160,26 @@ def event_record(ex_date: str, available: str, *, kind: str = "STOCK_SPLIT", new
     return record | extra
 
 
+# The synthetic M3.2 split plan every fixture world uses. The autouse conftest fixture installs a
+# SYNTHETIC administrative trust root that governs exactly this plan (M5.1.3); nothing here is real.
+FIXTURE_M32_RUN_ID = "synthetic-m32"
+FIXTURE_SPLIT_PLAN_BYTES = json.dumps({"schema_version": 1, "plans": [
+    {"horizon": "1-7d", "locked_holdout": {"first_as_of": "2024-11-01", "last_as_of": "2024-12-31"}},
+    {"horizon": "6-12m", "locked_holdout": {"first_as_of": HOLDOUT, "last_as_of": "2024-12-31"}}]}).encode()
+FIXTURE_GOVERNED_HOLDOUT = {"m32_run_id": FIXTURE_M32_RUN_ID,
+                            "split_plan_sha256": hashlib.sha256(FIXTURE_SPLIT_PLAN_BYTES).hexdigest(),
+                            "cutoff": HOLDOUT}
+
+
+def write_m32_run(directory: Path, plan_bytes: bytes, run_id: str) -> None:
+    """Write a self-consistent M3.2 run (manifest hash matches the plan). Consistency is not authority."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "split-plan.json").write_bytes(plan_bytes)
+    (directory / "run-manifest.json").write_text(json.dumps({
+        "contract": "stock-gplm.m32-research-run.v1", "run_id": run_id,
+        "outputs": {"split-plan.json": hashlib.sha256(plan_bytes).hexdigest()}}))
+
+
 def build_world(tmp_path: Path, symbols: tuple[str, ...] = ("ALPHA-EQ", "BETA-EQ"), *,
                 listing: bool = True, calendar: bool = True, aliases: str | None = "COMPLETE",
                 corporate_actions: bool = True, ca_actions: list[dict] | None = None,
@@ -174,14 +194,7 @@ def build_world(tmp_path: Path, symbols: tuple[str, ...] = ("ALPHA-EQ", "BETA-EQ
     evidence_dir.mkdir()
     m32 = evidence_dir / "m32-run"
     m32.mkdir()
-    plan = {"schema_version": 1, "plans": [
-        {"horizon": "1-7d", "locked_holdout": {"first_as_of": "2024-11-01", "last_as_of": "2024-12-31"}},
-        {"horizon": "6-12m", "locked_holdout": {"first_as_of": HOLDOUT, "last_as_of": "2024-12-31"}}]}
-    raw_plan = json.dumps(plan).encode()
-    (m32 / "split-plan.json").write_bytes(raw_plan)
-    (m32 / "run-manifest.json").write_text(json.dumps({
-        "contract": "stock-gplm.m32-research-run.v1", "run_id": "synthetic-m32",
-        "outputs": {"split-plan.json": hashlib.sha256(raw_plan).hexdigest()}}))
+    write_m32_run(m32, FIXTURE_SPLIT_PLAN_BYTES, FIXTURE_M32_RUN_ID)
     paths: dict[str, Any] = {"contract": "stock-gplm.m5-evidence-paths.v1", "m32_run": "m32-run",
                              "etf_heuristic": str(ROOT / "config" / "m37" / "etf-symbol-heuristic.json")}
     if calendar:
@@ -280,11 +293,13 @@ def trust_policy_value(approvals: list[dict[str, str]], reviewers: list[str] | N
 
 def trust_root_value(policy_bytes: bytes, *, reviewers: list[str] | None = None, generation: int = 1,
                      status: str = "ACTIVE", revoked: list[str] | None = None,
-                     policy_file: str = "approval-trust-policy.json") -> dict[str, Any]:
+                     policy_file: str = "approval-trust-policy.json",
+                     governed_holdout: dict[str, Any] | None = None) -> dict[str, Any]:
     value = {"contract": "stock-gplm.m512-approval-trust-root.v1", "schema_version": 1, "generation": generation,
              "status": status, "policy_file": policy_file,
              "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
              "trusted_reviewers": reviewers or ["test-reviewer"], "revoked_policy_sha256": revoked or [],
+             "governed_holdout": dict(FIXTURE_GOVERNED_HOLDOUT if governed_holdout is None else governed_holdout),
              "initialized_at_utc": "2026-11-14T00:00:00Z"}
     value["root_id"] = canonical_hash({key: value[key] for key in sorted(value)})
     return value
@@ -314,3 +329,11 @@ def install_trust_root(directory: Path, monkeypatch: pytest.MonkeyPatch, policy:
     monkeypatch.setattr(authority, "_ANCHOR", authority.TrustAnchor(directory, owner, directory))
     monkeypatch.setattr(authority, "_effective_uid", lambda: owner + 1 if research_uid is None else research_uid)
     return directory
+
+
+def remove_trust_root(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the anchor at an empty directory: no administrative authority exists at all."""
+    from stock_gplm.m5 import authority
+
+    directory.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(authority, "_ANCHOR", authority.TrustAnchor(directory, 0, directory))

@@ -35,8 +35,9 @@ def discover(raw_root: Path, etf: EtfHeuristic, *, verify: bool = False,
              holdout: HoldoutBoundary | None = None) -> dict[str, Any]:
     """Inventory published segments; ``verify`` requires the hash-verified ``holdout`` boundary."""
     raw_root = Path(raw_root)
-    if verify and not isinstance(holdout, HoldoutBoundary):
-        raise ValueError("discovery verification requires a hash-verified M3.2 holdout boundary")
+    if verify and not (isinstance(holdout, HoldoutBoundary) and holdout.governed):
+        raise ValueError("discovery verification requires the administratively governed M3.2 holdout boundary; "
+                         "a caller-constructed boundary is refused and no payload is opened")
     symbols: list[dict[str, Any]] = []
     totals: Counter[str] = Counter()
     dispositions: Counter[str] = Counter()

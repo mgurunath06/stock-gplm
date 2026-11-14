@@ -18,6 +18,12 @@ Verification levels:
     Additionally, re-running the run now, through the adapter on the current raw
     data and evidence and the registered strategy version, reproduces every
     analytical file byte for byte.
+``PRIOR_CONTRACT_VERIFIED``
+    A ``...-run.v2`` or ``...-run.v3`` run that passes every integrity check its
+    own contract defined. It predates the M5.1.3 governed holdout boundary and
+    re-derived access evidence, so it is never silently reinterpreted as a
+    current run: it cannot be replayed, compared or ranked. Re-run it under the
+    current contract to make it comparable.
 ``LEGACY_UNVERIFIED``
     A pre-M5.1 (``...-run.v1``) run whose manifest hashes match. It lacks the
     binding needed for full verification. It can be listed and shown, labelled
@@ -54,20 +60,20 @@ from .runner import (
     ENVIRONMENT_FILE,
     LEGACY_RUN_CONTRACT,
     MANIFEST_CONTRACT,
-    PREVIOUS_MANIFEST_CONTRACT,
-    PREVIOUS_RUN_CONTRACT,
+    PRIOR_MANIFEST_CONTRACTS,
+    PRIOR_RUN_CONTRACTS,
     RUN_CONTRACT,
     STRICT_CLASSIFICATION,
     BacktestSettings,
     _encode,
     build_run,
-    opened_segment_windows,
+    holdout_access_evidence,
     render_markdown,
 )
-from .holdout_validation import PARTITION_POLICY
 
 INTEGRITY_VERIFIED = "INTEGRITY_VERIFIED"
 REPLAY_VERIFIED = "REPLAY_VERIFIED"
+PRIOR_CONTRACT_VERIFIED = "PRIOR_CONTRACT_VERIFIED"
 LEGACY_UNVERIFIED = "LEGACY_UNVERIFIED"
 MANIFEST_NAME = "run-manifest.json"
 MAX_RUN_FILE_BYTES = 256 * 1024 * 1024
@@ -173,21 +179,22 @@ def load_run(directory: Path) -> VerifiedRun:
         return VerifiedRun(directory.name, directory, run, manifest, payloads["report.md"].decode("utf-8"),
                            LEGACY_UNVERIFIED)
 
-    current_contract = (manifest.get("contract"), manifest.get("run_contract")) == (
-        MANIFEST_CONTRACT, RUN_CONTRACT)
-    previous_contract = (manifest.get("contract"), manifest.get("run_contract")) == (
-        PREVIOUS_MANIFEST_CONTRACT, PREVIOUS_RUN_CONTRACT)
-    if set(manifest) != _MANIFEST_KEYS or not (current_contract or previous_contract):
+    contracts = (manifest.get("contract"), manifest.get("run_contract"))
+    current_contract = contracts == (MANIFEST_CONTRACT, RUN_CONTRACT)
+    prior_contract = contracts in tuple(zip(PRIOR_MANIFEST_CONTRACTS, PRIOR_RUN_CONTRACTS))
+    if set(manifest) != _MANIFEST_KEYS or not (current_contract or prior_contract):
         raise _fail(directory, "unsupported run manifest contract or fields")
+    v3_contract = prior_contract and contracts[1] == PRIOR_RUN_CONTRACTS[0]
     expected = set(ANALYTICAL_FILES) | {ENVIRONMENT_FILE}
     if manifest["file_inventory"] != sorted(expected) or manifest["non_analytical_files"] != [ENVIRONMENT_FILE]:
         raise _fail(directory, "manifest file inventory is not the required inventory")
     payloads = _read_files(directory, expected, manifest["file_sha256"])
     run = _strict_json(directory, "run.json", payloads["run.json"])
-    expected_run_contract = RUN_CONTRACT if current_contract else PREVIOUS_RUN_CONTRACT
-    if not isinstance(run, dict) or run.get("run_id") != directory.name or run.get("contract") != expected_run_contract:
+    if not isinstance(run, dict) or run.get("run_id") != directory.name or run.get("contract") != contracts[1]:
         raise _fail(directory, "run.json identity or contract does not match the directory")
-    binding_keys = BINDING_KEYS if current_contract else PREVIOUS_BINDING_KEYS
+    # v3 carried input provenance; v2 did not. Neither carries M5.1.3 holdout evidence.
+    full_provenance = current_contract or v3_contract
+    binding_keys = BINDING_KEYS if full_provenance else PREVIOUS_BINDING_KEYS
     if any(key not in run for key in binding_keys):
         raise _fail(directory, "run.json lacks identity binding fields")
     if canonical_hash({key: run[key] for key in binding_keys}) != directory.name:
@@ -197,17 +204,17 @@ def load_run(directory: Path) -> VerifiedRun:
             or environment.get("part_of_run_identity") is not False):
         raise _fail(directory, "environment.json belongs to a different run")
     runtime = environment.get("environment")
-    if current_contract and (not isinstance(runtime, dict) or runtime.get("contract") != ENVIRONMENT_CONTRACT
+    if full_provenance and (not isinstance(runtime, dict) or runtime.get("contract") != ENVIRONMENT_CONTRACT
             or runtime.get("required_reproducibility_manifests") != list(LOCKFILES)
             or runtime.get("reproducibility_manifest_status") != "COMPLETE"
             or set(runtime.get("lockfile_sha256", {})) != set(LOCKFILES)):
         raise _fail(directory, "environment provenance lacks the complete required reproducibility manifests")
 
     provenance = run.get("input_provenance")
-    if current_contract and (not isinstance(provenance, dict)
-                             or canonical_hash(provenance) != run.get("input_provenance_sha256")):
+    if full_provenance and (not isinstance(provenance, dict)
+                            or canonical_hash(provenance) != run.get("input_provenance_sha256")):
         raise _fail(directory, "input provenance is missing or does not match its bound hash")
-    if not current_contract:
+    if not full_provenance:
         provenance = None
     expected_datasets = [{
         "symbol": item["symbol"], "decision_id": item["decision"]["decision_id"],
@@ -223,7 +230,7 @@ def load_run(directory: Path) -> VerifiedRun:
     } for item in run["evidence_versions"]}.values(), key=lambda item: str(item["evidence_sha256"]))
     expected_strategy = {"strategy_id": run["strategy_id"], "version": run["strategy_version"],
                          "config_sha256": run["strategy_config_hash"]}
-    if current_contract and (provenance.get("contract") != "stock-gplm.m511-input-provenance.v1"
+    if full_provenance and (provenance.get("contract") != "stock-gplm.m511-input-provenance.v1"
             or provenance.get("datasets") != expected_datasets or provenance.get("evidence") != expected_evidence
             or provenance.get("strategy") != expected_strategy
             or provenance.get("source_code_sha256") != run["code"]["source_sha256"]
@@ -232,16 +239,16 @@ def load_run(directory: Path) -> VerifiedRun:
                 "reason": "M5 evaluates declarative V1 strategies and loads no ML model artifact",
             }):
         raise _fail(directory, "input provenance contradicts the run's data, evidence, strategy or code identity")
-    if current_contract and run.get("registered_cost_profile") is not None:
+    if full_provenance and run.get("registered_cost_profile") is not None:
         expected_cost = {"authority": "REGISTERED_APPROVED", **run["registered_cost_profile"]}
-    elif current_contract:
+    elif full_provenance:
         expected_cost = {"authority": "DIAGNOSTIC_ASSUMPTION", "assumption_sha256": canonical_hash({
             "strategy_trading_costs": run["strategy_config_snapshot"]["trading_costs"],
             "settings": {"buy_statutory_bps": run["settings"]["buy_statutory_bps"],
                          "sell_statutory_bps": run["settings"]["sell_statutory_bps"],
                          "cost_basis": run["settings"]["cost_basis"]},
         })}
-    if current_contract and provenance.get("cost_profile") != expected_cost:
+    if full_provenance and provenance.get("cost_profile") != expected_cost:
         raise _fail(directory, "input provenance contradicts the registered or diagnostic cost identity")
 
     try:
@@ -252,19 +259,24 @@ def load_run(directory: Path) -> VerifiedRun:
                 run[key] is not False for key in ("promotion_eligible", "paper_trading_eligible",
                                                   "ml_training_eligible")):
             raise _fail(directory, "classification contradicts the eligibility mode and issuance")
-        if run["holdout_access"]["protected_rows_released_to_execution"] != 0 or run["holdout_access"][
-                "protected_rows_scored_or_trained"] != 0:
-            raise _fail(directory, "run records locked-holdout rows released or scored")
-        if current_contract:
-            # M5.1.2: re-derive the opened-segment evidence from the stored decisions instead of
-            # trusting a recorded claim; any opened window reaching the cutoff fails verification.
-            access, cutoff = run["holdout_access"], run["holdout_cutoff"]
-            windows = opened_segment_windows(d["decision"] for d in run["datasets"])
-            if (access.get("partition_policy") != PARTITION_POLICY or access.get("opened_segment_windows") != windows
-                    or not isinstance(cutoff, str) or any(window[1] >= cutoff for window in windows)):
-                raise _fail(directory, "run holdout partition evidence is missing, inconsistent or reaches the cutoff")
         tables = {name: _strict_json(directory, name, payloads[name])
                   for name in ("signals.json", "orders.json", "trades.json", "equity-curve.json")}
+        if current_contract:
+            # M5.1.3: the holdout record is re-derived from the stored decisions and equity curve
+            # and must equal what was written; nothing in it is trusted as a claim.
+            try:
+                expected_access = holdout_access_evidence([d["decision"] for d in run["datasets"]],
+                                                          tables["equity-curve.json"], run["holdout_cutoff"],
+                                                          run["holdout_access"].get("holdout_authority"))
+            except ValueError as exc:
+                raise _fail(directory, f"run holdout evidence does not re-derive: {exc}") from exc
+            if _normal(run["holdout_access"]) != _normal(expected_access):
+                raise _fail(directory, "run holdout access evidence differs from what its decisions and equity "
+                                       "curve re-derive")
+        else:
+            if run["holdout_access"]["protected_rows_released_to_execution"] != 0 or run["holdout_access"][
+                    "protected_rows_scored_or_trained"] != 0:
+                raise _fail(directory, "run records locked-holdout rows released or scored")
         cost = run["cost_model"]
         costs = CostModel(cost["commission_bps"], cost["slippage_bps"], cost["buy_statutory_bps"],
                           cost["sell_statutory_bps"])
@@ -287,7 +299,8 @@ def load_run(directory: Path) -> VerifiedRun:
     markdown = payloads["report.md"].decode("utf-8")
     if markdown != render_markdown(run):
         raise _fail(directory, "report.md does not re-render from run.json")
-    return VerifiedRun(directory.name, directory, run, manifest, markdown, INTEGRITY_VERIFIED)
+    return VerifiedRun(directory.name, directory, run, manifest, markdown,
+                       INTEGRITY_VERIFIED if current_contract else PRIOR_CONTRACT_VERIFIED)
 
 
 def scan_runs(root: Path) -> list[dict[str, Any]]:
@@ -308,6 +321,9 @@ def scan_runs(root: Path) -> list[dict[str, Any]]:
 
 def replay_run(verified: VerifiedRun, adapter: Any, registry: Any) -> VerifiedRun:
     """Re-run ``verified`` through the adapter and registry; every analytical byte must match."""
+    if verified.verification == PRIOR_CONTRACT_VERIFIED:
+        raise _fail(verified.directory, "prior-contract runs predate the governed holdout boundary and are never "
+                                        "replayed or reinterpreted; re-run under the current contract")
     if verified.verification != INTEGRITY_VERIFIED:
         raise _fail(verified.directory, f"{verified.verification} runs cannot be replay-verified")
     run = verified.run
@@ -357,6 +373,10 @@ def compare_runs(run_dirs: Sequence[Path], *,
     if any(v.verification == LEGACY_UNVERIFIED for v in verified):
         fair = False
         reasons.append("legacy runs without M5.1 verification evidence are never ranked")
+    if any(v.verification == PRIOR_CONTRACT_VERIFIED for v in verified):
+        fair = False
+        reasons.append("prior-contract runs lack the governed holdout boundary and re-derived access evidence; "
+                       "they are never compared as equivalent to current runs")
     if len({run.get("terminal_valuation") for run in runs}) > 1:
         fair = False
         reasons.append("runs differ in terminal_valuation")

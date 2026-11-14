@@ -111,14 +111,42 @@ def read_json(path: Path, maximum: int = MAX_JSON_BYTES) -> tuple[Any, str]:
 
 @dataclass(frozen=True)
 class HoldoutBoundary:
-    """Earliest locked-holdout session across every horizon of a verified M3.2 plan."""
+    """Earliest locked-holdout session of the administratively governed M3.2 plan (M5.1.3).
+
+    Only :func:`load_holdout_boundary` can issue one, and only for the split plan
+    the trust root names. A caller-constructed instance is never ``governed`` and
+    is refused by every consumer that may open a payload.
+    """
 
     cutoff: str
     m32_run_id: str
     split_plan_sha256: str
+    trust_root_sha256: str
+    issuance_seal: str = field(default="", compare=False, repr=False)
+
+    def digest(self) -> str:
+        return canonical_hash({"cutoff": self.cutoff, "m32_run_id": self.m32_run_id,
+                               "split_plan_sha256": self.split_plan_sha256,
+                               "trust_root_sha256": self.trust_root_sha256})
+
+    @property
+    def governed(self) -> bool:
+        """True only when this process issued the boundary from the governed split plan."""
+        return verify_seal("holdout", self.digest(), self.issuance_seal)
 
 
-def load_holdout_boundary(m32_run: Path) -> HoldoutBoundary:
+@_issues("holdout")
+def load_holdout_boundary(m32_run: Path, policy: ApprovalTrustPolicy | None, *, _sign: Any = None) -> HoldoutBoundary:
+    """Load the M3.2 split plan at ``m32_run`` only if it is the one the trust root governs.
+
+    Raises :class:`ValueError` when no governed authority exists or when the plan's run
+    identifier, exact bytes or derived cutoff differ from the governed values. The
+    caller therefore cannot extend, move or replace the cutoff.
+    """
+    if policy is None or not policy.governed:
+        raise ValueError("no administratively governed holdout authority: a trust root naming the accepted "
+                         "M3.2 split plan is required before any holdout boundary exists")
+    governed = policy.governed_holdout
     manifest, _ = read_json(Path(m32_run) / "run-manifest.json")
     if not isinstance(manifest, dict) or manifest.get("contract") != M32_CONTRACT:
         raise ValueError("M3.2 run manifest has an unsupported contract")
@@ -126,11 +154,18 @@ def load_holdout_boundary(m32_run: Path) -> HoldoutBoundary:
     plan, digest = read_json(Path(m32_run) / "split-plan.json")
     if not isinstance(expected, str) or digest != expected:
         raise ValueError("M3.2 split plan does not match its run-manifest hash")
+    if digest != governed.split_plan_sha256:
+        raise ValueError("M3.2 split plan is not the administratively governed split plan (SHA-256 differs)")
+    if str(manifest.get("run_id")) != governed.m32_run_id:
+        raise ValueError("M3.2 run identifier is not the administratively governed run")
     firsts = [item["locked_holdout"]["first_as_of"] for item in plan["plans"] if item.get("locked_holdout")]
     if not firsts or len(firsts) != len(plan["plans"]):
         raise ValueError("every M3.2 horizon must declare a locked holdout")
-    cutoff = min(date.fromisoformat(value) for value in firsts)
-    return HoldoutBoundary(cutoff.isoformat(), str(manifest["run_id"]), digest)
+    cutoff = min(date.fromisoformat(value) for value in firsts).isoformat()
+    if cutoff != governed.cutoff:
+        raise ValueError(f"M3.2 split plan cutoff {cutoff} differs from the governed cutoff {governed.cutoff}")
+    boundary = HoldoutBoundary(cutoff, str(manifest["run_id"]), digest, policy.trust_root_sha256)
+    return replace(boundary, issuance_seal=_sign(boundary.digest()))
 
 
 @dataclass(frozen=True)
@@ -492,7 +527,12 @@ def load_reference_evidence(
     base = Path(config_path).resolve().parent
     hashes: dict[str, str] = {}
     policy = load_trust_policy()
-    holdout = load_holdout_boundary(base / paths["m32_run"]) if paths.get("m32_run") else None
+    # M5.1.3: without a governed trust root there is no holdout boundary at all. The adapter then
+    # rejects every request (HOLDOUT_BOUNDARY_UNVERIFIED) before any segment is considered. A
+    # split plan that exists but is not the governed one is an error, not a silent None.
+    holdout = None
+    if paths.get("m32_run") and policy is not None:
+        holdout = load_holdout_boundary(base / paths["m32_run"], policy)
     etf = load_etf_heuristic(base / paths["etf_heuristic"])
     hashes["etf_heuristic"] = etf.source_sha256
     calendar = None
@@ -514,6 +554,7 @@ def load_reference_evidence(
         hashes["instrument_master"] = file_sha256(master)
     if holdout is not None:
         hashes["m32_split_plan"] = holdout.split_plan_sha256
+        hashes["m32_run_id"] = canonical_hash(holdout.m32_run_id)
     basis = None
     if paths.get("provider_price_basis"):
         basis = load_price_basis_registration(base / paths["provider_price_basis"])

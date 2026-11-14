@@ -22,7 +22,9 @@ only by the OS-governed administrative trust root
 `docs/m512-critical-remediation.md` for the trust boundary, initialization,
 rotation and compromise recovery. The policy must trust the named reviewer (who
 must also be authorized by the trust root) and contain an exact approval for the
-registration/provenance/approval-record tuple. A `SYNTHETIC` registration can
+registration/provenance/approval-record tuple. Since M5.1.3 the trust root also
+names the one governed M3.2 split plan (run id, SHA-256, cutoff); see
+`docs/m513-acceptance-remediation.md`. A `SYNTHETIC` registration can
 never be approved, even when a policy lists it. No trust policy or production
 approval is included in this repository.
 

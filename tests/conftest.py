@@ -9,18 +9,19 @@ from typing import Any
 
 import pytest
 
-from stock_gplm.m5 import authority as _m5_authority
+from m5_fixtures import install_trust_root, trust_policy_value
 
 
 @pytest.fixture(autouse=True)
-def _isolate_administrative_trust_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
+def _synthetic_administrative_trust_root(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch):
     """Never let a real /etc/stock-gplm trust root on the test host influence a test.
 
-    Points the anchor at an empty directory: no trust root is installed, so
-    authority stays absent unless a test installs a synthetic one explicitly.
+    Installs a SYNTHETIC trust root (test user as stand-in administrator) that governs only
+    the synthetic fixture split plan and approves nothing. Strict authority therefore stays
+    unapproved unless a test installs approvals; tests that need no authority at all call
+    ``m5_fixtures.remove_trust_root``.
     """
-    empty = tmp_path_factory.mktemp("no-admin-trust-root")
-    monkeypatch.setattr(_m5_authority, "_ANCHOR", _m5_authority.TrustAnchor(empty, 0, empty))
+    install_trust_root(tmp_path_factory.mktemp("synthetic-admin-trust-root"), monkeypatch, trust_policy_value([]))
 
 
 @pytest.fixture

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 from m5_fixtures import (
+    FIXTURE_GOVERNED_HOLDOUT,
     ROOT,
     build_world,
     event_record,
@@ -57,6 +58,7 @@ from stock_gplm.m5.models import (
 from stock_gplm.m5.run_store import (
     INTEGRITY_VERIFIED,
     LEGACY_UNVERIFIED,
+    PRIOR_CONTRACT_VERIFIED,
     REPLAY_VERIFIED,
     make_replayer,
     scan_runs,
@@ -647,6 +649,11 @@ def test_E_immutable_v2_run_remains_integrity_readable(tmp_path: Path) -> None:
     run, directory, _ = _strict_run(tmp_path)
     previous = json.loads(json.dumps(run))
     previous["contract"] = "stock-gplm.m5-historical-backtest-run.v2"
+    # The M5.1.1 (v2) holdout record, exactly as that contract wrote it.
+    previous["holdout_access"] = {
+        "policy": run["holdout_access"]["policy"], "cutoff": run["holdout_cutoff"],
+        "protected_rows_decoded_during_source_validation": 0, "protected_source_byte_integrity_checked": True,
+        "protected_rows_released_to_execution": 0, "protected_rows_scored_or_trained": 0}
     previous.pop("input_provenance")
     previous.pop("input_provenance_sha256")
     binding = ("contract", "strategy_id", "strategy_version", "strategy_config_hash", "dataset_fingerprint",
@@ -673,7 +680,8 @@ def test_E_immutable_v2_run_remains_integrity_readable(tmp_path: Path) -> None:
                 "created_at_utc": "2026-11-14T00:00:00Z", "non_analytical_fields": ["created_at_utc"],
                 "non_analytical_files": ["environment.json"]}
     (target / "run-manifest.json").write_text(json.dumps(manifest))
-    assert load_run(target).verification == INTEGRITY_VERIFIED
+    # Still integrity-readable, but labelled as a prior contract: never reinterpreted as current.
+    assert load_run(target).verification == PRIOR_CONTRACT_VERIFIED
 
 
 def test_E_execution_path_imports_only_the_standard_library() -> None:
@@ -858,13 +866,16 @@ def test_H_holdout_access_records_derived_partition_evidence_not_a_decode_counte
     run, directory, _ = _strict_run(tmp_path)
     access = run["holdout_access"]
     assert access["cutoff"] == run["holdout_cutoff"] == "2024-10-01"
-    # M5.1.2: the unsupported self-reported "0 protected rows decoded" claim is gone. The run
-    # records the declared windows actually opened, which run_store re-derives from decisions.
-    assert "protected_rows_decoded_during_source_validation" not in access
-    assert "protected_source_byte_integrity_checked" not in access
+    # M5.1.2/M5.1.3: no self-reported counters. Every field except the governed authority is
+    # re-derived by run_store from the stored decisions and equity curve.
+    for removed in ("protected_rows_decoded_during_source_validation", "protected_source_byte_integrity_checked",
+                    "protected_rows_scored_or_trained"):
+        assert removed not in access
     assert access["opened_segment_windows"] == [["2024-01-01", "2024-06-30"], ["2024-07-01", "2024-09-30"]]
-    assert all(end < access["cutoff"] for _, end in access["opened_segment_windows"])
-    assert access["protected_rows_released_to_execution"] == 0 and access["protected_rows_scored_or_trained"] == 0
+    assert access["latest_opened_window_end"] == "2024-09-30"
+    assert access["latest_released_bar"] < access["cutoff"] and access["latest_evaluated_session"] < access["cutoff"]
+    assert access["holdout_authority"]["m32_split_plan_sha256"] == FIXTURE_GOVERNED_HOLDOUT["split_plan_sha256"]
+    assert access["protected_rows_released_to_execution"] == 0
     assert "locked_holdout_accessed" not in run
     report = (directory / "report.md").read_text()
     assert "decoded during source validation" not in report and "latest opened window end 2024-09-30" in report

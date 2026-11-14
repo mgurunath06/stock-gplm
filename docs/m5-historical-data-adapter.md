@@ -12,7 +12,9 @@ run loader, portable provenance, programmatic loopback enforcement in the Studio
 one terminal valuation policy and precise holdout accounting. M5.1.2 replaces
 the M5.1.1 decode-before-cutoff validator: only segments whose metadata-verified
 declared window ends before the cutoff are opened (see
-`docs/m512-critical-remediation.md`).
+`docs/m512-critical-remediation.md`). M5.1.3 makes the cutoff itself governed:
+only the M3.2 split plan named by the administrative trust root defines it (see
+`docs/m513-acceptance-remediation.md`).
 
 ```
 published segments ──► HistoricalDataAdapter ──► DataEligibilityDecision (+ VerifiedHistoricalDataset)
@@ -140,16 +142,24 @@ Every run records:
 | Field | Meaning |
 | --- | --- |
 | `partition_policy` | `DECLARED_WINDOW_STRICTLY_BEFORE_CUTOFF_VERIFIED_BEFORE_OPEN` |
-| `opened_segment_windows` | declared windows of every opened segment; `run_store` re-derives it from the stored decisions and rejects a run whose list differs or reaches the cutoff |
-| `protected_rows_released_to_execution` | protected rows given to the evaluator or simulator; always 0 (asserted) |
-| `protected_rows_scored_or_trained` | always 0; M5 never scores or trains |
+| `holdout_authority` | governed split-plan and trust-root SHA-256; cross-checked against every decision's evidence sources and, on replay, against current governance |
+| `opened_segment_windows`, `latest_opened_window_end` | declared windows of every opened segment |
+| `latest_released_bar`, `latest_evaluated_session` | from the stored decisions and equity curve |
+| `protected_rows_released_to_execution` | 0, valid only because every released bar re-derives as before the cutoff |
+
+Run contract v4 (M5.1.3): `run_store.load_run` re-derives every field except
+`holdout_authority` and rejects a run whose record differs or reaches the
+cutoff. v2/v3 runs load as `PRIOR_CONTRACT_VERIFIED` and are never replayed or
+compared.
 
 The M5.1.1 fields `protected_rows_decoded_during_source_validation` and
-`protected_source_byte_integrity_checked` were self-reported claims and are
-removed. The real Shoonya layout uses calendar-year segments, so the 2025
+`protected_source_byte_integrity_checked`, and the hard-coded
+`protected_rows_scored_or_trained`, were self-reported claims and are removed.
+Without an installed trust root there is no holdout boundary, so every request
+is `REJECTED` (`HOLDOUT_BOUNDARY_UNVERIFIED`) before any segment is considered. The real Shoonya layout uses calendar-year segments, so the 2025
 segment straddles the 2025-10-21 cutoff and is rejected until it is republished
-as separate immutable pre-cutoff and protected segments (see the migration in
-`docs/m512-critical-remediation.md`).
+as separate immutable pre-cutoff and protected segments (see
+`docs/m513-partition-migration-spec.md`).
 
 Pre-M5.1 runs recorded `locked_holdout_accessed: false`. That flag meant only
 "not released, scored or trained". It never meant that protected rows were not
@@ -310,7 +320,7 @@ their exact version and hash.
 ## Command line
 
 ```bash
-# read-only coverage inventory; --verify validates pre-cutoff segments only and needs the M3.2 run
+# read-only coverage inventory; --verify validates pre-cutoff segments only and needs the governed M3.2 run
 .venv/bin/python -m stock_gplm.m5.cli discover --verify --m32-run <m32-run-dir> --output reports/m5/discovery.json
 
 # one eligibility decision

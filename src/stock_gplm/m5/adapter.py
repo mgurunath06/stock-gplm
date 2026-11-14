@@ -293,7 +293,10 @@ class HistoricalDataAdapter:
         if request.series not in SUPPORTED_SERIES:
             fail("UNSUPPORTED_SERIES", f"series {request.series} is unsupported; only EQ is accepted")
         if holdout is None:
-            fail("HOLDOUT_BOUNDARY_UNVERIFIED", "a hash-verified M3.2 split plan is required to prove holdout isolation")
+            fail("HOLDOUT_BOUNDARY_UNVERIFIED", "no administratively governed M3.2 split plan: without a trust "
+                 "root naming the accepted split plan there is no holdout boundary, so no segment is opened")
+        elif not holdout.governed:
+            fail("HOLDOUT_BOUNDARY_UNVERIFIED", "holdout boundary was not issued from the governed split plan")
         elif request.end >= holdout.cutoff:
             fail("HOLDOUT_OVERLAP", f"request end {request.end} reaches the locked holdout starting {holdout.cutoff}")
         classification = self.evidence.instrument_classification

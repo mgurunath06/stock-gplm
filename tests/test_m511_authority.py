@@ -15,6 +15,7 @@ from m5_fixtures import (
     approval_for,
     build_world,
     install_trust_root,
+    remove_trust_root,
     settings_dict,
     strategy_config,
     trust_policy_value,
@@ -133,7 +134,7 @@ def test_self_asserted_or_synthetic_registration_never_confers_authority(tmp_pat
     assert not policy.approves(registration)  # ...but SYNTHETIC can never enter the trusted domain.
 
 
-def test_trust_policy_accepts_no_caller_path_or_checksum(tmp_path: Path) -> None:
+def test_trust_policy_accepts_no_caller_path_or_checksum(tmp_path: Path, monkeypatch) -> None:
     """M5.1.2 (finding C): the M5.1.1 caller-supplied path + "out-of-band" SHA-256 is gone."""
     registration_path, raw = _registration(tmp_path)
     assert load_evidence_registration(registration_path)
@@ -144,6 +145,7 @@ def test_trust_policy_accepts_no_caller_path_or_checksum(tmp_path: Path) -> None
     with pytest.raises(TypeError):
         load_reference_evidence(policy_path, trust_policy_path=policy_path,  # type: ignore[call-arg]
                                 trust_policy_sha256=file_sha256(policy_path))
+    remove_trust_root(tmp_path / "no-admin", monkeypatch)
     assert load_trust_policy() is None  # no administrative trust root is installed
 
 

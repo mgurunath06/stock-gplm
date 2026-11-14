@@ -11,6 +11,13 @@ raw-data or prior-result changes, no push, merge or deployment.
 **Status: NO-GO** until an independent acceptance review confirms that both
 defects are closed.
 
+> **Superseded in part by M5.1.3** (`docs/m513-acceptance-remediation.md`). The
+> M5.1.2 acceptance audit found the holdout cutoff was still caller-controlled
+> outside strict mode, three controls were untested, the run contract changed
+> without a version bump, and OS ownership was overstated as operational
+> independence. On this WSL/sudo host the trust root is a procedural control only.
+> The migration below is replaced by `docs/m513-partition-migration-spec.md`.
+
 ## H — holdout isolation
 
 ### Root cause

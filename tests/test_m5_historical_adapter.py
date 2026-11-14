@@ -432,7 +432,8 @@ def test_run_provenance_points_to_exact_immutable_version(tmp_path: Path) -> Non
     assert access["partition_policy"] == "DECLARED_WINDOW_STRICTLY_BEFORE_CUTOFF_VERIFIED_BEFORE_OPEN"
     assert access["opened_segment_windows"] == [["2024-01-01", "2024-06-30"], ["2024-07-01", "2024-09-30"]]
     assert "protected_rows_decoded_during_source_validation" not in access
-    assert access["protected_rows_released_to_execution"] == access["protected_rows_scored_or_trained"] == 0
+    assert "protected_rows_scored_or_trained" not in access  # M5.1.3: no hard-coded counter
+    assert access["protected_rows_released_to_execution"] == 0 and access["latest_released_bar"] < HOLDOUT
     assert all(d["decision"]["status"] == "ELIGIBLE" for d in run["datasets"])
 
 

@@ -40,14 +40,17 @@ from .models import (
     VerifiedHistoricalDataset,
     canonical_hash,
 )
+from .authority import load_trust_policy
 from .holdout_validation import PARTITION_POLICY
 from .provenance import content_identity, environment_provenance
 
-RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v3"
-PREVIOUS_RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v2"
+RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v4"
+MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v4"
+# Prior contracts stay integrity-readable (see run_store) but are never replayed, compared or
+# ranked: they predate the M5.1.3 governed holdout boundary and re-derived access evidence.
+PRIOR_RUN_CONTRACTS = ("stock-gplm.m5-historical-backtest-run.v3", "stock-gplm.m5-historical-backtest-run.v2")
+PRIOR_MANIFEST_CONTRACTS = ("stock-gplm.m5-run-manifest.v3", "stock-gplm.m5-run-manifest.v2")
 LEGACY_RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v1"
-MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v3"
-PREVIOUS_MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v2"
 ADAPTER_ISSUED = "ADAPTER_ISSUED"
 CALLER_SUPPLIED = "CALLER_SUPPLIED_UNVERIFIED"
 SETTINGS_CONTRACT = "stock-gplm.m5-backtest-settings.v1"
@@ -66,6 +69,61 @@ def opened_segment_windows(decisions: Iterable[Mapping[str, Any]]) -> list[list[
     """Sorted unique declared ``[start, end]`` windows of every segment recorded in ``decisions``."""
     return [list(window) for window in sorted(
         {tuple(segment["window"]) for decision in decisions for segment in decision["segments"]})]
+
+
+def holdout_access_evidence(decisions: Sequence[Mapping[str, Any]], equity_curve: Sequence[Mapping[str, Any]],
+                            cutoff: Any, authority: Mapping[str, Any]) -> dict[str, Any]:
+    """Re-derivable record of what a run touched relative to the governed cutoff (M5.1.3).
+
+    Everything except ``authority`` is computed from the stored eligibility decisions and
+    equity curve, so :func:`stock_gplm.m5.run_store.load_run` recomputes it instead of
+    trusting a claim. ``authority`` (governed split-plan and trust-root hashes) comes from
+    the trust root at build time; replay re-checks it against current governance.
+    Raises :class:`ValueError` if any opened window, released bar or evaluated session
+    reaches the cutoff, or if an adapter-issued decision names a different authority.
+    """
+    if not isinstance(cutoff, str) or not cutoff:
+        raise ValueError("a governed holdout cutoff is required to build or verify a run")
+    keys = ("m32_split_plan_sha256", "administrative_trust_root_sha256")
+    if not isinstance(authority, Mapping) or set(authority) != set(keys) or not all(
+            isinstance(authority[key], str) and len(authority[key]) == 64 for key in keys):
+        raise ValueError("run lacks the governed holdout authority")
+    for decision in decisions:
+        sources = decision["evidence_sources"] or {}
+        if sources and (sources.get("m32_split_plan"), sources.get("administrative_trust_root")) != (
+                authority["m32_split_plan_sha256"], authority["administrative_trust_root_sha256"]):
+            raise ValueError("an eligibility decision was issued under a different holdout authority")
+        if decision["holdout_cutoff"] != cutoff:
+            raise ValueError("datasets disagree on the locked-holdout boundary")
+    windows = opened_segment_windows(decisions)
+    if any(window[1] >= cutoff for window in windows):
+        raise ValueError("a segment whose declared window reaches the locked holdout was opened")
+    last_bars = [decision["last_bar"] for decision in decisions]
+    if any(bar is None or bar >= cutoff for bar in last_bars):
+        raise ValueError("a released bar reaches the locked holdout")
+    sessions = [point["date"] for point in equity_curve]
+    if any(session >= cutoff for session in sessions):
+        raise ValueError("an evaluated session reaches the locked holdout")
+    return {
+        "policy": HOLDOUT_POLICY, "cutoff": cutoff,
+        "partition_policy": PARTITION_POLICY,
+        "holdout_authority": {key: authority[key] for key in keys},
+        "opened_segment_windows": windows,
+        "latest_opened_window_end": max((window[1] for window in windows), default=None),
+        "latest_released_bar": max(last_bars) if last_bars else None,
+        "latest_evaluated_session": max(sessions) if sessions else None,
+        "protected_rows_released_to_execution": 0,  # every released bar re-checked above as before the cutoff
+    }
+
+
+def governed_holdout_authority() -> tuple[str, dict[str, str]]:
+    """Cutoff and authority hashes from the administrative trust root; raise when there is none."""
+    policy = load_trust_policy()
+    if policy is None or not policy.governed:
+        raise ValueError("no administratively governed holdout authority: no run can be built")
+    governed = policy.governed_holdout
+    return governed.cutoff, {"m32_split_plan_sha256": governed.split_plan_sha256,
+                             "administrative_trust_root_sha256": policy.trust_root_sha256}
 
 
 @dataclass(frozen=True)
@@ -287,6 +345,16 @@ def build_run(
     if validated.config_hash != strategy.config_hash:
         raise ValueError("strategy configuration does not match its immutable version hash")
     datasets, mode, universe, issuance = _resolve_release(release)
+    # M5.1.3 guard, before any bar is evaluated: the cutoff is the administratively governed one,
+    # never a value a dataset (adapter-issued or caller-supplied) asserts, and no bar reaches it.
+    governed_cutoff, authority = governed_holdout_authority()
+    cutoff = governed_cutoff
+    claimed = {d.decision.holdout_cutoff for d in datasets}
+    if claimed != {governed_cutoff}:
+        raise ValueError(f"datasets claim holdout cutoff(s) {sorted(map(str, claimed))}; "
+                         f"the governed cutoff is {governed_cutoff}")
+    if any(bar.date >= governed_cutoff for d in datasets for bar in d.bars):
+        raise ValueError("locked-holdout rows were offered to execution; nothing was evaluated")
     for dataset in datasets:
         request = dataset.decision.request
         if not (request.start <= settings.evaluation_start and settings.evaluation_end <= request.end):
@@ -353,15 +421,10 @@ def build_run(
     }
     run_id = canonical_hash(run_binding)
     evaluated = [p["date"] for p in simulation.equity_curve]
-    cutoff = ordered[0].decision.holdout_cutoff
-    if len({d.decision.holdout_cutoff for d in datasets}) != 1:
-        raise ValueError("datasets disagree on the locked-holdout boundary")
-    released_protected = sum(1 for d in datasets for bar in d.bars if cutoff is None or bar.date >= cutoff)
-    # Derived, re-checkable evidence (run_store re-derives it): the declared windows of every
-    # segment payload the adapter opened. Not a self-reported "nothing decoded" counter.
-    opened_windows = opened_segment_windows(d.decision.to_dict() for d in datasets)
-    if cutoff is None or any(window[1] >= cutoff for window in opened_windows):
-        raise AssertionError("a segment reaching the locked holdout was opened for development")
+    decision_records = [d.decision.to_dict() for d in ordered]
+    # Derived, re-checkable evidence (run_store re-derives it from the stored decisions and
+    # equity curve). Not a self-reported counter. Raises before any run file is written.
+    holdout_access = holdout_access_evidence(decision_records, simulation.equity_curve, cutoff, authority)
     run = {
         **run_binding, "run_id": run_id, "input_provenance": input_provenance,
         "classification": STRICT_CLASSIFICATION if investable else DIAGNOSTIC_CLASSIFICATION,
@@ -369,9 +432,9 @@ def build_run(
         "promotion_eligible": False, "paper_trading_eligible": False, "ml_training_eligible": False,
         "requested_universe": universe,
         "strategy_config_snapshot": validated.config,
-        "datasets": [{"symbol": d.decision.request.symbol, "decision": d.decision.to_dict(),
+        "datasets": [{"symbol": d.decision.request.symbol, "decision": record,
                       "fingerprint": d.fingerprint, "basis": d.basis, "share_events": list(d.share_events)}
-                     for d in ordered],
+                     for d, record in zip(ordered, decision_records)],
         "evidence_versions": sorted({canonical_hash(d.decision.evidence_sources or {}): {
             "evidence_sha256": d.decision.evidence_sha256, "sources": d.decision.evidence_sources}
             for d in ordered}.values(), key=lambda item: str(item["evidence_sha256"])),
@@ -392,17 +455,9 @@ def build_run(
         "performance": performance, "benchmark": benchmark,
         "open_positions_at_end": list(simulation.open_positions), "warnings": list(simulation.warnings),
         "holdout_cutoff": cutoff,
-        "holdout_access": {
-            "policy": HOLDOUT_POLICY, "cutoff": cutoff,
-            "partition_policy": PARTITION_POLICY,
-            "opened_segment_windows": opened_windows,
-            "protected_rows_released_to_execution": released_protected,
-            "protected_rows_scored_or_trained": 0,
-        },
+        "holdout_access": holdout_access,
         "broker_routing": "NONE", "network_used": False,
     }
-    if released_protected:
-        raise AssertionError("locked-holdout rows reached execution")
     files = {"run.json": run, "signals.json": list(simulation.signals), "orders.json": list(simulation.orders),
              "trades.json": list(simulation.trades), "equity-curve.json": list(simulation.equity_curve),
              "report.md": render_markdown(run)}
@@ -438,6 +493,31 @@ def _fmt(value: Any) -> str:
     return str(value)
 
 
+def _holdout_line(run: Mapping[str, Any]) -> str:
+    """Holdout sentence of the report; the wording is bound to the run's contract version."""
+    access = run["holdout_access"]
+    if run.get("contract") == RUN_CONTRACT:
+        return (f"- Locked holdout from {access['cutoff']} (governed split plan "
+                f"`{str(access['holdout_authority']['m32_split_plan_sha256'])[:16]}`, trust root "
+                f"`{str(access['holdout_authority']['administrative_trust_root_sha256'])[:16]}`): latest opened "
+                f"window end {access['latest_opened_window_end']}, latest released bar {access['latest_released_bar']}, "
+                f"latest evaluated session {access['latest_evaluated_session']}; "
+                f"{access['protected_rows_released_to_execution']} protected row(s) released to execution")
+    if run.get("contract") == PRIOR_RUN_CONTRACTS[0]:  # v3 (M5.1.2 wording)
+        return (f"- Locked holdout from {access['cutoff']}: only segments whose metadata-verified declared "
+                f"window ends before the cutoff were opened (latest opened window end "
+                f"{max((w[1] for w in access['opened_segment_windows']), default='none')}); "
+                f"{access['protected_rows_released_to_execution']} released "
+                f"to execution, {access['protected_rows_scored_or_trained']} scored or trained")
+    if run.get("contract") != PRIOR_RUN_CONTRACTS[1]:
+        raise ValueError(f"unsupported run contract {run.get('contract')!r}; no report wording is defined")
+    return (f"- Locked holdout from {access['cutoff']}: "  # v2 (M5.1.1 wording)
+            f"{access['protected_rows_decoded_during_source_validation']} protected row(s) decoded "
+            f"during source validation; full source-byte integrity checked, "
+            f"{access['protected_rows_released_to_execution']} released "
+            f"to execution, {access['protected_rows_scored_or_trained']} scored or trained")
+
+
 def render_markdown(run: Mapping[str, Any]) -> str:
     """Human-readable summary; every number is copied from ``run.json``."""
     metrics = run["performance"]["metrics"]
@@ -460,11 +540,7 @@ def render_markdown(run: Mapping[str, Any]) -> str:
         f"Python {run['code']['python']['version']})",
         f"- Eligibility issuance: {run['eligibility_issuance']}; requested universe "
         f"`{str(run['requested_universe'].get('universe_sha256'))[:16]}`",
-        f"- Locked holdout from {run['holdout_access']['cutoff']}: only segments whose metadata-verified declared "
-        f"window ends before the cutoff were opened (latest opened window end "
-        f"{max((w[1] for w in run['holdout_access']['opened_segment_windows']), default='none')}); "
-        f"{run['holdout_access']['protected_rows_released_to_execution']} released "
-        f"to execution, {run['holdout_access']['protected_rows_scored_or_trained']} scored or trained", "",
+        _holdout_line(run), "",
         "| Metric | Value |", "| --- | --- |",
     ]
     lines += [f"| {name} | {_fmt(value)}" + (f" ({undefined[name]})" if name in undefined else "") + " |"
