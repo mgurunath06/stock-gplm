@@ -1,0 +1,24 @@
+{
+  "contract": "stock-gplm.m511-integrity-closing-evidence.v1",
+  "evidence_id": "082dccbff7a5fce02e28f3d6e20d9041a67ee0de970360343f408f6ca7efe09b",
+  "recorded_date": "2026-11-14",
+  "worktree": "/home/mgurunath/projects/stock-gplm-m45",
+  "baseline_head": "7902f1c",
+  "code_checkpoint_head": "a8de3df",
+  "trees": {
+    "data": {
+      "relative_path": "data",
+      "before": {"state": "ABSENT", "files": 0},
+      "after": {"state": "ABSENT", "files": 0},
+      "content_hash": null
+    },
+    "reports": {
+      "relative_path": "reports",
+      "before": {"state": "ABSENT", "files": 0},
+      "after": {"state": "ABSENT", "files": 0},
+      "content_hash": null
+    }
+  },
+  "scope_note": "The target worktree contained no raw-data or report tree at either checkpoint. No external checkout tree is claimed as task evidence.",
+  "protected_holdout_decoded_or_scored_for_closure": false
+}

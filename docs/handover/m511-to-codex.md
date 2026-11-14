@@ -39,7 +39,7 @@ The main checkout `/home/mgurunath/projects/stock-gplm` is on
 | B atomic universes | PASS in audit, no work needed | |
 | C evidence authority | FIXED IN CODE (`5578057`) | Separate hash-pinned trust policy, structured registrations, classification and cost loaders; genuine approvals remain unavailable. |
 | D fabrication/ranking | PASS in audit, no work needed | |
-| E provenance completeness | FIXED (pending checkpoint commit) | v3 binds complete input provenance; all declared lockfiles required; v2 remains integrity-readable. |
+| E provenance completeness | FIXED (`a8de3df`) | v3 binds complete input provenance; all declared lockfiles required; v2 remains integrity-readable. |
 | F local API authentication | FIXED (`3483107`) | Random per-launch token on every API request, authenticated bootstrap, private token/registry/report permissions. |
 | G accounting | PASS in audit, no work needed | |
 | H holdout validation isolation | FIXED (`ca3bd4e`) | M5 validates whole-source bytes but decodes only pre-cutoff candle content; protected-only metamorphic test added. |

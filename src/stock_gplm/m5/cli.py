@@ -55,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--mode", choices=["STRICT_RESEARCH", "DIAGNOSTIC_ONLY"], required=True)
         command.add_argument("--start", required=True)
         command.add_argument("--end", required=True)
+        command.add_argument("--trust-policy", type=Path, help="separate M5.1.1 approval trust-policy file")
+        command.add_argument("--trust-policy-sha256", help="out-of-band SHA-256 of --trust-policy")
     assess = commands.choices["assess"]
     assess.add_argument("--symbol", required=True)
     assess.add_argument("--expected-token")
@@ -76,10 +78,19 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("runs", nargs="+", type=Path)
     compare.add_argument("--evidence", type=Path, help="replay-verify runs against this evidence-paths file")
     compare.add_argument("--registry", type=Path, help="strategy registry used to replay-verify runs")
+    compare.add_argument("--trust-policy", type=Path, help="separate M5.1.1 approval trust-policy file")
+    compare.add_argument("--trust-policy-sha256", help="out-of-band SHA-256 of --trust-policy")
     export = commands.add_parser("export", help="write the verified report of one run to a new file")
     export.add_argument("run", type=Path)
     export.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+
+    def registered_evidence(path: Path):
+        policy_path = getattr(args, "trust_policy", None)
+        policy_hash = getattr(args, "trust_policy_sha256", None)
+        if (policy_path is None) != (policy_hash is None):
+            parser.error("--trust-policy and --trust-policy-sha256 are required together")
+        return load_reference_evidence(path, trust_policy_path=policy_path, trust_policy_sha256=policy_hash)
 
     if args.command == "discover":
         report = discover(args.raw_root, load_etf_heuristic(args.etf_heuristic), verify=args.verify)
@@ -91,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         if (args.evidence is None) != (args.registry is None):
             parser.error("--evidence and --registry are required together")
         if args.evidence is not None:
-            replay = make_replayer(HistoricalDataAdapter(args.raw_root, load_reference_evidence(args.evidence)),
+            replay = make_replayer(HistoricalDataAdapter(args.raw_root, registered_evidence(args.evidence)),
                                    StrategyRegistry(args.registry))
         try:
             print(json.dumps(compare_runs(args.runs, replay=replay), indent=2, allow_nan=False))
@@ -109,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                                  "markdown": verified.markdown}, args.raw_root)
         print(json.dumps(verified.summary(), indent=2))
         return 0
-    adapter = HistoricalDataAdapter(args.raw_root, load_reference_evidence(args.evidence))
+    adapter = HistoricalDataAdapter(args.raw_root, registered_evidence(args.evidence))
     if args.command == "assess":
         decision, _ = adapter.assess(DataEligibilityRequest(args.symbol, args.start, args.end, args.mode,
                                                             args.expected_token))

@@ -21,13 +21,16 @@ Test command (the worktree has no .venv; PYTHONPATH is required or the main chec
 | H holdout validation isolation | FIXED | `ca3bd4e` | `m5/holdout_validation.py` (new), `m5/adapter.py`, `m5/runner.py`, `tests/test_m51_integrity.py`, `tests/test_m5_historical_adapter.py`, docs | 759 passed, 2 skipped, 0 failed, 0 deselected |
 | C evidence authority + classification/cost registration framework | FIXED IN CODE (authoritative data unavailable) | `5578057` | `m5/authority.py` (new), `m5/evidence.py`, `m5/adapter.py`, `m5/models.py`, `m5/runner.py`, tests, docs | 764 passed, 2 skipped, 0 failed, 0 deselected |
 | F Studio per-launch authentication and private files | FIXED | `3483107` | `v1/studio.py`, `m5/runner.py`, `tests/test_m4_v1_remediation.py`, `tests/test_m51_integrity.py`, `tests/test_m5_studio.py`, docs | 765 passed, 2 skipped, 0 failed, 0 deselected |
-| E complete input/environment provenance | FIXED (pending commit) | — | `m5/provenance.py`, `m5/runner.py`, `m5/run_store.py`, `tests/test_m51_integrity.py`, docs | 767 passed, 2 skipped, 0 failed, 0 deselected |
+| E complete input/environment provenance | FIXED | `a8de3df` | `m5/provenance.py`, `m5/runner.py`, `m5/run_store.py`, `tests/test_m51_integrity.py`, docs | 767 passed, 2 skipped, 0 failed, 0 deselected |
+| Closing evidence, matrix and CLI trust-policy wiring | COMPLETE (pending commit) | — | `m5/cli.py`, `docs/evidence/m511-integrity-closing-2026-11-14.json`, `docs/milestones/m511-completion.md`, handover docs | 767 passed, 2 skipped, 0 failed, 0 deselected |
 
 ## Remaining (priority order; designs in the handover §6)
 
-1. Closing: before/after tree-hash manifest, docs matrix
+No implementation item remains. Run the final suite and record the closing commit.
 
 ## Known blockers
 
-No code blockers. Strict real-data research remains blocked by missing evidence (audit §8).
-No incomplete or failing changes are in the working tree.
+No code blocker. Strict real-data research remains blocked by missing evidence
+(audit §8 and `docs/milestones/m511-completion.md`). The target worktree has no
+`data/` or `reports/` tree; the retained closing record therefore documents
+absence at both checkpoints rather than inventing content hashes.
