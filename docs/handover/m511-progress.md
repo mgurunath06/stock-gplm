@@ -19,13 +19,13 @@ Test command (the worktree has no .venv; PYTHONPATH is required or the main chec
 | A.3/A.4 strict authority gates (synthetic, unapproved, heuristic ETF, unregistered costs) | FIXED (blocking gates) | `2cd419a` | `m5/adapter.py`, `m5/models.py`, `tests/m5_fixtures.py`, `tests/test_m511_authority.py` (new), `tests/test_m51_integrity.py`, `tests/test_m5_historical_adapter.py`, `docs/m51-integrity-hardening.md`, handover docs | 745 passed, 2 skipped, 0 failed |
 | A.2 assessment freshness (payload/.done/meta/evidence revalidation, atomic) | FIXED | `621e39e` | `m5/adapter.py`, `m5/models.py`, `m5/evidence.py`, `m5/runner.py`, `m5/__init__.py`, `tests/test_m511_freshness.py` (new), docs | 758 passed, 2 skipped, 0 failed, 0 deselected |
 | H holdout validation isolation | FIXED | `ca3bd4e` | `m5/holdout_validation.py` (new), `m5/adapter.py`, `m5/runner.py`, `tests/test_m51_integrity.py`, `tests/test_m5_historical_adapter.py`, docs | 759 passed, 2 skipped, 0 failed, 0 deselected |
-| C evidence authority + classification/cost registration framework | FIXED IN CODE (authoritative data unavailable; pending commit) | — | `m5/authority.py` (new), `m5/evidence.py`, `m5/adapter.py`, `m5/models.py`, `m5/runner.py`, tests, docs | 764 passed, 2 skipped, 0 failed, 0 deselected |
+| C evidence authority + classification/cost registration framework | FIXED IN CODE (authoritative data unavailable) | `5578057` | `m5/authority.py` (new), `m5/evidence.py`, `m5/adapter.py`, `m5/models.py`, `m5/runner.py`, tests, docs | 764 passed, 2 skipped, 0 failed, 0 deselected |
+| F Studio per-launch authentication and private files | FIXED (pending commit) | — | `v1/studio.py`, `m5/runner.py`, `tests/test_m4_v1_remediation.py`, `tests/test_m51_integrity.py`, `tests/test_m5_studio.py`, docs | 765 passed, 2 skipped, 0 failed, 0 deselected |
 
 ## Remaining (priority order; designs in the handover §6)
 
-1. F per-launch API token (P1)
-2. E provenance completeness (payload/.done/meta hashes are recorded per segment; lockfiles still pending) (P1)
-3. Closing: before/after tree-hash manifest, docs matrix
+1. E provenance completeness (payload/.done/meta hashes are recorded per segment; lockfiles still pending) (P1)
+2. Closing: before/after tree-hash manifest, docs matrix
 
 ## Known blockers
 

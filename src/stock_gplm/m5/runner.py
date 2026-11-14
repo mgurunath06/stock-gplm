@@ -156,7 +156,8 @@ def _publish(output_root: Path, run_id: str, files: dict[str, Any], forbidden_ro
         resolved = Path(root).resolve()
         if output_root == resolved or resolved in output_root.parents:
             raise ValueError("M5 reports must be written outside raw-data directories")
-    output_root.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(output_root, 0o700)
     target = output_root / run_id
     if target.exists():
         raise FileExistsError(f"run {run_id} already exists; reports are never overwritten")
@@ -167,6 +168,7 @@ def _publish(output_root: Path, run_id: str, files: dict[str, Any], forbidden_ro
         for name, value in files.items():
             payload = value.encode("utf-8") if isinstance(value, str) else _encode(value)
             (staging / name).write_bytes(payload)
+            os.chmod(staging / name, 0o600)
             hashes[name] = hashlib.sha256(payload).hexdigest()
         manifest = {"contract": MANIFEST_CONTRACT, "run_contract": RUN_CONTRACT, "run_id": run_id,
                     "file_sha256": hashes, "file_inventory": sorted(hashes),
@@ -174,6 +176,7 @@ def _publish(output_root: Path, run_id: str, files: dict[str, Any], forbidden_ro
                     "non_analytical_fields": ["created_at_utc"],
                     "non_analytical_files": sorted(set(hashes) - set(ANALYTICAL_FILES))}
         (staging / "run-manifest.json").write_bytes(_encode(manifest))
+        os.chmod(staging / "run-manifest.json", 0o600)
         staging.rename(target)
     except BaseException:
         for child in staging.iterdir():

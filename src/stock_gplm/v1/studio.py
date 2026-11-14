@@ -6,14 +6,19 @@ peer. Each request must also carry a loopback ``Host``. An ``Origin``, when
 present, must be the Studio's own. A request with no ``Origin`` is accepted only
 from a loopback peer whose ``Sec-Fetch-Site`` (if sent) is ``same-origin`` or
 ``none``. A missing ``Origin`` is never treated as proof of a trusted peer. The
-Studio has no broker client, credential support, remote data loader or
-order-routing endpoint.
+Studio additionally requires a cryptographically random per-launch bearer token
+on every API request. The token is stored in an owner-only local file and is
+removed when the server closes. The Studio has no broker client, credential
+support, remote data loader or order-routing endpoint.
 """
 from __future__ import annotations
 
 import argparse
+import hmac
 import ipaddress
 import json
+import os
+import secrets
 import sqlite3
 from dataclasses import asdict
 from http import HTTPStatus
@@ -45,8 +50,20 @@ def is_loopback_address(address: object) -> bool:
 class LoopbackHTTPServer(ThreadingHTTPServer):
     """Threading server that refuses any connection whose peer address is not loopback."""
 
+    token_path: Path | None = None
+
     def verify_request(self, request: Any, client_address: Any) -> bool:  # noqa: D401
         return is_loopback_address(client_address[0] if client_address else None)
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            if self.token_path is not None:
+                try:
+                    self.token_path.unlink()
+                except FileNotFoundError:
+                    pass
 
 _HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -115,10 +132,12 @@ pre{white-space:pre-wrap;max-height:420px;overflow:auto;background:#101828;color
 <button onclick="hCompare()">Compare</button><button onclick="hExport()">Export report</button></div>
 <pre id="hresult">Not run.</pre></section>
 <script>
+const AUTH_TOKEN=__STUDIO_AUTH_TOKEN_JSON__;
+history.replaceState(null,'',location.pathname);
 const out=x=>document.querySelector('#result').textContent=typeof x==='string'?x:JSON.stringify(x,null,2);
 const byId=id=>document.getElementById(id);
 let working=null;
-async function api(path,options={}){let r=await fetch(path,options);let x=await r.json();if(!r.ok)throw new Error(x.error||r.statusText);return x}
+async function api(path,options={}){options.headers={...(options.headers||{}),Authorization:'Bearer '+AUTH_TOKEN};let r=await fetch(path,options);let x=await r.json();if(!r.ok)throw new Error(x.error||r.statusText);return x}
 async function refresh(){let x=await api('/api/strategies');let s=document.querySelector('#versions');s.innerHTML='<option value="">New / imported</option>';for(let v of x.strategies){let o=document.createElement('option');o.value=v.strategy_id+'@'+v.version;o.textContent=o.value+' · '+v.activation_status;s.appendChild(o)}}
 document.querySelector('#versions').onchange=async e=>{if(!e.target.value)return;let [id,v]=e.target.value.split('@');let x=await api('/api/strategies/'+id+'/'+v);document.querySelector('#config').value=x.document;document.querySelector('#format').value='yaml';out(x.record)};
 function payload(){return JSON.stringify({format:document.querySelector('#format').value,document:document.querySelector('#config').value})}
@@ -158,6 +177,7 @@ refresh().catch(e=>out(e.message));
 class StudioHandler(BaseHTTPRequestHandler):
     registry: StrategyRegistry
     research: Any = None  # stock_gplm.m5.studio_api.HistoricalResearchService when configured
+    auth_token: str = ""
 
     def _research(self) -> Any:
         if self.research is None:
@@ -180,6 +200,16 @@ class StudioHandler(BaseHTTPRequestHandler):
         if origin is not None:
             return origin in {f"http://{host}" for host in allowed}
         return self.headers.get("Sec-Fetch-Site") in {None, "same-origin", "none"}
+
+    def _authenticated(self) -> bool:
+        value = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        return bool(self.auth_token) and value.startswith(prefix) and hmac.compare_digest(
+            value[len(prefix):], self.auth_token)
+
+    def _bootstrap_authenticated(self) -> bool:
+        supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+        return bool(self.auth_token) and hmac.compare_digest(supplied, self.auth_token)
 
     def _json(self, status: int, value: Any) -> None:
         payload = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -214,9 +244,16 @@ class StudioHandler(BaseHTTPRequestHandler):
             self._json(403, {"error": "untrusted Host or Origin"})
             return
         path = urlparse(self.path).path
+        if path == "/":
+            if not self._bootstrap_authenticated():
+                self._json(403, {"error": "authentication required"})
+                return
+        elif not self._authenticated():
+            self._json(403, {"error": "authentication required"})
+            return
         try:
             if path == "/":
-                payload = _HTML.encode("utf-8")
+                payload = _HTML.replace("__STUDIO_AUTH_TOKEN_JSON__", json.dumps(self.auth_token)).encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(payload)))
@@ -250,6 +287,9 @@ class StudioHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if not self._trusted_origin():
             self._json(403, {"error": "untrusted Host or Origin"})
+            return
+        if not self._authenticated():
+            self._json(403, {"error": "authentication required"})
             return
         path = urlparse(self.path).path
         try:
@@ -306,13 +346,31 @@ class StudioHandler(BaseHTTPRequestHandler):
         return
 
 
+def _write_launch_token(path: Path, token: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as stream:
+            stream.write(token + "\n")
+            stream.flush()
+            os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def make_server(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
                 m5_evidence: Path | None = None, raw_root: Path | None = None,
-                m5_reports: Path | None = None) -> LoopbackHTTPServer:
+                m5_reports: Path | None = None, token_path: Path | None = None,
+                trust_policy: Path | None = None, trust_policy_sha256: str | None = None) -> LoopbackHTTPServer:
     """Build the Studio server; any non-loopback bind is refused before a socket is opened."""
     if not isinstance(host, str) or host not in LOOPBACK_BIND:
         raise ValueError(f"Strategy Studio binds only to {sorted(LOOPBACK_BIND)}; refused {host!r}")
     registry = StrategyRegistry(registry_path)
+    os.chmod(Path(registry_path), 0o600)
+    Path(registry_path).chmod(0o600)
     research = None
     if m5_evidence is not None:
         # Imported lazily so the V1 engine itself never depends on the M5 data layer.
@@ -321,21 +379,40 @@ def make_server(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, 
 
         if raw_root is None or m5_reports is None:
             raise ValueError("--m5-evidence requires --raw-root and --m5-reports")
-        research = HistoricalResearchService(raw_root, load_reference_evidence(m5_evidence), m5_reports, registry)
-    handler = type("BoundStudioHandler", (StudioHandler,), {"registry": registry, "research": research})
+        Path(m5_reports).mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(Path(m5_reports), 0o700)
+        if (trust_policy is None) != (trust_policy_sha256 is None):
+            raise ValueError("trust policy path and out-of-band SHA-256 are required together")
+        evidence = load_reference_evidence(m5_evidence, trust_policy_path=trust_policy,
+                                           trust_policy_sha256=trust_policy_sha256)
+        research = HistoricalResearchService(raw_root, evidence, m5_reports, registry)
+    token = secrets.token_urlsafe(32)
+    handler = type("BoundStudioHandler", (StudioHandler,), {
+        "registry": registry, "research": research, "auth_token": token})
     server = LoopbackHTTPServer((LOOPBACK_BIND[host], port), handler)
     if not is_loopback_address(server.server_address[0]):
         server.server_close()
         raise ValueError(f"Strategy Studio bound to a non-loopback address {server.server_address[0]!r}")
+    launch_token_path = Path(token_path) if token_path is not None else Path(registry_path).with_suffix(".studio-token")
+    try:
+        _write_launch_token(launch_token_path, token)
+    except BaseException:
+        server.server_close()
+        raise
+    server.token_path = launch_token_path
     return server
 
 
 def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
-          m5_evidence: Path | None = None, raw_root: Path | None = None, m5_reports: Path | None = None) -> None:
+          m5_evidence: Path | None = None, raw_root: Path | None = None, m5_reports: Path | None = None,
+          token_path: Path | None = None, trust_policy: Path | None = None,
+          trust_policy_sha256: str | None = None) -> None:
     """Serve the Studio on loopback only (see :func:`make_server`)."""
     server = make_server(registry_path, host, port, m5_evidence=m5_evidence, raw_root=raw_root,
-                         m5_reports=m5_reports)
-    print(f"Strategy Studio: http://{host}:{server.server_address[1]} (local research only)")
+                         m5_reports=m5_reports, token_path=token_path, trust_policy=trust_policy,
+                         trust_policy_sha256=trust_policy_sha256)
+    print(f"Strategy Studio: http://{host}:{server.server_address[1]}/?token=<read-owner-only-token-file> "
+          f"(token file: {server.token_path})")
     try:
         server.serve_forever()
     finally:
@@ -350,9 +427,13 @@ def main() -> int:
     parser.add_argument("--m5-evidence", type=Path, help="stock-gplm.m5-evidence-paths.v1 file")
     parser.add_argument("--raw-root", type=Path, help="published Shoonya NSE daily root (read only)")
     parser.add_argument("--m5-reports", type=Path, help="new or existing directory for immutable run reports")
+    parser.add_argument("--token-file", type=Path, help="owner-only per-launch token file")
+    parser.add_argument("--trust-policy", type=Path, help="separate M5.1.1 approval trust-policy file")
+    parser.add_argument("--trust-policy-sha256", help="out-of-band SHA-256 of --trust-policy")
     args = parser.parse_args()
     serve(args.registry, args.host, args.port, m5_evidence=args.m5_evidence, raw_root=args.raw_root,
-          m5_reports=args.m5_reports)
+          m5_reports=args.m5_reports, token_path=args.token_file, trust_policy=args.trust_policy,
+          trust_policy_sha256=args.trust_policy_sha256)
     return 0
 
 

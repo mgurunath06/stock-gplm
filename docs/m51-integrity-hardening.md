@@ -242,9 +242,21 @@ Each request then checks, in order:
 3. an `Origin`, if present, is the Studio's own (`null` is rejected);
 4. a request with no `Origin` is accepted only if `Sec-Fetch-Site` is absent,
    `same-origin` or `none`.
+5. every API request carries the per-launch bearer token and passes a
+   constant-time comparison.
 
 A missing `Origin` is never treated as proof of a trusted peer: the peer-address
-check is what admits the request. No new endpoint was added.
+check is what admits the request. M5.1.1 generates the token with
+`secrets.token_urlsafe(32)`, writes it to an owner-only (`0600`) file, requires
+it as `Authorization: Bearer ...`, and injects it into the HTML only after an
+authenticated bootstrap URL request. Missing and invalid tokens return a
+generic 403 and are never included in logs, reports or errors. The registry is
+`0600`; Studio report roots/run directories are `0700` and report files are
+`0600`. The ephemeral token file is removed when the server closes.
+
+A reverse proxy that can read or is deliberately configured with the token
+still expands exposure. The control authenticates possession by the local OS
+user; it does not distinguish compromised processes running as that same user.
 
 ## G — Terminal valuation
 
@@ -300,7 +312,7 @@ with the same script on this branch.
 | C | Corporate-action contradictions | `UNKNOWN` status + `3:1` vs event `2:1` → `ELIGIBLE` | `m5/models.py`, `m5/adapter.py`, `m5/evidence.py` | `test_C_*` (18) | `REJECTED`: `…STATUS_UNRESOLVED`, `…CONTRADICTION` | The normalization table is a contract for evidence that does not exist yet; a real catalog may need a new reviewed version |
 | D | Forged ranking | fabricated `run.json` (`total_return` 99.0) ranked first | `m5/run_store.py` (new), `m5/runner.py`, `m5/studio_api.py`, `m5/cli.py`, `m5/__init__.py` | `test_D_*` (15) | `RunIntegrityError`; ranking requires `REPLAY_VERIFIED` | Writers of raw data, evidence or code can forge anything (documented) |
 | E | Narrow provenance | only `v1/` and `m5/` hashed; git state in `run_id` | `m5/provenance.py` (new), `m5/runner.py` | `test_E_*` (3) | five components + Python; environment separated | Python micro version and platform float differences are recorded, not bound |
-| F | Programmatic non-loopback bind | `serve(host="0.0.0.0")` bound `('0.0.0.0', port)` | `v1/studio.py` | `test_F_*` (10) | `ValueError: … binds only to ['127.0.0.1', 'localhost']` | Other local users on the same machine can still reach loopback (unchanged, as before) |
+| F | Studio bind and authentication | unauthenticated loopback requests and proxy-originated allowed headers reached the API | `v1/studio.py`, `m5/runner.py` | `test_F_*` (11), Studio integration (3) | non-loopback refused; missing/wrong per-launch token gets 403; owner-only local artifacts | Same-user compromise or a proxy deliberately given the token remains in scope of host security |
 | G | Terminal valuation mismatch | strategy marked at close without exit costs; benchmark deducted them | `v1/metrics.py`, `m5/runner.py` | `test_G_*` (3) | one policy for both; reconciliation within 4e-10 on genuine data | Final-close liquidation ignores market impact beyond slippage (documented limitation) |
 | H | Holdout validation isolation | protected candle content changed whole-segment validation and development eligibility | `m5/holdout_validation.py`, `m5/adapter.py`, `m5/runner.py`, this file | `test_H_*`, including protected-only metamorphic mutation | whole-source bytes remain integrity-checked; protected candle content is not decoded, released or scored | Full-source hash changes remain visible in provenance and invalidate stale assessments |
 

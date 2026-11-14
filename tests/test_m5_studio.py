@@ -16,15 +16,18 @@ from stock_gplm.v1.studio import _HTML, StudioHandler
 
 
 def _serve(registry: StrategyRegistry, research):
-    handler = type("TestStudio", (StudioHandler,), {"registry": registry, "research": research})
+    handler = type("TestStudio", (StudioHandler,), {
+        "registry": registry, "research": research, "auth_token": "synthetic-test-token"})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
 
-def _call(port: int, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+def _call(port: int, method: str, path: str, body: dict | None = None, *, authenticated: bool = True) -> tuple[int, dict]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     headers = {"Host": f"127.0.0.1:{port}"}
+    if authenticated:
+        headers["Authorization"] = "Bearer synthetic-test-token"
     payload = None
     if body is not None:
         payload, headers["Content-Type"] = json.dumps(body).encode(), "application/json"

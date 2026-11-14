@@ -111,7 +111,8 @@ directories:
   --registry /local/research/strategy-studio.sqlite3
 ```
 
-Open `http://127.0.0.1:8765`. The Studio can import or edit YAML/JSON, validate,
+Read the generated owner-only token file, then open
+`http://127.0.0.1:8765/?token=<token>`. The Studio can import or edit YAML/JSON, validate,
 save an immutable inactive version (the V1 draft workflow), clone, export,
 activate/deactivate a local research configuration, show validation errors and
 run a synthetic demonstration backtest. Definitions remain editable in the
@@ -119,10 +120,14 @@ structured document editor; the schema makes the indicator and nested rule
 structure explicit. Invalid configurations are never saved or activated.
 
 The server binds only to `127.0.0.1`/`localhost`, caps request sizes and stores no
-credentials. Every request must carry a `Host` of `127.0.0.1:<port>` or
+long-lived credentials. It generates a random per-launch token, writes it to a
+`0600` file, requires it on every API request and removes the file at shutdown.
+The bootstrap page removes the token query from browser history. Tokens are not
+logged or returned by errors. Every request must also carry a `Host` of `127.0.0.1:<port>` or
 `localhost:<port>`, and any `Origin` header must match; other requests get 403.
-This blocks DNS-rebinding and cross-site requests from browser pages. Registry
-conflicts return 409. Do not expose the server through a public interface.
+This blocks unauthenticated local clients, DNS-rebinding and cross-site requests
+from browser pages. Registry conflicts return 409. Do not expose the server
+through a public interface or give the token to a loopback reverse proxy.
 
 ## Verification
 

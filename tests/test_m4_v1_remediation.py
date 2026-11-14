@@ -114,7 +114,8 @@ def test_concurrent_saves_allocate_distinct_versions(tmp_path: Path) -> None:
 
 @pytest.fixture()
 def studio(tmp_path: Path):
-    handler = type("TestStudio", (StudioHandler,), {"registry": StrategyRegistry(tmp_path / "studio.sqlite3")})
+    handler = type("TestStudio", (StudioHandler,), {
+        "registry": StrategyRegistry(tmp_path / "studio.sqlite3"), "auth_token": "synthetic-m4-test-token"})
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -127,6 +128,7 @@ def _request(port: int, method: str, path: str, *, host: str | None = None, orig
              body: dict | None = None) -> tuple[int, dict]:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     headers = {"Host": host or f"127.0.0.1:{port}"}
+    headers["Authorization"] = "Bearer synthetic-m4-test-token"
     if origin:
         headers["Origin"] = origin
     payload = None

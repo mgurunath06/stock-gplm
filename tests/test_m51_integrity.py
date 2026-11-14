@@ -8,6 +8,7 @@ import json
 import os
 import pickle
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -642,10 +643,16 @@ def test_F_programmatic_non_loopback_bind_is_refused(tmp_path: Path, host) -> No
 def test_F_loopback_bind_works(tmp_path: Path) -> None:
     for host in ("127.0.0.1", "localhost"):
         server = make_server(tmp_path / "r.sqlite3", host, 0)
+        token_path = server.token_path
         try:
             assert server.server_address[0] == "127.0.0.1" and isinstance(server, LoopbackHTTPServer)
+            assert token_path and token_path.is_file()
+            assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE((tmp_path / "r.sqlite3").stat().st_mode) == 0o600
+            assert len(server.RequestHandlerClass.auth_token) >= 40
         finally:
             server.server_close()
+        assert token_path and not token_path.exists()
 
 
 def test_F_peer_address_is_verified_not_headers(tmp_path: Path) -> None:
@@ -694,6 +701,44 @@ def test_F_live_server_rejects_spoofed_cross_site_requests(tmp_path: Path) -> No
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_F_live_server_requires_token_for_local_and_proxy_style_requests(tmp_path: Path) -> None:
+    token_path = tmp_path / "launch-token"
+    server = make_server(tmp_path / "r.sqlite3", "127.0.0.1", 0, token_path=token_path)
+    token = token_path.read_text().strip()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        allowed = {"Host": f"127.0.0.1:{port}", "Origin": f"http://127.0.0.1:{port}"}
+        for method, path, headers, body in (
+            ("GET", "/api/strategies", allowed, None),
+            ("GET", "/api/strategies", allowed | {"Authorization": "Bearer wrong"}, None),
+            ("POST", "/api/validate", allowed | {"Content-Type": "application/json"}, b"{}"),
+        ):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            payload = response.read().decode()
+            assert response.status == 403 and token not in payload
+            connection.close()
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        connection.request("GET", "/api/strategies", headers=allowed | {"Authorization": f"Bearer {token}"})
+        response = connection.getresponse()
+        assert response.status == 200 and token not in response.read().decode()
+        connection.close()
+
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        connection.request("GET", f"/?token={token}", headers={"Host": f"127.0.0.1:{port}"})
+        response = connection.getresponse()
+        page = response.read().decode()
+        assert response.status == 200 and token in page and "__STUDIO_AUTH_TOKEN_JSON__" not in page
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert not token_path.exists()
 
 
 # ======================================================================= G: terminal valuation

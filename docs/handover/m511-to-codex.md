@@ -37,10 +37,10 @@ The main checkout `/home/mgurunath/projects/stock-gplm` is on
 | A.3 heuristic ETF + unverified costs not gated | **FIXED (gate)** | Strict always BLOCKED until authoritative sources exist. See §4b. |
 | A.4 synthetic/unapproved evidence can reach strict | **FIXED (gate)** | See §4b. The positive approval path is C (§6.4). |
 | B atomic universes | PASS in audit, no work needed | |
-| C evidence authority | FIXED IN CODE (pending checkpoint commit) | Separate hash-pinned trust policy, structured registrations, classification and cost loaders; genuine approvals remain unavailable. |
+| C evidence authority | FIXED IN CODE (`5578057`) | Separate hash-pinned trust policy, structured registrations, classification and cost loaders; genuine approvals remain unavailable. |
 | D fabrication/ranking | PASS in audit, no work needed | |
 | E provenance completeness | NOT STARTED | P1. Design in §6.6. |
-| F local API authentication | NOT STARTED | P1. Design in §6.5. |
+| F local API authentication | FIXED (pending checkpoint commit) | Random per-launch token on every API request, authenticated bootstrap, private token/registry/report permissions. |
 | G accounting | PASS in audit, no work needed | |
 | H holdout validation isolation | FIXED (`ca3bd4e`) | M5 validates whole-source bytes but decodes only pre-cutoff candle content; protected-only metamorphic test added. |
 
@@ -265,6 +265,19 @@ document bytes hash, licence decision and reviewer approval, and verify the refe
 document bytes. NSE downloads must stay manual (AGENTS.md M3.6). Never script them.
 
 ### 6.5 P1 — local API authentication (F)
+
+**DONE in the Codex continuation (commit recorded in the progress log).**
+The Studio now generates a high-entropy per-launch token, stores it in a `0600`
+file, requires a constant-time bearer-token check on every API request, and
+serves the HTML only through a token-bearing bootstrap URL. The token is never
+logged or returned by errors and the file is removed when the server closes.
+Registry and report artifacts receive owner-only permissions. Live tests prove
+missing/wrong tokens fail for local and allowed-header proxy-style GET/POST
+requests while the correct token succeeds. Loopback, Host, Origin and
+`Sec-Fetch-Site` protections remain. A same-user compromised process or a proxy
+deliberately given the token remains a host-security limitation.
+
+Original design note retained below:
 
 `v1/studio.py` checks peer, Host and Origin (`~167-205`) but has no client
 authentication. Add a per-launch `secrets.token_urlsafe(32)` token, inject it into the
