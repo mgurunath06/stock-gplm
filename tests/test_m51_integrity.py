@@ -61,7 +61,7 @@ from stock_gplm.m5.run_store import (
     make_replayer,
     scan_runs,
 )
-from stock_gplm.m5.runner import build_run
+from stock_gplm.m5.runner import build_run, render_markdown
 from stock_gplm.m5.studio_api import HistoricalResearchService
 from stock_gplm.v1.metrics import TERMINAL_VALUATION_POLICY, equal_weight_buy_and_hold, liquidation_unit_value, \
     performance_metrics
@@ -617,8 +617,63 @@ def test_E_run_identity_excludes_environment_but_records_it(tmp_path: Path) -> N
     assert environment["part_of_run_identity"] is False
     assert {"git_commit", "python_version", "lockfile_sha256", "loaded_third_party_versions"} <= set(
         environment["environment"])
+    assert environment["environment"]["reproducibility_manifest_status"] == "COMPLETE"
+    assert set(environment["environment"]["lockfile_sha256"]) == set(provenance.LOCKFILES)
     assert run["evidence_versions"][0]["sources"]["provider_price_basis"]
     assert run["requested_universe_sha256"] == universe().universe_sha256
+    inputs = run["input_provenance"]
+    assert canonical_hash(inputs) == run["input_provenance_sha256"]
+    assert inputs["strategy"] == {"strategy_id": run["strategy_id"], "version": run["strategy_version"],
+                                  "config_sha256": run["strategy_config_hash"]}
+    assert inputs["source_code_sha256"] == run["code"]["source_sha256"]
+    assert inputs["model_artifacts"]["applicable"] is False
+    assert inputs["cost_profile"]["authority"] in {"REGISTERED_APPROVED", "DIAGNOSTIC_ASSUMPTION"}
+    for dataset in inputs["datasets"]:
+        assert dataset["bars_sha256"] and dataset["segments"]
+        for segment in dataset["segments"]:
+            assert all(segment[key] for key in ("payload_sha256", "done_sha256", "metadata_sha256"))
+
+
+def test_E_missing_required_lockfile_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    package = tmp_path / "repo" / "src" / "stock_gplm"
+    package.mkdir(parents=True)
+    (tmp_path / "repo" / "pyproject.toml").write_text("[project]\nname='fixture'\n")
+    monkeypatch.setattr(provenance, "PACKAGE", package)
+    with pytest.raises(FileNotFoundError, match="requirements-dev.lock.*requirements-m35.lock"):
+        provenance.environment_provenance()
+
+
+def test_E_immutable_v2_run_remains_integrity_readable(tmp_path: Path) -> None:
+    run, directory, _ = _strict_run(tmp_path)
+    previous = json.loads(json.dumps(run))
+    previous["contract"] = "stock-gplm.m5-historical-backtest-run.v2"
+    previous.pop("input_provenance")
+    previous.pop("input_provenance_sha256")
+    binding = ("contract", "strategy_id", "strategy_version", "strategy_config_hash", "dataset_fingerprint",
+               "requested_universe_sha256", "eligibility_issuance", "settings", "simulator_version", "code")
+    previous_id = canonical_hash({key: previous[key] for key in binding})
+    previous["run_id"] = previous_id
+    target = tmp_path / "previous-v2" / previous_id
+    target.mkdir(parents=True)
+    files = {}
+    for name in ("signals.json", "orders.json", "trades.json", "equity-curve.json"):
+        files[name] = (directory / name).read_bytes()
+    files["run.json"] = (json.dumps(previous, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+    files["report.md"] = render_markdown(previous).encode()
+    environment = json.loads((directory / "environment.json").read_text())
+    environment["run_id"] = previous_id
+    files["environment.json"] = (json.dumps(environment, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+    hashes = {}
+    for name, payload in files.items():
+        (target / name).write_bytes(payload)
+        hashes[name] = hashlib.sha256(payload).hexdigest()
+    manifest = {"contract": "stock-gplm.m5-run-manifest.v2",
+                "run_contract": "stock-gplm.m5-historical-backtest-run.v2", "run_id": previous_id,
+                "file_sha256": hashes, "file_inventory": sorted(hashes),
+                "created_at_utc": "2026-11-14T00:00:00Z", "non_analytical_fields": ["created_at_utc"],
+                "non_analytical_files": ["environment.json"]}
+    (target / "run-manifest.json").write_text(json.dumps(manifest))
+    assert load_run(target).verification == INTEGRITY_VERIFIED
 
 
 def test_E_execution_path_imports_only_the_standard_library() -> None:

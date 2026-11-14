@@ -46,6 +46,7 @@ from stock_gplm.v1.portfolio import CostModel, SimulationResult
 
 from .evidence import _reject_constant, _unique, read_json
 from .models import EligibilityMode, UniverseRequest, canonical_hash
+from .provenance import ENVIRONMENT_CONTRACT, LOCKFILES
 from .runner import (
     ADAPTER_ISSUED,
     ANALYTICAL_FILES,
@@ -53,6 +54,8 @@ from .runner import (
     ENVIRONMENT_FILE,
     LEGACY_RUN_CONTRACT,
     MANIFEST_CONTRACT,
+    PREVIOUS_MANIFEST_CONTRACT,
+    PREVIOUS_RUN_CONTRACT,
     RUN_CONTRACT,
     STRICT_CLASSIFICATION,
     BacktestSettings,
@@ -67,7 +70,9 @@ LEGACY_UNVERIFIED = "LEGACY_UNVERIFIED"
 MANIFEST_NAME = "run-manifest.json"
 MAX_RUN_FILE_BYTES = 256 * 1024 * 1024
 BINDING_KEYS = ("contract", "strategy_id", "strategy_version", "strategy_config_hash", "dataset_fingerprint",
-                "requested_universe_sha256", "eligibility_issuance", "settings", "simulator_version", "code")
+                "requested_universe_sha256", "eligibility_issuance", "settings", "simulator_version", "code",
+                "input_provenance_sha256")
+PREVIOUS_BINDING_KEYS = BINDING_KEYS[:-1]
 _RUN_ID = re.compile(r"^[0-9a-f]{64}$")
 _MANIFEST_KEYS = frozenset({"contract", "run_contract", "run_id", "file_sha256", "file_inventory", "created_at_utc",
                             "non_analytical_fields", "non_analytical_files"})
@@ -166,23 +171,76 @@ def load_run(directory: Path) -> VerifiedRun:
         return VerifiedRun(directory.name, directory, run, manifest, payloads["report.md"].decode("utf-8"),
                            LEGACY_UNVERIFIED)
 
-    if set(manifest) != _MANIFEST_KEYS or manifest["contract"] != MANIFEST_CONTRACT or (
-            manifest["run_contract"] != RUN_CONTRACT):
+    current_contract = (manifest.get("contract"), manifest.get("run_contract")) == (
+        MANIFEST_CONTRACT, RUN_CONTRACT)
+    previous_contract = (manifest.get("contract"), manifest.get("run_contract")) == (
+        PREVIOUS_MANIFEST_CONTRACT, PREVIOUS_RUN_CONTRACT)
+    if set(manifest) != _MANIFEST_KEYS or not (current_contract or previous_contract):
         raise _fail(directory, "unsupported run manifest contract or fields")
     expected = set(ANALYTICAL_FILES) | {ENVIRONMENT_FILE}
     if manifest["file_inventory"] != sorted(expected) or manifest["non_analytical_files"] != [ENVIRONMENT_FILE]:
         raise _fail(directory, "manifest file inventory is not the required inventory")
     payloads = _read_files(directory, expected, manifest["file_sha256"])
     run = _strict_json(directory, "run.json", payloads["run.json"])
-    if not isinstance(run, dict) or run.get("run_id") != directory.name or run.get("contract") != RUN_CONTRACT:
+    expected_run_contract = RUN_CONTRACT if current_contract else PREVIOUS_RUN_CONTRACT
+    if not isinstance(run, dict) or run.get("run_id") != directory.name or run.get("contract") != expected_run_contract:
         raise _fail(directory, "run.json identity or contract does not match the directory")
-    if any(key not in run for key in BINDING_KEYS):
+    binding_keys = BINDING_KEYS if current_contract else PREVIOUS_BINDING_KEYS
+    if any(key not in run for key in binding_keys):
         raise _fail(directory, "run.json lacks identity binding fields")
-    if canonical_hash({key: run[key] for key in BINDING_KEYS}) != directory.name:
+    if canonical_hash({key: run[key] for key in binding_keys}) != directory.name:
         raise _fail(directory, "run_id does not re-derive from the run's identity binding")
     environment = _strict_json(directory, ENVIRONMENT_FILE, payloads[ENVIRONMENT_FILE])
-    if not isinstance(environment, dict) or environment.get("run_id") != directory.name:
+    if (not isinstance(environment, dict) or environment.get("run_id") != directory.name
+            or environment.get("part_of_run_identity") is not False):
         raise _fail(directory, "environment.json belongs to a different run")
+    runtime = environment.get("environment")
+    if current_contract and (not isinstance(runtime, dict) or runtime.get("contract") != ENVIRONMENT_CONTRACT
+            or runtime.get("required_reproducibility_manifests") != list(LOCKFILES)
+            or runtime.get("reproducibility_manifest_status") != "COMPLETE"
+            or set(runtime.get("lockfile_sha256", {})) != set(LOCKFILES)):
+        raise _fail(directory, "environment provenance lacks the complete required reproducibility manifests")
+
+    provenance = run.get("input_provenance")
+    if current_contract and (not isinstance(provenance, dict)
+                             or canonical_hash(provenance) != run.get("input_provenance_sha256")):
+        raise _fail(directory, "input provenance is missing or does not match its bound hash")
+    if not current_contract:
+        provenance = None
+    expected_datasets = [{
+        "symbol": item["symbol"], "decision_id": item["decision"]["decision_id"],
+        "bars_sha256": item["decision"]["bars_sha256"],
+        "segments": [{
+            "file": segment["file"], "payload_sha256": segment.get("sha256"),
+            "done_sha256": segment.get("done_sha256"), "metadata_sha256": segment.get("meta_sha256"),
+            "records": segment.get("records"), "window": segment.get("window"),
+        } for segment in item["decision"]["segments"]],
+    } for item in sorted(run["datasets"], key=lambda item: item["symbol"])]
+    expected_evidence = sorted({canonical_hash(item["sources"] or {}): {
+        "evidence_sha256": item["evidence_sha256"], "source_hashes": item["sources"],
+    } for item in run["evidence_versions"]}.values(), key=lambda item: str(item["evidence_sha256"]))
+    expected_strategy = {"strategy_id": run["strategy_id"], "version": run["strategy_version"],
+                         "config_sha256": run["strategy_config_hash"]}
+    if current_contract and (provenance.get("contract") != "stock-gplm.m511-input-provenance.v1"
+            or provenance.get("datasets") != expected_datasets or provenance.get("evidence") != expected_evidence
+            or provenance.get("strategy") != expected_strategy
+            or provenance.get("source_code_sha256") != run["code"]["source_sha256"]
+            or provenance.get("model_artifacts") != {
+                "applicable": False,
+                "reason": "M5 evaluates declarative V1 strategies and loads no ML model artifact",
+            }):
+        raise _fail(directory, "input provenance contradicts the run's data, evidence, strategy or code identity")
+    if current_contract and run.get("registered_cost_profile") is not None:
+        expected_cost = {"authority": "REGISTERED_APPROVED", **run["registered_cost_profile"]}
+    elif current_contract:
+        expected_cost = {"authority": "DIAGNOSTIC_ASSUMPTION", "assumption_sha256": canonical_hash({
+            "strategy_trading_costs": run["strategy_config_snapshot"]["trading_costs"],
+            "settings": {"buy_statutory_bps": run["settings"]["buy_statutory_bps"],
+                         "sell_statutory_bps": run["settings"]["sell_statutory_bps"],
+                         "cost_basis": run["settings"]["cost_basis"]},
+        })}
+    if current_contract and provenance.get("cost_profile") != expected_cost:
+        raise _fail(directory, "input provenance contradicts the registered or diagnostic cost identity")
 
     try:
         investable = (run["eligibility_mode"] == EligibilityMode.STRICT_RESEARCH.value

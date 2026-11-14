@@ -219,12 +219,21 @@ into `run_id`. `stock_gplm.m5.provenance` now separates two things:
   the full Python version and build, platform, the SHA-256 of `pyproject.toml`
   and both lockfiles, and the versions of any loaded non-standard-library
   modules. A test enforces that the execution path imports only the standard
-  library, so lockfiles are environmental facts.
+  library, so lockfiles are environmental facts. M5.1.1 requires
+  `pyproject.toml`, `requirements-dev.lock` and `requirements-m35.lock`; a
+  missing manifest fails before publication rather than producing incomplete
+  provenance.
 
 Strategy ID, version and configuration hash are already in `run_id`. Data,
 calendar, corporate-action and price-basis evidence versions enter `run_id`
 through each decision's evidence digest. They are listed per run in
-`evidence_versions`. The cost basis is bound through the settings.
+`evidence_versions`. M5.1.1 run schema v3 adds hash-bound `input_provenance`
+that explicitly lists every payload, `.done` and metadata hash, normalized-bars
+hash, evidence sources, strategy version/config hash, source-code hash and the
+registered cost profile or diagnostic-assumption hash. Model artifacts are
+explicitly `not applicable` because M5 loads no ML model. Python micro/build and
+platform remain recorded environmental facts; replay is still required before
+ranking. Immutable v2 runs remain integrity-readable but cannot replay as v3.
 
 ## F — Studio security
 
@@ -311,7 +320,7 @@ with the same script on this branch.
 | B | Partial universe | Studio `ALPHA-EQ`+`ABSENT-EQ` strict → HTTP 201, `investable=True` | `m5/models.py`, `m5/adapter.py`, `m5/studio_api.py`, `m5/cli.py`, `v1/studio.py` (UI) | `test_B_*` (9) | HTTP 422 / CLI exit 2, `REJECTED`, nothing run | — |
 | C | Corporate-action contradictions | `UNKNOWN` status + `3:1` vs event `2:1` → `ELIGIBLE` | `m5/models.py`, `m5/adapter.py`, `m5/evidence.py` | `test_C_*` (18) | `REJECTED`: `…STATUS_UNRESOLVED`, `…CONTRADICTION` | The normalization table is a contract for evidence that does not exist yet; a real catalog may need a new reviewed version |
 | D | Forged ranking | fabricated `run.json` (`total_return` 99.0) ranked first | `m5/run_store.py` (new), `m5/runner.py`, `m5/studio_api.py`, `m5/cli.py`, `m5/__init__.py` | `test_D_*` (15) | `RunIntegrityError`; ranking requires `REPLAY_VERIFIED` | Writers of raw data, evidence or code can forge anything (documented) |
-| E | Narrow provenance | only `v1/` and `m5/` hashed; git state in `run_id` | `m5/provenance.py` (new), `m5/runner.py` | `test_E_*` (3) | five components + Python; environment separated | Python micro version and platform float differences are recorded, not bound |
+| E | Narrow/incomplete provenance | only `v1/` and `m5/` hashed; sidecar, lock and cost identities incomplete | `m5/provenance.py`, `m5/runner.py`, `m5/run_store.py` | `test_E_*` (4) | v3 binds complete input provenance and requires all declared manifests | Python micro/platform remain environmental, so replay is mandatory |
 | F | Studio bind and authentication | unauthenticated loopback requests and proxy-originated allowed headers reached the API | `v1/studio.py`, `m5/runner.py` | `test_F_*` (11), Studio integration (3) | non-loopback refused; missing/wrong per-launch token gets 403; owner-only local artifacts | Same-user compromise or a proxy deliberately given the token remains in scope of host security |
 | G | Terminal valuation mismatch | strategy marked at close without exit costs; benchmark deducted them | `v1/metrics.py`, `m5/runner.py` | `test_G_*` (3) | one policy for both; reconciliation within 4e-10 on genuine data | Final-close liquidation ignores market impact beyond slippage (documented limitation) |
 | H | Holdout validation isolation | protected candle content changed whole-segment validation and development eligibility | `m5/holdout_validation.py`, `m5/adapter.py`, `m5/runner.py`, this file | `test_H_*`, including protected-only metamorphic mutation | whole-source bytes remain integrity-checked; protected candle content is not decoded, released or scored | Full-source hash changes remain visible in provenance and invalidate stale assessments |

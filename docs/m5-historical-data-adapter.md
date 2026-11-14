@@ -180,16 +180,22 @@ reinterpreting daily data.
    existing run directory is never overwritten, and outputs under a raw root are
    refused.
 
-`run_id` is the canonical hash of the strategy ID, version and configuration
+M5.1.1 publishes `stock-gplm.m5-historical-backtest-run.v3`. `run_id` is the canonical hash of the strategy ID, version and configuration
 hash, the dataset fingerprints (which bind the evidence digest), the
 requested-universe hash, the eligibility issuance class, the settings, the
-simulator version and the portable content identity. The content identity hashes
+simulator version, portable content identity and the complete input-provenance
+hash. Input provenance explicitly lists each payload, `.done` marker and
+metadata hash, normalized-bars hash, evidence identity, strategy config, cost
+profile/assumption and the not-applicable model-artifact status. The content identity hashes
 the M1 validation, M2 importers, M3.9-B, V1 and M5 sources by relative path,
 plus the adapter version and Python major.minor. Git commit, dirty flag, the full
-Python build, platform, lockfile hashes and loaded third-party versions are
+Python build, platform, required `pyproject.toml` plus both lockfile hashes and loaded third-party versions are
 recorded in `environment.json` and kept out of `run_id`. Identical inputs and
 code reproduce identical analytical files on any checkout. `created_at_utc` and
 `environment.json` are non-analytical.
+Missing required reproducibility manifests fail before publication. Existing
+immutable v2 runs remain readable at integrity level; replay emits v3 and is
+required for comparison/ranking.
 
 ### Simulator conventions
 

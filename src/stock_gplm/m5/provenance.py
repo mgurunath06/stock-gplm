@@ -24,7 +24,8 @@ from typing import Any
 
 from .models import ADAPTER_VERSION, canonical_hash
 
-PROVENANCE_CONTRACT = "stock-gplm.m51-run-provenance.v1"
+PROVENANCE_CONTRACT = "stock-gplm.m511-run-provenance.v2"
+ENVIRONMENT_CONTRACT = "stock-gplm.m511-runtime-environment.v1"
 PACKAGE = Path(__file__).resolve().parents[1]
 # Every subpackage whose code can change which bars are released or how they are simulated.
 COMPONENTS: dict[str, tuple[str, ...]] = {
@@ -73,8 +74,10 @@ def _third_party_versions() -> dict[str, str]:
 def environment_provenance() -> dict[str, Any]:
     """Where and with what this process ran; recorded, never part of ``run_id``."""
     root = PACKAGE.parents[1]
-    lockfiles = {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-                 for name in LOCKFILES if (root / name).is_file()}
+    missing = [name for name in LOCKFILES if not (root / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"required reproducibility manifests are missing: {missing}")
+    lockfiles = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in LOCKFILES}
     commit = dirty = None
     try:
         commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PACKAGE, capture_output=True, text=True,
@@ -84,6 +87,8 @@ def environment_provenance() -> dict[str, Any]:
         dirty = bool(status.strip())
     except (OSError, subprocess.SubprocessError):
         pass
-    return {"git_commit": commit, "git_worktree_dirty": dirty, "python_version": platform.python_version(),
+    return {"contract": ENVIRONMENT_CONTRACT, "required_reproducibility_manifests": list(LOCKFILES),
+            "reproducibility_manifest_status": "COMPLETE",
+            "git_commit": commit, "git_worktree_dirty": dirty, "python_version": platform.python_version(),
             "python_build": list(platform.python_build()), "platform": f"{platform.system()}-{platform.machine()}",
             "lockfile_sha256": lockfiles, "loaded_third_party_versions": _third_party_versions()}

@@ -42,9 +42,11 @@ from .models import (
 )
 from .provenance import content_identity, environment_provenance
 
-RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v2"
+RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v3"
+PREVIOUS_RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v2"
 LEGACY_RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v1"
-MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v2"
+MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v3"
+PREVIOUS_MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v2"
 ADAPTER_ISSUED = "ADAPTER_ISSUED"
 CALLER_SUPPLIED = "CALLER_SUPPLIED_UNVERIFIED"
 SETTINGS_CONTRACT = "stock-gplm.m5-backtest-settings.v1"
@@ -302,11 +304,45 @@ def build_run(
                                           portfolio.initial_capital, costs)
     fingerprint = canonical_hash(sorted(d.fingerprint for d in datasets))
     investable = mode == EligibilityMode.STRICT_RESEARCH and issuance == ADAPTER_ISSUED
+    source_code = content_identity()
+    cost_provenance = ({"authority": "REGISTERED_APPROVED", **registered_cost_profile}
+                       if registered_cost_profile is not None else {
+                           "authority": "DIAGNOSTIC_ASSUMPTION",
+                           "assumption_sha256": canonical_hash({
+                               "strategy_trading_costs": validated.config["trading_costs"],
+                               "settings": {"buy_statutory_bps": settings.buy_statutory_bps,
+                                            "sell_statutory_bps": settings.sell_statutory_bps,
+                                            "cost_basis": settings.cost_basis},
+                           })})
+    input_provenance = {
+        "contract": "stock-gplm.m511-input-provenance.v1",
+        "datasets": [{
+            "symbol": d.decision.request.symbol,
+            "decision_id": d.decision.decision_id,
+            "bars_sha256": d.decision.bars_sha256,
+            "segments": [{
+                "file": segment["file"], "payload_sha256": segment.get("sha256"),
+                "done_sha256": segment.get("done_sha256"), "metadata_sha256": segment.get("meta_sha256"),
+                "records": segment.get("records"), "window": segment.get("window"),
+            } for segment in d.decision.segments],
+        } for d in sorted(datasets, key=lambda item: item.decision.request.symbol)],
+        "evidence": sorted({canonical_hash(d.decision.evidence_sources or {}): {
+            "evidence_sha256": d.decision.evidence_sha256,
+            "source_hashes": d.decision.evidence_sources,
+        } for d in datasets}.values(), key=lambda item: str(item["evidence_sha256"])),
+        "strategy": {"strategy_id": strategy.strategy_id, "version": strategy.version,
+                     "config_sha256": strategy.config_hash},
+        "cost_profile": cost_provenance,
+        "source_code_sha256": source_code["source_sha256"],
+        "model_artifacts": {"applicable": False,
+                            "reason": "M5 evaluates declarative V1 strategies and loads no ML model artifact"},
+    }
     run_binding = {
         "contract": RUN_CONTRACT, "strategy_id": strategy.strategy_id, "strategy_version": strategy.version,
         "strategy_config_hash": strategy.config_hash, "dataset_fingerprint": fingerprint,
         "requested_universe_sha256": universe.get("universe_sha256"), "eligibility_issuance": issuance,
-        "settings": settings.to_dict(), "simulator_version": SIMULATOR_VERSION, "code": content_identity(),
+        "settings": settings.to_dict(), "simulator_version": SIMULATOR_VERSION, "code": source_code,
+        "input_provenance_sha256": canonical_hash(input_provenance),
     }
     run_id = canonical_hash(run_binding)
     evaluated = [p["date"] for p in simulation.equity_curve]
@@ -315,7 +351,7 @@ def build_run(
         raise ValueError("datasets disagree on the locked-holdout boundary")
     released_protected = sum(1 for d in datasets for bar in d.bars if cutoff is None or bar.date >= cutoff)
     run = {
-        **run_binding, "run_id": run_id,
+        **run_binding, "run_id": run_id, "input_provenance": input_provenance,
         "classification": STRICT_CLASSIFICATION if investable else DIAGNOSTIC_CLASSIFICATION,
         "eligibility_mode": mode.value, "investable": investable, "ranking_eligible": investable,
         "promotion_eligible": False, "paper_trading_eligible": False, "ml_training_eligible": False,
