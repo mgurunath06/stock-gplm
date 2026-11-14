@@ -12,13 +12,17 @@ from .models import (
     EligibilityEvidence,
     EligibilityFailure,
     EligibilityMode,
+    UniverseAssessment,
+    UniverseRequest,
     VerifiedHistoricalDataset,
 )
-from .runner import BacktestSettings, compare_runs, run_historical_backtest
+from .run_store import RunIntegrityError, RunNotFound, VerifiedRun, compare_runs, load_run
+from .runner import BacktestSettings, run_historical_backtest
 
 __all__ = [
     "BacktestSettings", "DataEligibilityDecision", "DataEligibilityRequest", "DecisionStatus",
     "EligibilityEvidence", "EligibilityFailure", "EligibilityMode", "HistoricalDataAdapter",
-    "ReferenceEvidence", "VerifiedHistoricalDataset", "compare_runs", "load_reference_evidence",
+    "ReferenceEvidence", "RunIntegrityError", "RunNotFound", "UniverseAssessment", "UniverseRequest",
+    "VerifiedHistoricalDataset", "VerifiedRun", "compare_runs", "load_reference_evidence", "load_run",
     "run_historical_backtest",
 ]

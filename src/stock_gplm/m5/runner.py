@@ -1,8 +1,11 @@
 """Reproducible historical backtests of immutable V1 strategies on adapter-released data.
 
-The runner never decides eligibility. It accepts only ``VerifiedHistoricalDataset``
-objects whose decisions re-verify, evaluates signals with the shared V1 evaluator,
-simulates with the generic portfolio simulator and writes an immutable run directory.
+The runner never decides eligibility. A ``STRICT_RESEARCH`` run accepts only an
+adapter-issued :class:`UniverseAssessment`, or datasets whose decisions carry this
+process's adapter seal (see :mod:`.issuance`). Caller-supplied datasets can only
+produce ``DIAGNOSTIC_ONLY`` non-investable runs. The runner evaluates signals with
+the shared V1 evaluator, simulates with the generic portfolio simulator and writes
+an immutable run directory. Runs are read back only through :mod:`.run_store`.
 """
 from __future__ import annotations
 
@@ -10,7 +13,6 @@ import hashlib
 import json
 import math
 import os
-import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -19,7 +21,7 @@ from typing import Any, Mapping, Sequence
 
 from stock_gplm.m39b import AdjustmentMode, CandleSeries, RawCandle, adjust_series
 from stock_gplm.v1.evaluator import evaluate_strategy
-from stock_gplm.v1.metrics import comparable, equal_weight_buy_and_hold, performance_metrics
+from stock_gplm.v1.metrics import TERMINAL_VALUATION_POLICY, equal_weight_buy_and_hold, performance_metrics
 from stock_gplm.v1.portfolio import (
     SIMULATOR_VERSION,
     CostModel,
@@ -31,9 +33,20 @@ from stock_gplm.v1.portfolio import (
 from stock_gplm.v1.registry import StrategyVersion
 from stock_gplm.v1.schema import validate_strategy
 
-from .models import EligibilityMode, VerifiedHistoricalDataset, canonical_hash
+from .models import (
+    EligibilityMode,
+    UniverseAssessment,
+    UniverseRequest,
+    VerifiedHistoricalDataset,
+    canonical_hash,
+)
+from .provenance import content_identity, environment_provenance
 
-RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v1"
+RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v2"
+LEGACY_RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v1"
+MANIFEST_CONTRACT = "stock-gplm.m5-run-manifest.v2"
+ADAPTER_ISSUED = "ADAPTER_ISSUED"
+CALLER_SUPPLIED = "CALLER_SUPPLIED_UNVERIFIED"
 SETTINGS_CONTRACT = "stock-gplm.m5-backtest-settings.v1"
 STRICT_CLASSIFICATION = "STRICT_RESEARCH_HISTORICAL"
 DIAGNOSTIC_CLASSIFICATION = "DIAGNOSTIC_ONLY_NON_INVESTABLE"
@@ -41,6 +54,9 @@ MAX_INSTRUMENTS = 200
 # NSE closes at 15:30 Asia/Kolkata (10:00 UTC); evidence must be available by then.
 DECISION_TIME_UTC = "T10:00:00Z"
 ANALYTICAL_FILES = ("run.json", "signals.json", "orders.json", "trades.json", "equity-curve.json", "report.md")
+ENVIRONMENT_FILE = "environment.json"  # hashed in the manifest but non-analytical; never compared on replay
+# M3.2 boundaries (unchanged): five shorter horizons 2026-04-29, 6-12m 2025-10-21; M5 uses the earliest.
+HOLDOUT_POLICY = "EARLIEST_M32_LOCKED_HOLDOUT_FIRST_AS_OF_ACROSS_HORIZONS"
 
 
 @dataclass(frozen=True)
@@ -77,21 +93,8 @@ class BacktestSettings:
 
 
 def code_identity() -> dict[str, Any]:
-    """Git commit (when available) plus a hash of the executing V1/M5 sources."""
-    package = Path(__file__).resolve().parents[1]
-    sources = sorted([*package.joinpath("v1").glob("*.py"), *package.joinpath("m5").glob("*.py")])
-    source_hash = canonical_hash({path.relative_to(package).as_posix(): path.read_text(encoding="utf-8")
-                                  for path in sources})
-    commit = dirty = None
-    try:
-        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=package, capture_output=True, text=True,
-                                check=True, timeout=10).stdout.strip() or None
-        status = subprocess.run(["git", "status", "--porcelain", "--", "."], cwd=package, capture_output=True,
-                                text=True, check=True, timeout=10).stdout
-        dirty = bool(status.strip())
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return {"git_commit": commit, "git_worktree_dirty": dirty, "source_sha256": source_hash}
+    """Backward-compatible alias for :func:`stock_gplm.m5.provenance.content_identity`."""
+    return content_identity()
 
 
 def instrument_signals(validated: Any, dataset: VerifiedHistoricalDataset) -> InstrumentSignals:
@@ -165,9 +168,11 @@ def _publish(output_root: Path, run_id: str, files: dict[str, Any], forbidden_ro
             payload = value.encode("utf-8") if isinstance(value, str) else _encode(value)
             (staging / name).write_bytes(payload)
             hashes[name] = hashlib.sha256(payload).hexdigest()
-        manifest = {"contract": RUN_CONTRACT, "run_id": run_id, "file_sha256": hashes,
+        manifest = {"contract": MANIFEST_CONTRACT, "run_contract": RUN_CONTRACT, "run_id": run_id,
+                    "file_sha256": hashes, "file_inventory": sorted(hashes),
                     "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "non_analytical_fields": ["created_at_utc"]}
+                    "non_analytical_fields": ["created_at_utc"],
+                    "non_analytical_files": sorted(set(hashes) - set(ANALYTICAL_FILES))}
         (staging / "run-manifest.json").write_bytes(_encode(manifest))
         staging.rename(target)
     except BaseException:
@@ -178,29 +183,67 @@ def _publish(output_root: Path, run_id: str, files: dict[str, Any], forbidden_ro
     return target
 
 
-def run_historical_backtest(
-    strategy: StrategyVersion,
-    datasets: Sequence[VerifiedHistoricalDataset],
-    settings: BacktestSettings,
-    output_root: Path,
-    *,
-    forbidden_roots: Sequence[Path] = (),
-) -> dict[str, Any]:
-    """Backtest one immutable strategy version over adapter-released datasets."""
-    validated = validate_strategy(strategy.config)
-    if validated.config_hash != strategy.config_hash:
-        raise ValueError("strategy configuration does not match its immutable version hash")
+def _resolve_release(
+    release: UniverseAssessment | Sequence[VerifiedHistoricalDataset],
+) -> tuple[tuple[VerifiedHistoricalDataset, ...], EligibilityMode, dict[str, Any], str]:
+    """Return released datasets, mode, the requested-universe record and the issuance class."""
+    if isinstance(release, UniverseAssessment):
+        release.verify_consistency()
+        if not release.adapter_issued:
+            raise ValueError("universe assessment was not issued by the adapter in this process")
+        if not release.released:
+            raise ValueError(f"universe {release.status.value}: no data released; nothing is run on a subset")
+        datasets = release.released
+        mode = release.universe.mode
+        if mode == EligibilityMode.STRICT_RESEARCH and not release.investable:
+            raise ValueError("STRICT_RESEARCH run requires an ELIGIBLE, adapter-issued universe")
+        universe = release.to_dict()
+        return tuple(datasets), mode, {"source": "UNIVERSE_ASSESSMENT", **universe}, ADAPTER_ISSUED
+    datasets = tuple(release)
     if not datasets or len(datasets) > MAX_INSTRUMENTS:
         raise ValueError(f"between 1 and {MAX_INSTRUMENTS} datasets are required")
+    if not all(isinstance(d, VerifiedHistoricalDataset) for d in datasets):
+        raise ValueError("datasets must be VerifiedHistoricalDataset objects")
     modes = {d.decision.request.mode for d in datasets}
     if len(modes) != 1:
         raise ValueError("a run cannot mix STRICT_RESEARCH and DIAGNOSTIC_ONLY datasets")
     mode = modes.pop()
     for dataset in datasets:
         dataset.verify()
-        request = dataset.decision.request
         if mode == EligibilityMode.STRICT_RESEARCH and not dataset.decision.investable:
-            raise ValueError(f"{request.symbol}: STRICT_RESEARCH run requires an ELIGIBLE decision")
+            raise ValueError(f"{dataset.decision.request.symbol}: STRICT_RESEARCH run requires an ELIGIBLE decision "
+                             "issued by HistoricalDataAdapter in this process")
+    issued = all(d.decision.adapter_issued for d in datasets)
+    if mode == EligibilityMode.STRICT_RESEARCH:
+        ranges = {(d.decision.request.start, d.decision.request.end) for d in datasets}
+        evidence = {d.decision.evidence_sha256 for d in datasets}
+        if len(ranges) != 1 or len(evidence) != 1:
+            raise ValueError("STRICT_RESEARCH datasets must share one assessed range and one evidence set")
+    symbols = [d.decision.request.symbol for d in datasets]
+    if len(symbols) != len(set(symbols)):
+        raise ValueError("duplicate symbols in the dataset list")
+    request = datasets[0].decision.request
+    universe = UniverseRequest(tuple(symbols), request.start, request.end, mode) if len(
+        {(d.decision.request.start, d.decision.request.end) for d in datasets}) == 1 else None
+    record = {"source": "DATASET_LIST", "universe": universe.canonical() if universe else None,
+              "universe_sha256": universe.universe_sha256 if universe else None,
+              "members": [{"symbol": d.decision.request.symbol, "status": d.decision.status.value,
+                           "decision_id": d.decision.decision_id} for d in datasets], "excluded": []}
+    return datasets, mode, record, ADAPTER_ISSUED if issued else CALLER_SUPPLIED
+
+
+def build_run(
+    strategy: StrategyVersion,
+    release: UniverseAssessment | Sequence[VerifiedHistoricalDataset],
+    settings: BacktestSettings,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compute a run and its analytical files in memory without writing anything."""
+    validated = validate_strategy(strategy.config)
+    if validated.config_hash != strategy.config_hash:
+        raise ValueError("strategy configuration does not match its immutable version hash")
+    datasets, mode, universe, issuance = _resolve_release(release)
+    for dataset in datasets:
+        request = dataset.decision.request
         if not (request.start <= settings.evaluation_start and settings.evaluation_end <= request.end):
             raise ValueError(f"{request.symbol}: evaluation range lies outside the assessed range")
     symbols = [d.decision.request.symbol for d in datasets]
@@ -213,34 +256,44 @@ def run_historical_backtest(
     portfolio = PortfolioSettings(float(settings.initial_capital), settings.max_open_positions,
                                   float(settings.max_position_fraction), float(settings.max_gross_exposure),
                                   settings.evaluation_start, settings.evaluation_end)
-    instruments = [instrument_signals(validated, d) for d in sorted(datasets, key=lambda d: d.decision.request.symbol)]
+    ordered = sorted(datasets, key=lambda d: d.decision.request.symbol)
+    instruments = [instrument_signals(validated, d) for d in ordered]
     sessions = sorted({str(bar["date"]) for item in instruments for bar in item.bars})
     simulation = simulate_portfolio(validated.config, instruments, sessions, portfolio, costs)
-    performance = performance_metrics(simulation, portfolio.initial_capital)
+    performance = performance_metrics(simulation, portfolio.initial_capital, costs)
     benchmark = equal_weight_buy_and_hold(instruments, sessions, settings.evaluation_start, settings.evaluation_end,
                                           portfolio.initial_capital, costs)
-    identity = code_identity()
     fingerprint = canonical_hash(sorted(d.fingerprint for d in datasets))
-    investable = mode == EligibilityMode.STRICT_RESEARCH
+    investable = mode == EligibilityMode.STRICT_RESEARCH and issuance == ADAPTER_ISSUED
     run_binding = {
         "contract": RUN_CONTRACT, "strategy_id": strategy.strategy_id, "strategy_version": strategy.version,
         "strategy_config_hash": strategy.config_hash, "dataset_fingerprint": fingerprint,
-        "settings": settings.to_dict(), "simulator_version": SIMULATOR_VERSION, "code": identity,
+        "requested_universe_sha256": universe.get("universe_sha256"), "eligibility_issuance": issuance,
+        "settings": settings.to_dict(), "simulator_version": SIMULATOR_VERSION, "code": content_identity(),
     }
     run_id = canonical_hash(run_binding)
     evaluated = [p["date"] for p in simulation.equity_curve]
+    cutoff = ordered[0].decision.holdout_cutoff
+    if len({d.decision.holdout_cutoff for d in datasets}) != 1:
+        raise ValueError("datasets disagree on the locked-holdout boundary")
+    released_protected = sum(1 for d in datasets for bar in d.bars if cutoff is None or bar.date >= cutoff)
     run = {
         **run_binding, "run_id": run_id,
         "classification": STRICT_CLASSIFICATION if investable else DIAGNOSTIC_CLASSIFICATION,
         "eligibility_mode": mode.value, "investable": investable, "ranking_eligible": investable,
         "promotion_eligible": False, "paper_trading_eligible": False, "ml_training_eligible": False,
+        "requested_universe": universe,
         "strategy_config_snapshot": validated.config,
         "datasets": [{"symbol": d.decision.request.symbol, "decision": d.decision.to_dict(),
                       "fingerprint": d.fingerprint, "basis": d.basis, "share_events": list(d.share_events)}
-                     for d in sorted(datasets, key=lambda d: d.decision.request.symbol)],
+                     for d in ordered],
+        "evidence_versions": sorted({canonical_hash(d.decision.evidence_sources or {}): {
+            "evidence_sha256": d.decision.evidence_sha256, "sources": d.decision.evidence_sources}
+            for d in ordered}.values(), key=lambda item: str(item["evidence_sha256"])),
         "corporate_action_policy": "Prices are used in each dataset's stated basis without repair. Validated "
-                                   "M3.9-B share events (only on a verified RAW_UNADJUSTED basis) re-adjust signals "
-                                   "per as-of regime and rescale held quantities; cash dividends are excluded "
+                                   "M3.9-B share events, reconciled field by field with the M2.1 catalog and "
+                                   "applied only on a registered RAW_UNADJUSTED basis, re-adjust signals per "
+                                   "as-of regime and rescale held quantities; cash dividends are excluded "
                                    "(price return).",
         "price_basis": sorted({d.basis for d in datasets}),
         "cost_model": asdict(costs) | {"basis": settings.cost_basis},
@@ -249,15 +302,47 @@ def run_historical_backtest(
                              "actual": [evaluated[0], evaluated[-1]], "sessions": len(evaluated),
                              "session_axis": "UNION_OF_RELEASED_OBSERVATIONS"},
         "execution": {"policy": simulation.execution_policy, "intrabar": simulation.intrabar_policy},
+        "terminal_valuation": TERMINAL_VALUATION_POLICY,
         "performance": performance, "benchmark": benchmark,
         "open_positions_at_end": list(simulation.open_positions), "warnings": list(simulation.warnings),
-        "holdout_cutoff": datasets[0].decision.holdout_cutoff, "locked_holdout_accessed": False,
+        "holdout_cutoff": cutoff,
+        "holdout_access": {
+            "policy": HOLDOUT_POLICY, "cutoff": cutoff,
+            # Rows on or after the cutoff inside a segment that overlaps the request are decoded by
+            # validate_daily (publication checks need the whole file), then withheld.
+            "protected_rows_decoded_during_source_validation": sum(
+                int(s.get("holdout_rows_withheld", 0)) for d in datasets for s in d.decision.segments),
+            "protected_rows_released_to_execution": released_protected,
+            "protected_rows_scored_or_trained": 0,
+        },
         "broker_routing": "NONE", "network_used": False,
     }
+    if released_protected:
+        raise AssertionError("locked-holdout rows reached execution")
     files = {"run.json": run, "signals.json": list(simulation.signals), "orders.json": list(simulation.orders),
              "trades.json": list(simulation.trades), "equity-curve.json": list(simulation.equity_curve),
              "report.md": render_markdown(run)}
-    _publish(output_root, run_id, files, forbidden_roots)
+    return run, files
+
+
+def run_historical_backtest(
+    strategy: StrategyVersion,
+    datasets: UniverseAssessment | Sequence[VerifiedHistoricalDataset],
+    settings: BacktestSettings,
+    output_root: Path,
+    *,
+    forbidden_roots: Sequence[Path] = (),
+) -> dict[str, Any]:
+    """Backtest one immutable strategy version and publish the run directory.
+
+    ``datasets`` is preferably an adapter-issued :class:`UniverseAssessment`. A plain
+    list of datasets is still accepted. For ``STRICT_RESEARCH`` every decision in it
+    must carry the adapter's seal. Caller-supplied datasets only run as diagnostics.
+    """
+    run, files = build_run(strategy, datasets, settings)
+    files[ENVIRONMENT_FILE] = {"run_id": run["run_id"], "environment": environment_provenance(),
+                               "part_of_run_identity": False}
+    _publish(output_root, run["run_id"], files, forbidden_roots)
     return run
 
 
@@ -287,14 +372,21 @@ def render_markdown(run: Mapping[str, Any]) -> str:
         f"statutory buy {run['cost_model']['buy_statutory_bps']} / sell {run['cost_model']['sell_statutory_bps']} "
         f"({run['cost_model']['basis']})",
         f"- Execution: {run['execution']['policy']}; {run['execution']['intrabar']}",
-        f"- Code: {run['code']['git_commit']} (dirty={run['code']['git_worktree_dirty']}), "
-        f"sources `{run['code']['source_sha256'][:16]}`", "",
+        f"- Code identity: `{run['code']['source_sha256'][:16]}` (M1, M2, M3.9-B, V1 and M5 sources; "
+        f"Python {run['code']['python']['version']})",
+        f"- Eligibility issuance: {run['eligibility_issuance']}; requested universe "
+        f"`{str(run['requested_universe'].get('universe_sha256'))[:16]}`",
+        f"- Locked holdout from {run['holdout_access']['cutoff']}: "
+        f"{run['holdout_access']['protected_rows_decoded_during_source_validation']} protected row(s) decoded "
+        f"during source validation, {run['holdout_access']['protected_rows_released_to_execution']} released "
+        f"to execution, {run['holdout_access']['protected_rows_scored_or_trained']} scored or trained", "",
         "| Metric | Value |", "| --- | --- |",
     ]
     lines += [f"| {name} | {_fmt(value)}" + (f" ({undefined[name]})" if name in undefined else "") + " |"
-              for name, value in metrics.items()]
+              for name, value in sorted(metrics.items())]
     bench = run["benchmark"]
-    lines += ["", f"Benchmark ({bench['name']}): total return {_fmt(bench.get('total_return'))}."]
+    lines += ["", f"Terminal valuation: {run['terminal_valuation']} (strategy and benchmark alike).",
+              f"Benchmark ({bench['name']}): total return {_fmt(bench.get('total_return'))}."]
     missing = sorted({code for d in run["datasets"] for code in d["decision"]["missing_evidence"]})
     if missing:
         lines += ["", "Absent evidence: " + ", ".join(f"`{code}`" for code in missing) + "."]
@@ -303,13 +395,8 @@ def render_markdown(run: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def compare_runs(run_dirs: Sequence[Path]) -> dict[str, Any]:
-    """Side-by-side comparison; a ranking is produced only for comparable strict runs."""
-    runs = [json.loads((Path(d) / "run.json").read_text(encoding="utf-8")) for d in run_dirs]
-    fair, reasons = comparable(runs)
-    rows = [{"run_id": r["run_id"], "strategy_id": r["strategy_id"], "strategy_version": r["strategy_version"],
-             "classification": r["classification"], "total_return": r["performance"]["metrics"]["total_return"],
-             "max_drawdown": r["performance"]["metrics"]["max_drawdown"], "trades": r["performance"]["metrics"]["trades"],
-             "benchmark_total_return": r["benchmark"].get("total_return")} for r in runs]
-    ranking = [row["run_id"] for row in sorted(rows, key=lambda row: -row["total_return"])] if fair else None
-    return {"comparable": fair, "reasons": reasons, "rows": rows, "ranking_by_total_return": ranking}
+def compare_runs(run_dirs: Sequence[Path], *, replay: Any = None) -> dict[str, Any]:
+    """Compatibility wrapper for :func:`stock_gplm.m5.run_store.compare_runs`."""
+    from .run_store import compare_runs as verified_compare
+
+    return verified_compare(run_dirs, replay=replay)

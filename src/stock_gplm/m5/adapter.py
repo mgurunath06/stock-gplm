@@ -30,7 +30,8 @@ from stock_gplm.m39b import (
     split_factor,
 )
 
-from .evidence import ReferenceEvidence, read_json
+from .evidence import ReferenceEvidence, evidence_digest, evidence_issued, read_json
+from .issuance import _seal
 from .models import (
     ADAPTER_VERSION,
     CanonicalDailyBar,
@@ -41,6 +42,8 @@ from .models import (
     EligibilityFailure,
     EligibilityMode,
     FailureClass,
+    UniverseAssessment,
+    UniverseRequest,
     VerifiedHistoricalDataset,
     bars_hash,
 )
@@ -48,10 +51,17 @@ from .models import (
 SUPPORTED_SERIES = frozenset({"EQ"})
 LOCK_NAME = ".stock-gplm-m24.lock"
 _SEGMENT = re.compile(r"^(?P<start>\d{4}-\d{2}-\d{2})_(?P<end>\d{4}-\d{2}-\d{2})(?P<suffix>\.json\.gz|\.json\.gz\.done|\.meta\.json)$")
+# M2.1 catalog action_type -> M3.9-B event type. These aliases are the only normalization
+# between the two contracts (documented in docs/m5-historical-data-adapter.md).
 _SHARE_EVENTS = {"SPLIT": EventType.STOCK_SPLIT, "STOCK_SPLIT": EventType.STOCK_SPLIT,
                  "REVERSE_SPLIT": EventType.REVERSE_SPLIT, "CONSOLIDATION": EventType.REVERSE_SPLIT,
                  "BONUS": EventType.BONUS}
 _PRICE_RETURN_EXCLUDED = frozenset({"DIVIDEND", "CASH_DIVIDEND"})
+_DETAIL_KEYS = {"share": frozenset({"ratio", "record_date", "event_id"}),
+                "dividend": frozenset({"amount_inr", "record_date", "event_id"})}
+_RATIO = re.compile(r"^([1-9][0-9]{0,8}):([1-9][0-9]{0,8})$")
+# Adjustment statuses that agree with a verified RAW_UNADJUSTED provider series.
+_RAW_CONSISTENT = {"share": frozenset({"UNADJUSTED"}), "dividend": frozenset({"UNADJUSTED", "NOT_APPLICABLE"})}
 
 
 def publication_lock_active(raw_root: Path) -> bool:
@@ -85,6 +95,48 @@ def _segments(symbol_dir: Path) -> tuple[dict[str, dict[str, Path]], list[str]]:
     return groups, unexpected
 
 
+def _reconcile_details(kind: str, details: dict[str, str], event: CorporateActionEvent) -> list[tuple[str, str]]:
+    """Field-by-field reconciliation of an M2.1 action's details with its M3.9-B event.
+
+    Returns (failure code, message) pairs; empty means every applicable field agrees.
+    Ratios compare as reduced fractions (``4:2`` equals ``2:1``); nothing else is
+    coerced. SPLIT/REVERSE_SPLIT ratios are new:old and BONUS ratios are bonus:held,
+    the same orientation as M3.9-B ``new_shares:base_shares``.
+    """
+    problems: list[tuple[str, str]] = []
+    unsupported = sorted(set(details) - _DETAIL_KEYS[kind])
+    if unsupported:
+        problems.append(("CORPORATE_ACTION_DETAILS_UNSUPPORTED", f"unsupported details keys {unsupported}"))
+    if kind == "share":
+        ratio = details.get("ratio")
+        match = _RATIO.fullmatch(ratio) if isinstance(ratio, str) else None
+        if ratio is None:
+            problems.append(("CORPORATE_ACTION_FIELDS_MISSING", "catalog details lack the required ratio"))
+        elif match is None:
+            problems.append(("CORPORATE_ACTION_FIELDS_MISSING", f"catalog ratio {ratio!r} is not A:B"))
+        elif event.new_shares is None or event.base_shares is None:
+            problems.append(("CORPORATE_ACTION_FIELDS_MISSING", f"event {event.event_id} lacks a share ratio"))
+        elif Fraction(int(match[1]), int(match[2])) != Fraction(event.new_shares, event.base_shares):
+            problems.append(("CORPORATE_ACTION_CONTRADICTION", f"catalog ratio {ratio} differs from event "
+                             f"{event.event_id} ratio {event.new_shares}:{event.base_shares}"))
+    if "amount_inr" in details:
+        if event.cash_amount_inr is None:
+            problems.append(("CORPORATE_ACTION_FIELDS_MISSING", f"event {event.event_id} lacks cash_amount_inr"))
+        elif str(details["amount_inr"]) != str(event.cash_amount_inr):
+            problems.append(("CORPORATE_ACTION_CONTRADICTION", f"dividend {details['amount_inr']} differs from "
+                             f"event {event.event_id} amount {event.cash_amount_inr}"))
+    if "record_date" in details:
+        if event.record_date is None:
+            problems.append(("CORPORATE_ACTION_FIELDS_MISSING", f"event {event.event_id} lacks record_date"))
+        elif details["record_date"] != event.record_date:
+            problems.append(("CORPORATE_ACTION_CONTRADICTION", f"record date {details['record_date']} differs "
+                             f"from event {event.event_id} record date {event.record_date}"))
+    if "event_id" in details and details["event_id"] != event.event_id:
+        problems.append(("CORPORATE_ACTION_CONTRADICTION", f"catalog names event {details['event_id']}, "
+                         f"matched {event.event_id}"))
+    return problems
+
+
 def _share_factor(event: CorporateActionEvent) -> Fraction:
     assert event.new_shares is not None and event.base_shares is not None
     if event.event_type == EventType.BONUS:
@@ -111,7 +163,13 @@ class HistoricalDataAdapter:
         bars: list[CanonicalDailyBar] = []
         share_events: list[dict[str, Any]] = []
         used_events: list[CorporateActionEvent] = []
+        reconciliation: list[dict[str, Any]] = []
         holdout = self.evidence.holdout
+        issued = evidence_issued(self.evidence)
+        registration = self.evidence.price_basis_registration
+        raw_basis = (self.evidence.provider_price_basis == "RAW_UNADJUSTED" and registration is not None
+                     and registration.basis == "RAW_UNADJUSTED"
+                     and registration.covers(request.symbol, request.start, request.end))
 
         def fail(code: str, message: str) -> None:
             failures.append(EligibilityFailure(code, message))
@@ -123,20 +181,31 @@ class HistoricalDataAdapter:
                 status = DecisionStatus.DIAGNOSTIC_ALLOWED
             else:
                 status = DecisionStatus.BLOCKED if failures else DecisionStatus.ELIGIBLE
+            if raw_basis:
+                basis = "RAW_UNADJUSTED_VERIFIED" + ("_WITH_VALIDATED_SHARE_EVENTS" if share_events else "")
+            else:
+                basis = "PROVIDER_SERIES_ADJUSTMENT_BASIS_UNVERIFIED"
             decision = DataEligibilityDecision(
                 ADAPTER_VERSION, request, status, tuple(failures), tuple(evidence), tuple(warnings),
                 tuple(segments), holdout.cutoff if holdout else None, len(bars),
                 bars[0].date if bars else None, bars[-1].date if bars else None,
-                bars_hash(bars) if bars else None,
+                bars_hash(bars) if bars else None, evidence_sha256=evidence_digest(self.evidence),
+                evidence_sources=dict(sorted(self.evidence.source_hashes.items())), price_basis=basis,
+                share_events=tuple(share_events), corporate_action_reconciliation=tuple(reconciliation),
             )
+            object.__setattr__(decision, "issuance_seal", _seal("decision", decision.decision_id))
             if not decision.usable:
                 return decision, None
-            if self.evidence.provider_price_basis == "RAW_UNADJUSTED":
-                basis = "RAW_UNADJUSTED_VERIFIED" + ("_WITH_VALIDATED_SHARE_EVENTS" if share_events else "")
-            else:
-                basis = "PROVIDER_SERIES_ADJUSTMENT_BASIS_UNVERIFIED"
             return decision, VerifiedHistoricalDataset(decision, tuple(bars), basis, tuple(share_events),
                                                       tuple(used_events))
+
+        # 0. Trust gates (M5.1): only file-loaded, unmodified evidence and its own events grant STRICT status.
+        if not issued:
+            fail("EVIDENCE_NOT_ISSUED", "reference evidence was not loaded by load_reference_evidence in this "
+                 "process, or was modified afterwards; it supports diagnostics only")
+        if adjustment_events and request.mode == EligibilityMode.STRICT_RESEARCH:
+            fail("CORPORATE_ACTION_EVENTS_CALLER_SUPPLIED", "STRICT_RESEARCH uses only adjustment events from "
+                 "the evidence-paths file; caller-supplied events are diagnostic only")
 
         # 1. Request-level integrity gates: series, holdout, publication lock, symbol directory.
         if request.series not in SUPPORTED_SERIES:
@@ -152,7 +221,7 @@ class HistoricalDataAdapter:
         symbol_dir = self.raw_root / request.symbol
         if symbol_dir.is_symlink() or not symbol_dir.is_dir():
             fail("SYMBOL_NOT_FOUND", f"no published directory for {request.symbol}")
-        if failures:
+        if any(f.failure_class == FailureClass.INTEGRITY for f in failures):
             return decide()
         assert holdout is not None
         evidence.append(EligibilityEvidence("holdout_isolation", "VERIFIED",
@@ -226,7 +295,7 @@ class HistoricalDataAdapter:
                 else:
                     warnings.append(f"{bar.date}: identical observation in overlapping segments")
         bars.extend(observed[day] for day in sorted(observed) if start <= day <= end)
-        if not bars and not failures:
+        if not bars and not any(f.failure_class == FailureClass.INTEGRITY for f in failures):
             fail("NO_OBSERVATIONS", "no accepted observations inside the requested range")
         cursor, last = date.fromisoformat(start), date.fromisoformat(end)
         for seg_start, seg_end in sorted(covered):
@@ -293,17 +362,21 @@ class HistoricalDataAdapter:
                                                     aliases.manifest.sha256))
 
         # 7. Provider price basis: M3.9-B adjusts only RAW_UNADJUSTED series. Applying it to a
-        # provider series that is already (partly) back-adjusted would double-adjust.
-        raw_basis = self.evidence.provider_price_basis == "RAW_UNADJUSTED"
+        # provider series that is already (partly) back-adjusted would double-adjust. The basis
+        # must come from a reviewed registration covering this symbol and range.
         if raw_basis:
-            evidence.append(EligibilityEvidence("provider_price_basis", "VERIFIED", "RAW_UNADJUSTED"))
+            evidence.append(EligibilityEvidence("provider_price_basis", "VERIFIED",
+                                                f"RAW_UNADJUSTED registration {registration.registration_id}",
+                                                registration.source_sha256))
         else:
-            fail("PROVIDER_PRICE_BASIS_UNVERIFIED", "the provider series' corporate-action adjustment basis is "
-                 "not evidenced; Shoonya history is observed to mix adjusted and unadjusted actions")
+            fail("PROVIDER_PRICE_BASIS_UNVERIFIED", "no reviewed RAW_UNADJUSTED price-basis registration covers "
+                 "this symbol and range; Shoonya history is observed to mix adjusted and unadjusted actions")
             evidence.append(EligibilityEvidence("provider_price_basis", "MISSING",
                                                 "levels may be provider back-adjusted as of fetch time"))
 
-        # 8. Corporate actions: complete coverage and validated share events for every split/bonus.
+        # 8. Corporate actions: complete coverage, then field-by-field reconciliation of every in-range
+        # M2.1 catalog action with M3.9-B events. Only reconciled split/bonus events on a verified raw
+        # basis are applied; contradictions, ambiguity and unmatched events are rejected.
         catalogs = self.evidence.corporate_actions
         catalog = next((c for c in catalogs.catalogs if c.symbol == request.symbol), None) if catalogs else None
         first_bar = bars[0].date
@@ -311,41 +384,107 @@ class HistoricalDataAdapter:
             fail("CORPORATE_ACTION_COVERAGE_MISSING", "no complete corporate-action catalog covers the range")
             evidence.append(EligibilityEvidence("corporate_actions", "MISSING",
                                                 "no adjustment is applied; corporate actions are UNKNOWN"))
-        elif not raw_basis:
-            evidence.append(EligibilityEvidence("corporate_actions", "MISSING",
-                                                "catalog present but not applied to an unverified price basis",
-                                                catalogs.manifest.sha256 if catalogs else None))
         else:
-            unresolved = 0
             supplied = [e for e in (*self.evidence.adjustment_events, *adjustment_events)
                         if e.symbol == request.symbol and e.validation_state == ValidationState.VALIDATED
-                        and e.source.licence_status == LicenceStatus.APPROVED_FOR_DERIVATION]
-            for action in catalog.actions:
-                if not first_bar < action.effective_date <= end:
-                    continue
+                        and e.source.licence_status == LicenceStatus.APPROVED_FOR_DERIVATION
+                        and e.ex_date is not None and first_bar < e.ex_date <= end]
+            in_range = [a for a in catalog.actions if first_bar < a.effective_date <= end]
+            keys: dict[tuple[str, str], int] = {}
+            for action in in_range:
                 kind = action.action_type.upper()
-                if kind in _PRICE_RETURN_EXCLUDED:
+                normalized = (EventType.CASH_DIVIDEND.value if kind in _PRICE_RETURN_EXCLUDED else
+                              _SHARE_EVENTS[kind].value if kind in _SHARE_EVENTS else kind)
+                keys[(normalized, action.effective_date)] = keys.get((normalized, action.effective_date), 0) + 1
+            matched_ids: set[str] = set()
+            unresolved = 0
+            for action in in_range:
+                kind = action.action_type.upper()
+                outcome: dict[str, Any] = {"action_type": action.action_type, "effective_date": action.effective_date,
+                                           "adjustment_status": action.adjustment_status,
+                                           "details": dict(sorted(action.details.items()))}
+                reconciliation.append(outcome)
+                if kind not in _SHARE_EVENTS and kind not in _PRICE_RETURN_EXCLUDED:
+                    fail("CORPORATE_ACTION_UNSUPPORTED", f"{action.effective_date}: {kind} has no supported treatment")
+                    outcome["outcome"] = "UNSUPPORTED"
+                    continue
+                family = "share" if kind in _SHARE_EVENTS else "dividend"
+                target = _SHARE_EVENTS[kind] if family == "share" else EventType.CASH_DIVIDEND
+                outcome["normalized_type"] = target.value
+                if keys[(target.value, action.effective_date)] > 1:
+                    fail("CORPORATE_ACTION_AMBIGUOUS", f"{action.effective_date}: catalog lists {target.value} "
+                         "more than once")
+                    outcome["outcome"] = "AMBIGUOUS_CATALOG"
+                    continue
+                status = action.adjustment_status
+                if status in {"UNKNOWN", "POLICY_REQUIRED"}:
+                    fail("CORPORATE_ACTION_STATUS_UNRESOLVED", f"{action.effective_date}: {kind} adjustment status "
+                         f"is {status}")
+                    outcome["outcome"] = "STATUS_UNRESOLVED"
+                elif raw_basis and status not in _RAW_CONSISTENT[family]:
+                    fail("CORPORATE_ACTION_CONTRADICTION", f"{action.effective_date}: {kind} is {status} but the "
+                         "registered provider basis is RAW_UNADJUSTED")
+                    outcome["outcome"] = "STATUS_CONTRADICTS_BASIS"
+                match = [e for e in supplied if e.event_type == target and e.ex_date == action.effective_date]
+                matched_ids.update(e.event_id for e in match)
+                if len(match) > 1:
+                    fail("CORPORATE_ACTION_AMBIGUOUS", f"{action.effective_date}: {len(match)} validated "
+                         f"{target.value} events match one catalog action")
+                    outcome.setdefault("outcome", "AMBIGUOUS_EVENTS")
+                    continue
+                if not match:
+                    if family == "share":
+                        unresolved += 1
+                        outcome.setdefault("outcome", "EVENT_UNRESOLVED")
+                    else:
+                        outcome.setdefault("outcome", "EXCLUDED_PRICE_RETURN_NO_EVENT")
+                        warnings.append(f"{action.effective_date}: cash dividend excluded (price-return convention)")
+                    continue
+                event = match[0]
+                outcome["matched_event_id"] = event.event_id
+                problems = _reconcile_details(family, action.details, event)
+                for code, message in problems:
+                    fail(code, f"{action.effective_date}: {message}")
+                if problems:
+                    outcome.setdefault("outcome", "DETAILS_CONTRADICTION")
+                    continue
+                if "outcome" in outcome:
+                    continue
+                if family == "dividend":
+                    outcome["outcome"] = "EXCLUDED_PRICE_RETURN"
                     warnings.append(f"{action.effective_date}: cash dividend excluded (price-return convention)")
                     continue
-                if kind not in _SHARE_EVENTS:
-                    fail("CORPORATE_ACTION_UNSUPPORTED", f"{action.effective_date}: {kind} has no supported treatment")
+                if not raw_basis:
+                    outcome["outcome"] = "RECONCILED_NOT_APPLIED_UNVERIFIED_BASIS"
                     continue
-                match = [e for e in supplied if e.event_type == _SHARE_EVENTS[kind] and e.ex_date == action.effective_date]
-                if len(match) != 1:
-                    unresolved += 1
-                    continue
-                factor = _share_factor(match[0])
-                used_events.append(match[0])
-                share_events.append({"ex_date": action.effective_date, "event_id": match[0].event_id,
-                                     "event_type": match[0].event_type.value,
+                factor = _share_factor(event)
+                used_events.append(event)
+                share_events.append({"ex_date": action.effective_date, "event_id": event.event_id,
+                                     "event_type": event.event_type.value,
                                      "price_factor": f"{factor.numerator}/{factor.denominator}",
-                                     "knowledge_available_at": match[0].source.available_at})
+                                     "knowledge_available_at": event.source.available_at})
+                outcome["outcome"] = "APPLIED"
+            for event in supplied:
+                if event.event_id not in matched_ids:
+                    fail("CORPORATE_ACTION_EVENT_UNMATCHED", f"{event.ex_date}: validated {event.event_type.value} "
+                         f"event {event.event_id} has no matching catalog action")
+                    reconciliation.append({"event_id": event.event_id, "event_type": event.event_type.value,
+                                           "ex_date": event.ex_date, "outcome": "EVENT_UNMATCHED"})
             if unresolved:
                 fail("CORPORATE_ACTION_EVENT_UNRESOLVED",
                      f"{unresolved} split/bonus action(s) lack exactly one validated, licensed M3.9-B event")
+            ca_failures = [f for f in failures if f.code.startswith("CORPORATE_ACTION")]
+            if ca_failures:
+                evidence.append(EligibilityEvidence("corporate_actions", "MISSING",
+                                                    f"{len(ca_failures)} unreconciled corporate-action finding(s)",
+                                                    catalogs.manifest.sha256 if catalogs else None))
+            elif not raw_basis:
+                evidence.append(EligibilityEvidence("corporate_actions", "MISSING",
+                                                    "catalog reconciled but not applied to an unverified price basis",
+                                                    catalogs.manifest.sha256 if catalogs else None))
             else:
                 evidence.append(EligibilityEvidence("corporate_actions", "VERIFIED",
-                                                    f"{len(share_events)} validated share event(s) in range",
+                                                    f"{len(share_events)} reconciled share event(s) in range",
                                                     catalogs.manifest.sha256 if catalogs else None))
 
         # Discontinuities are flagged, never attributed or repaired.
@@ -358,4 +497,39 @@ class HistoricalDataAdapter:
                             f"{[f['current_date'] for f in unexplained[:5]]}; cause UNKNOWN")
         if any(f.failure_class == FailureClass.INTEGRITY for f in failures):
             bars.clear()
+            share_events.clear()
+            used_events.clear()
         return decide()
+
+    def assess_universe(
+        self,
+        universe: UniverseRequest,
+        adjustment_events: Sequence[CorporateActionEvent] = (),
+    ) -> UniverseAssessment:
+        """Assess every requested member; never substitute a surviving subset.
+
+        ``STRICT_RESEARCH`` releases data only if every member is ``ELIGIBLE``. A
+        ``DIAGNOSTIC_ONLY`` universe releases a usable subset only when the request
+        set ``diagnostic_subset``; excluded members are recorded with reasons.
+        """
+        if not isinstance(universe, UniverseRequest):
+            raise TypeError("assess_universe requires a UniverseRequest")
+        pairs = [self.assess(request, adjustment_events) for request in universe.member_requests()]
+        decisions = tuple(decision for decision, _ in pairs)
+        usable = tuple(dataset for _, dataset in pairs if dataset is not None)
+        strict = universe.mode == EligibilityMode.STRICT_RESEARCH
+        excluded = tuple({"symbol": d.request.symbol, "status": d.status.value, "failures": [f.code for f in d.failures]}
+                         for d in decisions if (d.status != DecisionStatus.ELIGIBLE if strict else not d.usable))
+        if strict:
+            if not excluded:
+                status, released = DecisionStatus.ELIGIBLE, usable
+            else:
+                rejected = any(d.status == DecisionStatus.REJECTED for d in decisions)
+                status, released = (DecisionStatus.REJECTED if rejected else DecisionStatus.BLOCKED), ()
+        elif not excluded or (universe.diagnostic_subset and usable):
+            status, released = DecisionStatus.DIAGNOSTIC_ALLOWED, usable
+        else:
+            status, released = DecisionStatus.REJECTED, ()
+        assessment = UniverseAssessment(universe, decisions, status, released, excluded)
+        object.__setattr__(assessment, "issuance_seal", _seal("universe", assessment.assessment_id))
+        return assessment

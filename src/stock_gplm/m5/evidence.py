@@ -9,7 +9,15 @@ Every loader reuses an existing project contract instead of defining a new one:
 * listing history, symbol mappings, corporate-action coverage: the M2.1
   manifest-verified importers in :mod:`stock_gplm.m2.reference_data`;
 * current identity: the M2.2-accepted Shoonya master;
-* ETF exclusion: the M3.7 heuristic contract, which is labelled heuristic evidence.
+* ETF exclusion: the M3.7 heuristic contract, which is labelled heuristic evidence;
+* provider price basis (M5.1): a reviewed ``stock-gplm.m51-provider-price-basis.v1``
+  registration; without one the basis stays unverified;
+* M3.9-B share events (M5.1): a ``stock-gplm.m51-adjustment-events.v1`` file of
+  ``CorporateActionEvent`` records.
+
+:func:`load_reference_evidence` seals the loaded evidence (see :mod:`.issuance`).
+Evidence assembled or edited by a caller is never sealed, so it can support
+diagnostic research but never ``STRICT_RESEARCH`` eligibility.
 
 Nothing here downloads, writes or repairs anything.
 """
@@ -18,8 +26,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from datetime import date, timedelta
+from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -33,8 +43,9 @@ from stock_gplm.m2.reference_data import (
     import_historical_symbol_mappings_v1,
     import_listing_history_v1,
 )
-from stock_gplm.m39b import CorporateActionEvent
+from stock_gplm.m39b import CorporateActionEvent, SourceEvidence
 
+from .issuance import _seal, verify_seal
 from .models import canonical_hash
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -43,6 +54,9 @@ CALENDAR_MANIFEST_CONTRACT = "stock-gplm.m25r-calendar-registration-manifest.v1"
 M32_CONTRACT = "stock-gplm.m32-research-run.v1"
 ETF_HEURISTIC_CONTRACT = "stock-gplm.m37-etf-symbol-heuristic.v1"
 EVIDENCE_PATHS_CONTRACT = "stock-gplm.m5-evidence-paths.v1"
+PRICE_BASIS_CONTRACT = "stock-gplm.m51-provider-price-basis.v1"
+ADJUSTMENT_EVENTS_CONTRACT = "stock-gplm.m51-adjustment-events.v1"
+PRICE_BASES = frozenset({"RAW_UNADJUSTED", "PROVIDER_BACK_ADJUSTED", "MIXED"})
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _CLOCK = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _MANIFEST_FIELDS = frozenset({
@@ -189,6 +203,90 @@ def load_etf_heuristic(path: Path) -> EtfHeuristic:
 
 
 @dataclass(frozen=True)
+class PriceBasisRegistration:
+    """A reviewed statement of one provider's price basis for named symbols and dates.
+
+    Only ``RAW_UNADJUSTED`` lets M3.9-B share events be applied. The registration
+    is a person's reviewed evidence, hash-bound like the calendar registration;
+    the adapter never infers a basis from the candles themselves.
+    """
+
+    registration_id: str
+    provider: str
+    basis: str
+    symbols: frozenset[str]
+    effective_start: str
+    effective_end: str
+    source_sha256: str
+
+    def covers(self, symbol: str, start: str, end: str) -> bool:
+        return symbol in self.symbols and self.effective_start <= start and end <= self.effective_end
+
+
+_PRICE_BASIS_FIELDS = frozenset({
+    "contract", "schema_version", "registration_id", "provider", "exchange", "basis", "symbols",
+    "effective_start", "effective_end", "source_reference", "document_sha256", "acquisition_method",
+    "reviewed_at_utc", "review_note",
+})
+
+
+def load_price_basis_registration(path: Path) -> PriceBasisRegistration:
+    value, digest = read_json(path)
+    if not isinstance(value, dict) or set(value) != _PRICE_BASIS_FIELDS:
+        raise ValueError("price-basis registration has missing or unsupported fields")
+    if value["contract"] != PRICE_BASIS_CONTRACT or value["schema_version"] != 1:
+        raise ValueError("unsupported price-basis registration contract")
+    if value["provider"] != "shoonya" or value["exchange"] != "NSE":
+        raise ValueError("price-basis registration must name the shoonya NSE provider series")
+    if value["basis"] not in PRICE_BASES:
+        raise ValueError(f"price basis must be one of {sorted(PRICE_BASES)}")
+    if value["acquisition_method"] != "MANUAL_REVIEW":
+        raise ValueError("price-basis evidence must come from a manual review")
+    if not isinstance(value["document_sha256"], str) or not _HEX.fullmatch(value["document_sha256"]):
+        raise ValueError("price-basis document_sha256 must be lowercase SHA-256")
+    symbols = value["symbols"]
+    if not isinstance(symbols, list) or not symbols or not all(isinstance(s, str) for s in symbols) or len(
+            set(symbols)) != len(symbols):
+        raise ValueError("price-basis symbols must be a non-empty list of unique strings")
+    start = date.fromisoformat(value["effective_start"]).isoformat()
+    end = date.fromisoformat(value["effective_end"]).isoformat()
+    if start > end:
+        raise ValueError("price-basis effective_start is after effective_end")
+    binding = {key: value[key] for key in sorted(_PRICE_BASIS_FIELDS - {"registration_id"})}
+    if value["registration_id"] != canonical_hash(binding):
+        raise ValueError("price-basis registration identifier does not match its content")
+    return PriceBasisRegistration(value["registration_id"], value["provider"], value["basis"], frozenset(symbols),
+                                  start, end, digest)
+
+
+_EVENT_FIELDS = frozenset({
+    "event_id", "symbol", "event_type", "ex_date", "event_date", "record_date", "announcement_date", "source",
+    "validation_state", "validation_reason", "new_shares", "base_shares", "cash_amount_inr",
+    "reference_price_inr", "subscription_price_inr", "stated_price_factor",
+})
+
+
+def load_adjustment_events(path: Path) -> tuple[tuple[CorporateActionEvent, ...], str]:
+    """Read M3.9-B events in their own ``to_dict`` shape; M3.9-B validates each one."""
+    value, digest = read_json(path)
+    if not isinstance(value, dict) or set(value) != {"contract", "schema_version", "events"}:
+        raise ValueError("adjustment-events file has missing or unsupported fields")
+    if value["contract"] != ADJUSTMENT_EVENTS_CONTRACT or value["schema_version"] != 1:
+        raise ValueError("unsupported adjustment-events contract")
+    if not isinstance(value["events"], list):
+        raise ValueError("adjustment events must be a list")
+    events: list[CorporateActionEvent] = []
+    for index, item in enumerate(value["events"]):
+        if not isinstance(item, dict) or set(item) != _EVENT_FIELDS or not isinstance(item["source"], dict):
+            raise ValueError(f"adjustment event {index} has missing or unsupported fields")
+        events.append(CorporateActionEvent(**(item | {"source": SourceEvidence(**item["source"])})))
+    ids = [event.event_id for event in events]
+    if len(ids) != len(set(ids)):
+        raise ValueError("adjustment event identifiers must be unique")
+    return tuple(events), digest
+
+
+@dataclass(frozen=True)
 class ReferenceEvidence:
     """Every evidence source available to the adapter; ``None`` means not supplied."""
 
@@ -205,6 +303,37 @@ class ReferenceEvidence:
     # yet, so it stays None (unverified) for real data. Shoonya history mixes
     # back-adjusted and unadjusted corporate actions (see docs/m5-eligibility-audit.md).
     provider_price_basis: str | None = None
+    price_basis_registration: PriceBasisRegistration | None = None
+    issuance_seal: str = field(default="", compare=False, repr=False)
+
+
+def _canonical(value: Any) -> Any:
+    """Portable JSON form of evidence objects for content hashing."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _canonical(getattr(value, f.name)) for f in fields(value) if f.name != "issuance_seal"}
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, re.Pattern):
+        return value.pattern
+    if isinstance(value, (set, frozenset)):
+        return sorted(_canonical(item) for item in value)
+    if isinstance(value, dict):
+        return {str(key): _canonical(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical(item) for item in value]
+    return value
+
+
+def evidence_digest(evidence: ReferenceEvidence) -> str:
+    """SHA-256 over every evidence field the adapter can read."""
+    return canonical_hash(_canonical(evidence))
+
+
+def evidence_issued(evidence: ReferenceEvidence) -> bool:
+    """True only for evidence loaded from files by this process and unchanged since."""
+    return verify_seal("evidence", evidence_digest(evidence), evidence.issuance_seal)
 
 
 def _pair(paths: dict[str, Any], key: str, base: Path) -> tuple[Path, Path] | None:
@@ -220,7 +349,8 @@ def load_reference_evidence(config_path: Path) -> ReferenceEvidence:
     """Load a ``stock-gplm.m5-evidence-paths.v1`` file; relative paths resolve from its directory."""
     paths, _ = read_json(config_path, 64 * 1024)
     allowed = {"contract", "m32_run", "etf_heuristic", "calendar_registration", "listing_history",
-               "symbol_mappings", "corporate_actions", "instrument_master"}
+               "symbol_mappings", "corporate_actions", "instrument_master", "provider_price_basis",
+               "adjustment_events"}
     if not isinstance(paths, dict) or paths.get("contract") != EVIDENCE_PATHS_CONTRACT or set(paths) - allowed:
         raise ValueError("unsupported M5 evidence-paths document")
     base = Path(config_path).resolve().parent
@@ -247,6 +377,14 @@ def load_reference_evidence(config_path: Path) -> ReferenceEvidence:
         hashes["instrument_master"] = file_sha256(master)
     if holdout is not None:
         hashes["m32_split_plan"] = holdout.split_plan_sha256
-    return ReferenceEvidence(holdout, etf, calendar, imported.get("listing_history"),
-                             imported.get("symbol_mappings"), imported.get("corporate_actions"),
-                             (), tokens, hashes)
+    basis = None
+    if paths.get("provider_price_basis"):
+        basis = load_price_basis_registration(base / paths["provider_price_basis"])
+        hashes["provider_price_basis"] = basis.source_sha256
+    events: tuple[CorporateActionEvent, ...] = ()
+    if paths.get("adjustment_events"):
+        events, hashes["adjustment_events"] = load_adjustment_events(base / paths["adjustment_events"])
+    evidence = ReferenceEvidence(holdout, etf, calendar, imported.get("listing_history"),
+                                 imported.get("symbol_mappings"), imported.get("corporate_actions"),
+                                 events, tokens, hashes, basis.basis if basis else None, basis)
+    return replace(evidence, issuance_seal=_seal("evidence", evidence_digest(evidence)))

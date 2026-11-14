@@ -13,8 +13,9 @@ from stock_gplm.v1.schema import validate_strategy
 from .adapter import HistoricalDataAdapter
 from .discovery import discover
 from .evidence import load_etf_heuristic, load_reference_evidence, read_json
-from .models import DataEligibilityRequest
-from .runner import BacktestSettings, compare_runs, run_historical_backtest
+from .models import DataEligibilityRequest, UniverseRequest, universe_problems
+from .run_store import RunIntegrityError, compare_runs, load_run, make_replayer
+from .runner import BacktestSettings, run_historical_backtest
 
 DEFAULT_RAW_ROOT = Path("data/raw/shoonya/NSE")
 
@@ -68,9 +69,16 @@ def main(argv: list[str] | None = None) -> int:
     backtest.add_argument("--version", type=int)
     backtest.add_argument("--output-root", type=Path, required=True)
     backtest.add_argument("--decisions-output", type=Path, help="write every eligibility decision here")
+    backtest.add_argument("--diagnostic-subset", action="store_true",
+                          help="DIAGNOSTIC_ONLY: explicitly analyse the usable members and record the excluded ones")
 
-    compare = commands.add_parser("compare")
+    compare = commands.add_parser("compare", help="compare verified runs; ranking needs --evidence and --registry")
     compare.add_argument("runs", nargs="+", type=Path)
+    compare.add_argument("--evidence", type=Path, help="replay-verify runs against this evidence-paths file")
+    compare.add_argument("--registry", type=Path, help="strategy registry used to replay-verify runs")
+    export = commands.add_parser("export", help="write the verified report of one run to a new file")
+    export.add_argument("run", type=Path)
+    export.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
     if args.command == "discover":
@@ -79,7 +87,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({k: v for k, v in report.items() if k != "per_symbol"}, indent=2))
         return 0
     if args.command == "compare":
-        print(json.dumps(compare_runs(args.runs), indent=2, allow_nan=False))
+        replay = None
+        if (args.evidence is None) != (args.registry is None):
+            parser.error("--evidence and --registry are required together")
+        if args.evidence is not None:
+            replay = make_replayer(HistoricalDataAdapter(args.raw_root, load_reference_evidence(args.evidence)),
+                                   StrategyRegistry(args.registry))
+        try:
+            print(json.dumps(compare_runs(args.runs, replay=replay), indent=2, allow_nan=False))
+        except RunIntegrityError as exc:
+            print(json.dumps({"status": "INTEGRITY_FAILED", "error": str(exc)}, indent=2))
+            return 3
+        return 0
+    if args.command == "export":
+        try:
+            verified = load_run(args.run)
+        except RunIntegrityError as exc:
+            print(json.dumps({"status": "INTEGRITY_FAILED", "error": str(exc)}, indent=2))
+            return 3
+        _write_new(args.output, {"run_id": verified.run_id, "verification": verified.verification,
+                                 "markdown": verified.markdown}, args.raw_root)
+        print(json.dumps(verified.summary(), indent=2))
         return 0
     adapter = HistoricalDataAdapter(args.raw_root, load_reference_evidence(args.evidence))
     if args.command == "assess":
@@ -92,23 +120,25 @@ def main(argv: list[str] | None = None) -> int:
     if args.strategy_id and args.version is None:
         parser.error("--strategy-id requires --version")
     settings = BacktestSettings.from_dict(read_json(args.settings, 64 * 1024)[0])
-    decisions, datasets = [], []
-    for symbol in sorted(set(args.symbols)):
-        decision, dataset = adapter.assess(DataEligibilityRequest(symbol, args.start, args.end, args.mode))
-        decisions.append(decision.to_dict())
-        if dataset is not None:
-            datasets.append(dataset)
-    if args.decisions_output:
-        _write_new(args.decisions_output, decisions, args.raw_root)
-    summary = {d["request"]["symbol"]: d["status"] for d in decisions}
-    if not datasets:
-        print(json.dumps({"status": "BLOCKED", "decisions": summary}, indent=2))
+    problems = universe_problems(args.symbols)
+    if problems:
+        print(json.dumps({"status": "INVALID_UNIVERSE", "problems": problems}, indent=2))
         return 2
-    run = run_historical_backtest(_strategy(args), datasets, settings, args.output_root,
+    assessment = adapter.assess_universe(UniverseRequest(tuple(args.symbols), args.start, args.end, args.mode,
+                                                         args.diagnostic_subset))
+    summary = assessment.to_dict()
+    if args.decisions_output:
+        _write_new(args.decisions_output, [d.to_dict() for d in assessment.decisions], args.raw_root)
+    decisions = {member["symbol"]: member["status"] for member in summary["members"]}
+    if not assessment.released:
+        print(json.dumps({"status": summary["status"], "decisions": decisions, "excluded": summary["excluded"]},
+                         indent=2))
+        return 2
+    run = run_historical_backtest(_strategy(args), assessment, settings, args.output_root,
                                   forbidden_roots=(args.raw_root.resolve().parent.parent,))
-    print(json.dumps({"run_id": run["run_id"], "classification": run["classification"], "decisions": summary,
-                      "metrics": run["performance"]["metrics"], "benchmark": run["benchmark"]}, indent=2,
-                     allow_nan=False))
+    print(json.dumps({"run_id": run["run_id"], "classification": run["classification"], "decisions": decisions,
+                      "excluded": summary["excluded"], "metrics": run["performance"]["metrics"],
+                      "benchmark": run["benchmark"]}, indent=2, allow_nan=False))
     return 0
 
 

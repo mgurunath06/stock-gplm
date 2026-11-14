@@ -1,11 +1,18 @@
 """Dependency-free local Strategy Studio and JSON API.
 
-The server binds to loopback by default. It has no broker client, credential
-support, remote data loader, or order-routing endpoint.
+The server binds only to IPv4 loopback, and :func:`make_server` enforces that for
+programmatic callers as well as the CLI. Each connection must come from a loopback
+peer. Each request must also carry a loopback ``Host``. An ``Origin``, when
+present, must be the Studio's own. A request with no ``Origin`` is accepted only
+from a loopback peer whose ``Sec-Fetch-Site`` (if sent) is ``same-origin`` or
+``none``. A missing ``Origin`` is never treated as proof of a trusted peer. The
+Studio has no broker client, credential support, remote data loader or
+order-routing endpoint.
 """
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import sqlite3
 from dataclasses import asdict
@@ -21,6 +28,25 @@ from .registry import StrategyRegistry
 from .schema import StrategyValidationError, validate_strategy
 
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+# The only accepted bind names, each mapped to the literal address actually bound.
+LOOPBACK_BIND = {"127.0.0.1": "127.0.0.1", "localhost": "127.0.0.1"}
+
+
+def is_loopback_address(address: object) -> bool:
+    """True only for a literal loopback IP (IPv4-mapped IPv6 included); names are never resolved."""
+    try:
+        ip = ipaddress.ip_address(str(address).split("%", 1)[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    return (mapped or ip).is_loopback
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    """Threading server that refuses any connection whose peer address is not loopback."""
+
+    def verify_request(self, request: Any, client_address: Any) -> bool:  # noqa: D401
+        return is_loopback_address(client_address[0] if client_address else None)
 
 _HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -73,7 +99,7 @@ pre{white-space:pre-wrap;max-height:420px;overflow:auto;background:#101828;color
 <p>Eligibility is decided on the server by the M5 adapter from manifest-verified local files. This page only displays its decisions.
 <code>DIAGNOSTIC_ONLY</code> runs are non-investable and cannot be ranked, promoted or paper traded.</p>
 <div class="row"><label>Mode<select id="hmode"><option>STRICT_RESEARCH</option><option>DIAGNOSTIC_ONLY</option></select></label>
-<label>Symbols (comma separated, at most 25)<input id="hsymbols" placeholder="RELIANCE-EQ,TCS-EQ"></label></div>
+<label>Symbols (comma separated, at most 25; the whole list must pass)<input id="hsymbols" placeholder="RELIANCE-EQ,TCS-EQ"></label></div>
 <div class="row"><label>Data start<input id="hstart" type="date"></label><label>Data end<input id="hend" type="date"></label>
 <label>Evaluation start<input id="hestart" type="date"></label><label>Evaluation end<input id="heend" type="date"></label></div>
 <div class="row"><label>Initial capital (INR)<input id="hcapital" type="number" value="1000000"></label>
@@ -117,7 +143,7 @@ function addRule(){try{if(!working)throw new Error('Load a validated document fi
 function removeRule(i){if(!working.entry.conditions)throw new Error('Entry root is not a rule group');working.entry.conditions.splice(i,1);syncDocument();out('Entry rule removed. At least one rule is required.')}
 const hout=x=>byId('hresult').textContent=typeof x==='string'?x:JSON.stringify(x,null,2);
 const post=(path,body)=>api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
-const hsymbols=()=>byId('hsymbols').value.split(',').map(x=>x.trim()).filter(Boolean);
+const hsymbols=()=>byId('hsymbols').value.split(',').map(x=>x.trim());
 async function hDatasets(){try{hout(await api('/api/m5/datasets'))}catch(e){hout(e.message)}}
 async function hEligibility(){try{let rows=[];for(let s of hsymbols())rows.push(await post('/api/m5/eligibility',{symbol:s,start:byId('hstart').value,end:byId('hend').value,mode:byId('hmode').value}));hout(rows.map(d=>({symbol:d.request.symbol,status:d.status,investable:d.investable,failures:d.failures,evidence:d.evidence,warnings:d.warnings})))}catch(e){hout(e.message)}}
 function hSettings(){return {contract:'stock-gplm.m5-backtest-settings.v1',evaluation_start:byId('hestart').value,evaluation_end:byId('heend').value,initial_capital:Number(byId('hcapital').value),max_open_positions:Number(byId('hmaxpos').value),max_position_fraction:Number(byId('hposfrac').value),max_gross_exposure:Number(byId('hexposure').value),buy_statutory_bps:Number(byId('hbuy').value),sell_statutory_bps:Number(byId('hsell').value),cost_basis:byId('hbasis').value}}
@@ -139,13 +165,21 @@ class StudioHandler(BaseHTTPRequestHandler):
         return self.research
 
     def _trusted_origin(self) -> bool:
-        """Reject DNS-rebinding and cross-site requests to the loopback API."""
+        """Reject remote peers, DNS rebinding and cross-site requests to the loopback API.
+
+        The peer address is checked first; ``Host`` and ``Origin`` are defence in depth
+        and are never sufficient on their own because a client can set them freely.
+        """
+        if not is_loopback_address(self.client_address[0] if self.client_address else None):
+            return False
         port = self.server.server_address[1]
         allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
         if self.headers.get("Host") not in allowed:
             return False
         origin = self.headers.get("Origin")
-        return origin is None or origin in {f"http://{host}" for host in allowed}
+        if origin is not None:
+            return origin in {f"http://{host}" for host in allowed}
+        return self.headers.get("Sec-Fetch-Site") in {None, "same-origin", "none"}
 
     def _json(self, status: int, value: Any) -> None:
         payload = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -272,8 +306,12 @@ class StudioHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
-          m5_evidence: Path | None = None, raw_root: Path | None = None, m5_reports: Path | None = None) -> None:
+def make_server(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
+                m5_evidence: Path | None = None, raw_root: Path | None = None,
+                m5_reports: Path | None = None) -> LoopbackHTTPServer:
+    """Build the Studio server; any non-loopback bind is refused before a socket is opened."""
+    if not isinstance(host, str) or host not in LOOPBACK_BIND:
+        raise ValueError(f"Strategy Studio binds only to {sorted(LOOPBACK_BIND)}; refused {host!r}")
     registry = StrategyRegistry(registry_path)
     research = None
     if m5_evidence is not None:
@@ -285,9 +323,23 @@ def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
             raise ValueError("--m5-evidence requires --raw-root and --m5-reports")
         research = HistoricalResearchService(raw_root, load_reference_evidence(m5_evidence), m5_reports, registry)
     handler = type("BoundStudioHandler", (StudioHandler,), {"registry": registry, "research": research})
-    server = ThreadingHTTPServer((host, port), handler)
-    print(f"Strategy Studio: http://{host}:{port} (local research only)")
-    server.serve_forever()
+    server = LoopbackHTTPServer((LOOPBACK_BIND[host], port), handler)
+    if not is_loopback_address(server.server_address[0]):
+        server.server_close()
+        raise ValueError(f"Strategy Studio bound to a non-loopback address {server.server_address[0]!r}")
+    return server
+
+
+def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
+          m5_evidence: Path | None = None, raw_root: Path | None = None, m5_reports: Path | None = None) -> None:
+    """Serve the Studio on loopback only (see :func:`make_server`)."""
+    server = make_server(registry_path, host, port, m5_evidence=m5_evidence, raw_root=raw_root,
+                         m5_reports=m5_reports)
+    print(f"Strategy Studio: http://{host}:{server.server_address[1]} (local research only)")
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
 
 
 def main() -> int:

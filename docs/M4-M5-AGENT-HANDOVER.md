@@ -1,5 +1,11 @@
 # M4/M5 agent handover — 2026-11-14
 
+> **Superseded in part by M5.1** (`feature/m51-integrity-hardening`, see
+> `docs/m51-integrity-hardening.md`). An independent audit of `a9d0c57` returned
+> NO-GO. Decisions 3, 9 and 10 below and the Studio notes are amended there:
+> issuance seals, all-or-nothing universes, the verified run loader with replay,
+> portable provenance, and programmatic loopback enforcement.
+
 This is for an independent reviewer (for example Codex) continuing or auditing
 the M4/M5 work. It depends only on this repository, git and the project `.venv`;
 no agent-specific session, memory or tooling is needed. Read `AGENTS.md` first:

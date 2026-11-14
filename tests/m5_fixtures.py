@@ -5,7 +5,7 @@ import gzip
 import hashlib
 import json
 import math
-from dataclasses import replace
+import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -122,11 +122,46 @@ def calendar_registration(start: date = date(2023, 12, 1), end: date = date(2024
     return {**binding, "registration_id": canonical_hash(binding)}
 
 
+def write_master(path: Path, symbols: tuple[str, ...]) -> Path:
+    """Synthetic M2.2-shaped Shoonya master (tokens 1000, 1001, ...); not the real master."""
+    rows = "".join(f"NSE,{1000 + i},1,{s.rsplit('-', 1)[0]},{s},EQ,0.05,\n" for i, s in enumerate(symbols))
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("NSE_symbols.txt", "Exchange,Token,LotSize,Symbol,TradingSymbol,Instrument,TickSize,\n" + rows)
+    return path
+
+
+def price_basis_registration(symbols: tuple[str, ...], basis: str = "RAW_UNADJUSTED",
+                             start: str = "2023-01-01", end: str = "2024-12-31") -> dict[str, Any]:
+    """Synthetic reviewed price-basis registration; real Shoonya data has none (basis stays unverified)."""
+    value = {"contract": "stock-gplm.m51-provider-price-basis.v1", "schema_version": 1, "provider": "shoonya",
+             "exchange": "NSE", "basis": basis, "symbols": list(symbols), "effective_start": start,
+             "effective_end": end, "source_reference": "synthetic://not-market-evidence",
+             "document_sha256": "c" * 64, "acquisition_method": "MANUAL_REVIEW",
+             "reviewed_at_utc": "2024-10-02T00:00:00Z", "review_note": "synthetic test fixture"}
+    return value | {"registration_id": canonical_hash(value)}
+
+
+def event_record(ex_date: str, available: str, *, kind: str = "STOCK_SPLIT", new: int | None = 2,
+                 base: int | None = 1, symbol: str = "ALPHA-EQ", event_id: str | None = None,
+                 **extra: Any) -> dict[str, Any]:
+    """One M3.9-B ``CorporateActionEvent.to_dict`` record for the adjustment-events file."""
+    record = {"event_id": event_id or f"{kind.lower()}-{ex_date}", "symbol": symbol, "event_type": kind,
+              "ex_date": ex_date, "event_date": None, "record_date": None, "announcement_date": None,
+              "source": {"source": "synthetic-fixture", "source_identifier": f"evt-{ex_date}",
+                         "licence_status": "APPROVED_FOR_DERIVATION", "available_at": available,
+                         "retrieved_at": "2024-10-02T00:00:00Z"},
+              "validation_state": "VALIDATED", "validation_reason": None, "new_shares": new, "base_shares": base,
+              "cash_amount_inr": None, "reference_price_inr": None, "subscription_price_inr": None,
+              "stated_price_factor": None}
+    return record | extra
+
+
 def build_world(tmp_path: Path, symbols: tuple[str, ...] = ("ALPHA-EQ", "BETA-EQ"), *,
                 listing: bool = True, calendar: bool = True, aliases: str | None = "COMPLETE",
                 corporate_actions: bool = True, ca_actions: list[dict] | None = None,
                 alias_records: list[dict] | None = None,
-                provider_basis: str | None = "RAW_UNADJUSTED") -> tuple[Path, ReferenceEvidence]:
+                provider_basis: str | None = "RAW_UNADJUSTED",
+                events: list[dict] | None = None) -> tuple[Path, ReferenceEvidence]:
     raw_root = tmp_path / "data" / "raw" / "shoonya" / "NSE"
     raw_root.mkdir(parents=True)
     for index, symbol in enumerate(symbols):
@@ -159,11 +194,17 @@ def build_world(tmp_path: Path, symbols: tuple[str, ...] = ("ALPHA-EQ", "BETA-EQ
         paths["corporate_actions"] = _manifest(evidence_dir, "ca", "stock-gplm.corporate-actions.v1", {"catalogs": [
             {"symbol": s, "coverage_status": "COMPLETE", "coverage_start": "2023-01-01", "coverage_end": "2024-12-31",
              "actions": (ca_actions or []) if s == symbols[0] else []} for s in symbols]})
+    paths["instrument_master"] = write_master(evidence_dir / "NSE_symbols.txt.zip", symbols).name
+    if provider_basis is not None:
+        (evidence_dir / "price-basis.json").write_text(json.dumps(price_basis_registration(symbols, provider_basis)))
+        paths["provider_price_basis"] = "price-basis.json"
+    if events is not None:
+        (evidence_dir / "events.json").write_text(json.dumps({
+            "contract": "stock-gplm.m51-adjustment-events.v1", "schema_version": 1, "events": events}))
+        paths["adjustment_events"] = "events.json"
     config = evidence_dir / "evidence-paths.json"
     config.write_text(json.dumps(paths))
-    evidence = load_reference_evidence(config)
-    return raw_root, replace(evidence, master_tokens={s: str(1000 + i) for i, s in enumerate(symbols)},
-                             provider_price_basis=provider_basis)
+    return raw_root, load_reference_evidence(config)
 
 
 def strategy_config(**overrides: Any) -> dict[str, Any]:

@@ -33,6 +33,7 @@
 - [M5 eligibility audit — 2026-11-14](m5-eligibility-audit.md)
 - [M5 real-data backtest report — 2026-11-14](m5-real-data-backtest-report.md)
 - [M5 acceptance report — 2026-11-14](m5-acceptance-report.md)
+- [M5.1 integrity hardening and audit remediation — 2026-11-14](m51-integrity-hardening.md)
 - [M4/M5 agent handover — 2026-11-14](M4-M5-AGENT-HANDOVER.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)

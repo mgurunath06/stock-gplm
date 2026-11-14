@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from m5_fixtures import (
     HOLDOUT,
+    event_record,
     ROOT,
     build_world,
     calendar_registration,
@@ -31,6 +32,7 @@ from stock_gplm.m5 import (
     run_historical_backtest,
 )
 from stock_gplm.m5.evidence import load_registered_calendar
+from stock_gplm.m5.run_store import make_replayer
 from stock_gplm.m5.runner import ANALYTICAL_FILES, instrument_signals
 from stock_gplm.v1.evaluator import evaluate_strategy
 from stock_gplm.v1.portfolio import CostModel, InstrumentSignals, PortfolioSettings, ShareEvent, simulate_portfolio
@@ -238,12 +240,13 @@ def _event(ex_date: str, available: str, *, kind: str = "STOCK_SPLIT", new: int 
 def test_corporate_actions_apply_only_from_their_known_effective_date(tmp_path: Path) -> None:
     action = [{"action_type": "SPLIT", "effective_date": "2024-05-02", "adjustment_status": "UNADJUSTED",
                "details": {"ratio": "2:1"}}]
-    raw, evidence = build_world(tmp_path, ca_actions=action)
+    raw, evidence = build_world(tmp_path / "none", ca_actions=action)
     assert "CORPORATE_ACTION_EVENT_UNRESOLVED" in codes(assess(raw, evidence)[0])
-    event = _event("2024-05-02", "2024-04-15T00:00:00Z")
-    decision, dataset = HistoricalDataAdapter(raw, evidence).assess(
-        DataEligibilityRequest("ALPHA-EQ", "2024-01-01", "2024-09-30", STRICT), adjustment_events=[event])
+    raw, evidence = build_world(tmp_path / "known", ca_actions=action,
+                                events=[event_record("2024-05-02", "2024-04-15T00:00:00Z")])
+    decision, dataset = assess(raw, evidence)
     assert decision.status == DecisionStatus.ELIGIBLE and dataset.share_events[0]["price_factor"] == "1/2"
+    assert decision.corporate_action_reconciliation[0]["outcome"] == "APPLIED"
     config = validate_strategy(strategy_config(entry={"operator": "GT", "left": {"field": "close"},
                                                       "right": {"constant": 100}}))
     raw_signals = evaluate_strategy(config, [b.evaluator_row() for b in dataset.bars])
@@ -252,9 +255,9 @@ def test_corporate_actions_apply_only_from_their_known_effective_date(tmp_path: 
     # A level rule before the ex-date sees raw prices, never prices halved by the later split.
     assert [adjusted.entry_signals[i] for i in before] == [raw_signals.entry_signals[i] for i in before]
     assert any(raw_signals.entry_signals[i] for i in before)
-    late = _event("2024-05-02", "2024-05-20T00:00:00Z")
-    _, delayed = HistoricalDataAdapter(raw, evidence).assess(
-        DataEligibilityRequest("ALPHA-EQ", "2024-01-01", "2024-09-30", STRICT), adjustment_events=[late])
+    raw, evidence = build_world(tmp_path / "late", ca_actions=action,
+                                events=[event_record("2024-05-02", "2024-05-20T00:00:00Z")])
+    _, delayed = assess(raw, evidence)
     unknown = [i for i, b in enumerate(delayed.bars) if "2024-05-02" <= b.date < "2024-05-20"]
     assert [instrument_signals(config, delayed).entry_signals[i] for i in unknown] == [
         raw_signals.entry_signals[i] for i in unknown]
@@ -358,7 +361,12 @@ def test_both_sample_strategies_share_one_generic_engine(tmp_path: Path) -> None
     assert {r["simulator_version"] for r in runs} == {"stock-gplm.v1-portfolio-simulator.v1"}
     assert {r["execution"]["policy"] for r in runs} == {"completed_close_signal_next_session_open_v2"}
     assert runs[0]["strategy_config_hash"] != runs[1]["strategy_config_hash"]
-    comparison = compare_runs([tmp_path / "out" / r["run_id"] for r in runs])
+    # Ranking needs replay verification against the adapter and registry (M5.1).
+    unverified = compare_runs([tmp_path / "out" / r["run_id"] for r in runs])
+    assert unverified["ranking_by_total_return"] is None
+    raw, evidence = world
+    comparison = compare_runs([tmp_path / "out" / r["run_id"] for r in runs], replay=make_replayer(
+        HistoricalDataAdapter(raw, evidence), StrategyRegistry(tmp_path / "registry.sqlite3")))
     assert comparison["comparable"] and comparison["ranking_by_total_return"] is not None
 
 
@@ -415,7 +423,10 @@ def test_run_provenance_points_to_exact_immutable_version(tmp_path: Path) -> Non
     run = _run(tmp_path, build_world(tmp_path), strategy_config())
     stored = StrategyRegistry(tmp_path / "registry.sqlite3").get(run["strategy_id"], run["strategy_version"])
     assert stored.config_hash == run["strategy_config_hash"] == validate_strategy(run["strategy_config_snapshot"]).config_hash
-    assert run["holdout_cutoff"] == HOLDOUT and not run["locked_holdout_accessed"]
+    assert run["holdout_cutoff"] == HOLDOUT and "locked_holdout_accessed" not in run
+    access = run["holdout_access"]
+    assert access["protected_rows_decoded_during_source_validation"] > 0  # decoded by validate_daily, withheld
+    assert access["protected_rows_released_to_execution"] == access["protected_rows_scored_or_trained"] == 0
     assert all(d["decision"]["status"] == "ELIGIBLE" for d in run["datasets"])
 
 

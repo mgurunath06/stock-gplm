@@ -2,6 +2,21 @@
 
 A metric that is not mathematically meaningful for the sample is reported as
 ``None`` with a reason in ``undefined``; it is never replaced by zero.
+
+Terminal valuation (M5.1, :data:`TERMINAL_VALUATION_POLICY`), applied identically
+to strategy and benchmark:
+
+* ``total_return`` is the estimated liquidation value at the final observed
+  close. Each outstanding unit is valued at ``close * (1 - slippage)`` less sell
+  commission and statutory charges on that notional. This is the same exit
+  convention as a realized sell.
+* ``total_return_marked_to_market`` values outstanding units at the close, with
+  no exit costs. The equity curve, drawdown and risk ratios stay on this basis.
+* Entry costs are paid once at entry. Closed trades already paid their exit
+  costs. Only positions still open are charged the estimated exit, so no cost is
+  counted twice.
+
+Rankings use ``total_return``, so strategy and benchmark compare like for like.
 """
 from __future__ import annotations
 
@@ -15,6 +30,12 @@ SESSIONS_PER_YEAR = 252
 MIN_SESSIONS_FOR_ANNUALIZATION = 252
 MIN_SESSIONS_FOR_RISK_RATIOS = 252
 MIN_TRADES_FOR_RISK_RATIOS = 30
+TERMINAL_VALUATION_POLICY = "LIQUIDATION_ESTIMATE_AT_FINAL_OBSERVED_CLOSE_V1"
+
+
+def liquidation_unit_value(close: float, costs: CostModel) -> float:
+    """Net proceeds per unit of selling at ``close``: slippage, then sell fees on the fill notional."""
+    return close * (1 - costs.slippage_rate) * (1 - costs.sell_fee_rate)
 
 
 def _drawdown(equity: Sequence[float]) -> float:
@@ -26,7 +47,7 @@ def _drawdown(equity: Sequence[float]) -> float:
     return worst
 
 
-def performance_metrics(result: SimulationResult, initial_capital: float) -> dict[str, Any]:
+def performance_metrics(result: SimulationResult, initial_capital: float, costs: CostModel) -> dict[str, Any]:
     """Return headline statistics plus reasons for every undefined metric."""
     trades = result.trades
     curve = result.equity_curve
@@ -36,7 +57,11 @@ def performance_metrics(result: SimulationResult, initial_capital: float) -> dic
     wins = [t for t in trades if t["net_pnl"] > 0]
     losses = [t for t in trades if t["net_pnl"] < 0]
     ending = equity[-1]
-    total_return = ending / initial_capital - 1.0
+    exit_costs = sum((float(p["quantity"]) * float(p["mark_price"])
+                      - float(p["quantity"]) * liquidation_unit_value(float(p["mark_price"]), costs)
+                      for p in result.open_positions), 0.0)
+    liquidation = ending - exit_costs
+    total_return = liquidation / initial_capital - 1.0
     sessions = len(curve)
 
     def maybe(name: str, condition: bool, reason: str, value: Any) -> Any:
@@ -65,10 +90,13 @@ def performance_metrics(result: SimulationResult, initial_capital: float) -> dic
         "net_pnl_realized": sum((float(t["net_pnl"]) for t in trades), 0.0),
         "unrealized_pnl": sum((float(p["unrealized_pnl"]) for p in result.open_positions), 0.0),
         "total_return": total_return,
+        "total_return_marked_to_market": ending / initial_capital - 1.0,
+        "terminal_exit_cost_estimate": exit_costs,
+        "liquidation_equity_estimate": liquidation,
         "annualized_return": maybe(
-            "annualized_return", sessions >= MIN_SESSIONS_FOR_ANNUALIZATION and ending > 0,
+            "annualized_return", sessions >= MIN_SESSIONS_FOR_ANNUALIZATION and liquidation > 0,
             f"requires at least {MIN_SESSIONS_FOR_ANNUALIZATION} sessions; observed {sessions}",
-            lambda: (ending / initial_capital) ** (SESSIONS_PER_YEAR / sessions) - 1.0),
+            lambda: (liquidation / initial_capital) ** (SESSIONS_PER_YEAR / sessions) - 1.0),
         "max_drawdown": _drawdown([initial_capital, *equity]),
         "average_trade_return": maybe("average_trade_return", bool(returns), "no closed trades",
                                       lambda: statistics.fmean(returns)),
@@ -93,7 +121,9 @@ def performance_metrics(result: SimulationResult, initial_capital: float) -> dic
     }
     return {"metrics": metrics, "undefined": undefined,
             "conventions": {"risk_free_rate": 0.0, "annualization_sessions": SESSIONS_PER_YEAR,
-                            "total_return_includes_unrealized_marks": True}}
+                            "terminal_valuation": TERMINAL_VALUATION_POLICY,
+                            "total_return_includes_estimated_exit_costs_of_open_positions": True,
+                            "equity_curve_basis": "MARKED_TO_MARKET_AT_CLOSE"}}
 
 
 def equal_weight_buy_and_hold(
@@ -103,9 +133,10 @@ def equal_weight_buy_and_hold(
     """Equal-weight buy-and-hold of the same instruments over the same sessions.
 
     Each instrument with a bar on the first evaluated session is bought at that
-    open (with slippage and buy fees) and marked at its last observed close in
-    range (with sell slippage and fees). Units may be fractional. This is a
-    same-universe reference, not a market index.
+    open (with slippage and buy fees) and valued at its last observed close in
+    range under :data:`TERMINAL_VALUATION_POLICY`, the same terminal convention as
+    the strategy. Units may be fractional. This is a same-universe reference, not
+    a market index.
     """
     axis = [d for d in sessions if start <= d <= end]
     first = axis[0]
@@ -114,17 +145,19 @@ def equal_weight_buy_and_hold(
         return {"name": "EQUAL_WEIGHT_BUY_AND_HOLD_SAME_UNIVERSE", "total_return": None,
                 "undefined_reason": "no instrument has a bar on the first evaluated session", "members": []}
     allocation = initial_capital / len(members)
-    ending = 0.0
+    ending = marked = 0.0
     for item in members:
         bars = [b for b in item.bars if first <= str(b["date"]) <= end]
         entry = float(bars[0]["open"]) * (1 + costs.slippage_rate) * (1 + costs.buy_fee_rate)
-        exit_value = float(bars[-1]["close"]) * (1 - costs.slippage_rate) * (1 - costs.sell_fee_rate)
         units = allocation / entry
         for event in item.share_events:  # validated splits/bonuses change the held units, not value
             if first < event.ex_date <= str(bars[-1]["date"]):
                 units /= event.price_factor
-        ending += units * exit_value
+        ending += units * liquidation_unit_value(float(bars[-1]["close"]), costs)
+        marked += units * float(bars[-1]["close"])
     return {"name": "EQUAL_WEIGHT_BUY_AND_HOLD_SAME_UNIVERSE", "total_return": ending / initial_capital - 1.0,
+            "total_return_marked_to_market": marked / initial_capital - 1.0,
+            "terminal_valuation": TERMINAL_VALUATION_POLICY,
             "members": [item.symbol for item in members], "start": first, "end": axis[-1],
             "corporate_action_basis": "DATASET_PRICE_BASIS_WITH_SUPPLIED_SHARE_EVENTS"}
 
