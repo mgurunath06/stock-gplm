@@ -304,13 +304,17 @@ class ReferenceEvidence:
     # back-adjusted and unadjusted corporate actions (see docs/m5-eligibility-audit.md).
     provider_price_basis: str | None = None
     price_basis_registration: PriceBasisRegistration | None = None
+    # M5.1.1 freshness: the evidence-paths file this was loaded from (outside the digest, so
+    # identities stay relocation-stable). Strict runs reload it before execution.
+    config_path: str | None = field(default=None, compare=False)
     issuance_seal: str = field(default="", compare=False, repr=False)
 
 
 def _canonical(value: Any) -> Any:
     """Portable JSON form of evidence objects for content hashing."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {f.name: _canonical(getattr(value, f.name)) for f in fields(value) if f.name != "issuance_seal"}
+        return {f.name: _canonical(getattr(value, f.name)) for f in fields(value)
+                if f.name not in {"issuance_seal", "config_path"}}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Decimal):
@@ -388,4 +392,5 @@ def load_reference_evidence(config_path: Path, *, _sign: Any = None) -> Referenc
     evidence = ReferenceEvidence(holdout, etf, calendar, imported.get("listing_history"),
                                  imported.get("symbol_mappings"), imported.get("corporate_actions"),
                                  events, tokens, hashes, basis.basis if basis else None, basis)
-    return replace(evidence, issuance_seal=_sign(evidence_digest(evidence)))
+    return replace(evidence, config_path=str(Path(config_path).resolve()),
+                   issuance_seal=_sign(evidence_digest(evidence)))

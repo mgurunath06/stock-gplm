@@ -163,6 +163,8 @@ class DataEligibilityDecision:
     share_events: tuple[dict[str, Any], ...] = ()
     corporate_action_reconciliation: tuple[dict[str, Any], ...] = ()
     issuance_seal: str = field(default="", compare=False, repr=False)
+    # M5.1.1: set by the adapter at issuance; re-hashes sources (see HistoricalDataAdapter.revalidate).
+    revalidator: Any = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "status", DecisionStatus(self.status))
@@ -186,6 +188,7 @@ class DataEligibilityDecision:
         value = asdict(self)
         value.pop("decision_id")
         value.pop("issuance_seal")
+        value.pop("revalidator")
         return _jsonable(value)
 
     def to_dict(self) -> dict[str, Any]:
@@ -216,6 +219,16 @@ class DataEligibilityDecision:
     @property
     def usable(self) -> bool:
         return self.status in {DecisionStatus.ELIGIBLE, DecisionStatus.DIAGNOSTIC_ALLOWED}
+
+    def revalidate(self) -> None:
+        """Fail closed unless the adapter's sources still hash to what this decision recorded."""
+        if self.revalidator is None:
+            raise StaleAssessmentError(f"{self.request.symbol}: decision carries no source revalidator")
+        self.revalidator(self)
+
+
+class StaleAssessmentError(ValueError):
+    """Sources changed, vanished or were replaced after the assessment was issued."""
 
 
 @dataclass(frozen=True)

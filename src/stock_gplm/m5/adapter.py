@@ -30,7 +30,14 @@ from stock_gplm.m39b import (
     split_factor,
 )
 
-from .evidence import ReferenceEvidence, evidence_digest, evidence_issued, read_json
+from .evidence import (
+    ReferenceEvidence,
+    evidence_digest,
+    evidence_issued,
+    file_sha256,
+    load_reference_evidence,
+    read_json,
+)
 from .issuance import _issues
 from .models import (
     ADAPTER_VERSION,
@@ -42,6 +49,7 @@ from .models import (
     EligibilityFailure,
     EligibilityMode,
     FailureClass,
+    StaleAssessmentError,
     UniverseAssessment,
     UniverseRequest,
     VerifiedHistoricalDataset,
@@ -246,6 +254,7 @@ class HistoricalDataAdapter:
                 share_events=tuple(share_events), corporate_action_reconciliation=tuple(reconciliation),
             )
             object.__setattr__(decision, "issuance_seal", _sign(decision.decision_id))
+            object.__setattr__(decision, "revalidator", self.revalidate)
             if not decision.usable:
                 return decision, None
             return decision, VerifiedHistoricalDataset(decision, tuple(bars), basis, tuple(share_events),
@@ -318,7 +327,9 @@ class HistoricalDataAdapter:
             report = validate_daily(files[".json.gz"])
             record = {"file": files[".json.gz"].name, "sha256": report.publication_integrity.sha256,
                       "records": report.publication_integrity.records, "disposition": report.disposition,
-                      "window": [seg_start, seg_end], "holdout_rows_withheld": 0}
+                      "window": [seg_start, seg_end], "holdout_rows_withheld": 0,
+                      "done_sha256": file_sha256(files[".json.gz.done"]),
+                      "meta_sha256": file_sha256(files[".meta.json"])}
             segments.append(record)
             if report.disposition == "REJECT_PUBLICATION":
                 fail("SEGMENT_REJECTED", f"{stem}: {[i.message for i in report.publication_integrity.issues]}")
@@ -556,6 +567,48 @@ class HistoricalDataAdapter:
             share_events.clear()
             used_events.clear()
         return decide()
+
+    def revalidate(self, decision: DataEligibilityDecision) -> None:
+        """Re-hash every source ``decision`` relied on; raise :class:`StaleAssessmentError` on any change.
+
+        Only bytes are hashed (payload, ``.done``, ``.meta.json``); nothing is decoded,
+        so protected holdout rows are not parsed again. The overlapping-segment set
+        must be unchanged, and the evidence-paths file is reloaded and must yield the
+        same evidence digest. A check-then-use window remains: the run uses the
+        in-memory bars verified here, so a later file change cannot alter this run,
+        but it is not detected until the next revalidation or replay.
+        """
+        symbol = decision.request.symbol
+        if decision.evidence_sha256 != evidence_digest(self.evidence):
+            raise StaleAssessmentError(f"{symbol}: decision was issued over different evidence")
+        if not self.evidence.config_path:
+            raise StaleAssessmentError(f"{symbol}: evidence was not loaded from a registered evidence-paths file")
+        try:
+            reloaded = load_reference_evidence(Path(self.evidence.config_path))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StaleAssessmentError(f"{symbol}: registered evidence can no longer be loaded: {exc}") from exc
+        if evidence_digest(reloaded) != decision.evidence_sha256:
+            raise StaleAssessmentError(f"{symbol}: registered evidence changed after assessment")
+        symbol_dir = self.raw_root / symbol
+        if symbol_dir.is_symlink() or not symbol_dir.is_dir():
+            raise StaleAssessmentError(f"{symbol}: published directory disappeared after assessment")
+        groups, unexpected = _segments(symbol_dir)
+        if unexpected:
+            raise StaleAssessmentError(f"{symbol}: unexpected entries appeared: {unexpected}")
+        start, end = decision.request.start, decision.request.end
+        current = sorted(stem for stem in groups if not (stem.split("_")[1] < start or stem.split("_")[0] > end))
+        recorded = sorted(record["file"].removesuffix(".json.gz") for record in decision.segments)
+        if current != recorded:
+            raise StaleAssessmentError(f"{symbol}: overlapping segments changed from {recorded} to {current}")
+        for record in decision.segments:
+            files = groups[record["file"].removesuffix(".json.gz")]
+            for suffix, key in ((".json.gz", "sha256"), (".json.gz.done", "done_sha256"),
+                                (".meta.json", "meta_sha256")):
+                path = files.get(suffix)
+                if path is None or path.is_symlink() or not path.is_file():
+                    raise StaleAssessmentError(f"{symbol}: {record['file']} lost its {suffix} file")
+                if file_sha256(path) != record.get(key):
+                    raise StaleAssessmentError(f"{symbol}: {path.name} changed after assessment")
 
     @_issues("universe")
     def assess_universe(

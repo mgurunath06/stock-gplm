@@ -197,6 +197,9 @@ def _resolve_release(
         mode = release.universe.mode
         if mode == EligibilityMode.STRICT_RESEARCH and not release.investable:
             raise ValueError("STRICT_RESEARCH run requires an ELIGIBLE, adapter-issued universe")
+        if mode == EligibilityMode.STRICT_RESEARCH:
+            for decision in release.decisions:  # atomic: one stale member invalidates the run
+                decision.revalidate()
         universe = release.to_dict()
         return tuple(datasets), mode, {"source": "UNIVERSE_ASSESSMENT", **universe}, ADAPTER_ISSUED
     datasets = tuple(release)
@@ -219,6 +222,8 @@ def _resolve_release(
         evidence = {d.decision.evidence_sha256 for d in datasets}
         if len(ranges) != 1 or len(evidence) != 1:
             raise ValueError("STRICT_RESEARCH datasets must share one assessed range and one evidence set")
+        for dataset in datasets:
+            dataset.decision.revalidate()
     symbols = [d.decision.request.symbol for d in datasets]
     if len(symbols) != len(set(symbols)):
         raise ValueError("duplicate symbols in the dataset list")
