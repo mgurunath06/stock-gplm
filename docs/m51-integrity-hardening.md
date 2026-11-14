@@ -57,8 +57,19 @@ evidence-paths document.
 - *Replay:* re-presenting a sealed object works only for exactly the content it
   was issued for. That is idempotent, because the same evidence, request and
   bars give the same decision. Any change voids the seal.
-- *API surface:* the sealing function is private, and only `verify_seal` is
-  public. Nothing in `stock_gplm.m5.__all__` issues seals.
+- *API surface (M5.1.1):* there is no module-level sealing function. Each seal
+  kind (`decision`, `universe`, `evidence`) can be claimed once. The adapter
+  and evidence loader claim theirs while `stock_gplm.m5` is imported, and the
+  signer then lives only in the closure of `HistoricalDataAdapter.assess`,
+  `HistoricalDataAdapter.assess_universe` or `load_reference_evidence`. A second
+  claim raises, and passing `_sign=` to those functions raises `TypeError`.
+  Importing a package symbol therefore cannot seal a forged decision. Reading
+  closure cells or patching the package is still possible and stays out of
+  scope. Only `verify_seal` is public.
+- *Not yet closed (see `docs/handover/m511-to-codex.md`):* sealed objects are
+  not revalidated against their source files before strict classification
+  (freshness), and seals prove which loader ran, not whether the evidence is
+  authentic or approved.
 
 **Caller-supplied research is still allowed.** A list of caller-built datasets
 runs as `DIAGNOSTIC_ONLY_NON_INVESTABLE`, labelled

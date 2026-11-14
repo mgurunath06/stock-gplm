@@ -31,7 +31,7 @@ from stock_gplm.m39b import (
 )
 
 from .evidence import ReferenceEvidence, evidence_digest, evidence_issued, read_json
-from .issuance import _seal
+from .issuance import _issues
 from .models import (
     ADAPTER_VERSION,
     CanonicalDailyBar,
@@ -151,10 +151,13 @@ class HistoricalDataAdapter:
         self.raw_root = Path(raw_root)
         self.evidence = evidence
 
+    @_issues("decision")
     def assess(
         self,
         request: DataEligibilityRequest,
         adjustment_events: Sequence[CorporateActionEvent] = (),
+        *,
+        _sign: Any = None,
     ) -> tuple[DataEligibilityDecision, VerifiedHistoricalDataset | None]:
         failures: list[EligibilityFailure] = []
         evidence: list[EligibilityEvidence] = []
@@ -193,7 +196,7 @@ class HistoricalDataAdapter:
                 evidence_sources=dict(sorted(self.evidence.source_hashes.items())), price_basis=basis,
                 share_events=tuple(share_events), corporate_action_reconciliation=tuple(reconciliation),
             )
-            object.__setattr__(decision, "issuance_seal", _seal("decision", decision.decision_id))
+            object.__setattr__(decision, "issuance_seal", _sign(decision.decision_id))
             if not decision.usable:
                 return decision, None
             return decision, VerifiedHistoricalDataset(decision, tuple(bars), basis, tuple(share_events),
@@ -501,10 +504,13 @@ class HistoricalDataAdapter:
             used_events.clear()
         return decide()
 
+    @_issues("universe")
     def assess_universe(
         self,
         universe: UniverseRequest,
         adjustment_events: Sequence[CorporateActionEvent] = (),
+        *,
+        _sign: Any = None,
     ) -> UniverseAssessment:
         """Assess every requested member; never substitute a surviving subset.
 
@@ -531,5 +537,5 @@ class HistoricalDataAdapter:
         else:
             status, released = DecisionStatus.REJECTED, ()
         assessment = UniverseAssessment(universe, decisions, status, released, excluded)
-        object.__setattr__(assessment, "issuance_seal", _seal("universe", assessment.assessment_id))
+        object.__setattr__(assessment, "issuance_seal", _sign(assessment.assessment_id))
         return assessment

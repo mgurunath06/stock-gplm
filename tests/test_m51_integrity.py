@@ -221,6 +221,52 @@ def test_A_issuance_is_not_a_public_api() -> None:
             and vars(issuance)[name].__module__ == issuance.__name__] == ["verify_seal"]
 
 
+def test_A_no_importable_signer_can_seal_a_forged_decision(tmp_path: Path) -> None:
+    """M5.1.1: the M5.1 audit sealed a forged decision via ``from issuance import _seal``."""
+    with pytest.raises(ImportError):
+        from stock_gplm.m5.issuance import _seal  # noqa: F401
+    for kind in sorted(issuance.SEAL_KINDS):
+        with pytest.raises(RuntimeError, match="already claimed"):
+            issuance._claim_signer(kind)
+        with pytest.raises(RuntimeError, match="already claimed"):
+            issuance._issues(kind)
+    # No signer-like attribute anywhere in the package validates a forged decision.
+    import importlib
+    import pkgutil
+
+    import stock_gplm.m5 as m5
+    forged = forged_dataset().decision
+    probed = 0
+    for info in pkgutil.iter_modules(m5.__path__):
+        module = importlib.import_module(f"stock_gplm.m5.{info.name}")
+        for name, value in vars(module).items():
+            if not callable(value) or isinstance(value, type) or not any(
+                    word in name.lower() for word in ("seal", "sign", "issu")) or name == "verify_seal":
+                continue
+            probed += 1
+            for args in ((forged.decision_id,), ("decision", forged.decision_id)):
+                try:
+                    candidate = value(*args)
+                except Exception:  # noqa: BLE001 - probing signer-like callables
+                    continue
+                assert not issuance.verify_seal("decision", forged.decision_id, candidate), f"{info.name}.{name}"
+    assert probed >= 2  # at least _claim_signer and _issues were exercised
+    assert not forged.investable
+
+
+def test_A_issuing_functions_reject_a_caller_supplied_signer(tmp_path: Path) -> None:
+    raw, evidence = build_world(tmp_path)
+    adapter = HistoricalDataAdapter(raw, evidence)
+    request = DataEligibilityRequest("ALPHA-EQ", "2024-01-01", "2024-09-30", STRICT)
+    with pytest.raises(TypeError, match="cannot be supplied"):
+        adapter.assess(request, _sign=lambda digest: "x")
+    from stock_gplm.m5.evidence import load_reference_evidence
+    with pytest.raises(TypeError, match="cannot be supplied"):
+        load_reference_evidence(tmp_path / "w" / "evidence" / "evidence-paths.json", _sign=lambda digest: "x")
+    decision, _ = adapter.assess(request)
+    assert decision.adapter_issued  # the legitimate path still issues
+
+
 def test_A_hand_built_universe_assessment_is_never_issued(tmp_path: Path) -> None:
     raw, evidence = build_world(tmp_path)
     genuine = HistoricalDataAdapter(raw, evidence).assess_universe(universe())

@@ -45,7 +45,7 @@ from stock_gplm.m2.reference_data import (
 )
 from stock_gplm.m39b import CorporateActionEvent, SourceEvidence
 
-from .issuance import _seal, verify_seal
+from .issuance import _issues, verify_seal
 from .models import canonical_hash
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -345,7 +345,8 @@ def _pair(paths: dict[str, Any], key: str, base: Path) -> tuple[Path, Path] | No
     return base / item["payload"], base / item["manifest"]
 
 
-def load_reference_evidence(config_path: Path) -> ReferenceEvidence:
+@_issues("evidence")
+def load_reference_evidence(config_path: Path, *, _sign: Any = None) -> ReferenceEvidence:
     """Load a ``stock-gplm.m5-evidence-paths.v1`` file; relative paths resolve from its directory."""
     paths, _ = read_json(config_path, 64 * 1024)
     allowed = {"contract", "m32_run", "etf_heuristic", "calendar_registration", "listing_history",
@@ -387,4 +388,4 @@ def load_reference_evidence(config_path: Path) -> ReferenceEvidence:
     evidence = ReferenceEvidence(holdout, etf, calendar, imported.get("listing_history"),
                                  imported.get("symbol_mappings"), imported.get("corporate_actions"),
                                  events, tokens, hashes, basis.basis if basis else None, basis)
-    return replace(evidence, issuance_seal=_seal("evidence", evidence_digest(evidence)))
+    return replace(evidence, issuance_seal=_sign(evidence_digest(evidence)))
