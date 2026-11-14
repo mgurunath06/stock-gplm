@@ -1,8 +1,9 @@
 # Stock GPLM
 
 Local Indian equity quantitative research platform. M1 provides read-only daily
-publication validation using synthetic tests. No models, synchronization, or
-trading are implemented. Start with [the documentation index](docs/README.md).
+publication validation using synthetic tests. Later local research milestones
+add gated modelling and a configuration-driven V1 strategy research engine; no
+live trading is implemented. Start with [the documentation index](docs/README.md).
 
 ```bash
 .venv/bin/python -m pip install -e '.[dev]'
@@ -73,3 +74,9 @@ gross edge, that the median-based labels do not reflect returns that beat the me
 costs, and that unadjusted corporate actions distort labels. No pre-registered hypothesis
 survives multiple-testing correction. See
 [docs/m38-evidence-report-2026-11-02.md](docs/m38-evidence-report-2026-11-02.md).
+
+V1 adds a generic declarative strategy engine, immutable local registry,
+causal research backtester and loopback Strategy Studio. The swing-breakout and
+mean-reversion examples are configuration files processed by the same engine;
+activation cannot enable broker orders. See
+[docs/v1-strategy-engine.md](docs/v1-strategy-engine.md).

@@ -112,3 +112,14 @@ complete lineage. The package has no file loader, network client, CLI or trainin
 import. It refuses non-raw inputs, unavailable facts, conflicting sources,
 duplicates, rights and complex restructurings. Synthetic verification does not
 correct historical data or make it training-ready.
+
+V1 adds the separate `stock_gplm.v1` configuration-driven research boundary.
+Versioned JSON or safe data-only YAML defines indicators, nested entry/exit
+conditions, risk, sizing and costs. A typed allowlisted evaluator is shared by
+signal evaluation and the local backtester; there is no per-strategy Python
+logic. Immutable SQLite versions, backtests and non-routable paper intents carry
+the exact canonical configuration SHA-256. The loopback-only Strategy Studio can
+validate, save, clone, import/export, select and synthetically backtest these
+definitions. Activation selects a local research definition only and cannot
+enable broker orders. Existing M1-M3 evidence and locked-holdout gates remain
+authoritative and independent.

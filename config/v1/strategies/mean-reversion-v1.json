@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "strategy": {
+    "id": "mean-reversion-v1",
+    "name": "Mean Reversion",
+    "description": "Second demonstration strategy: buy a short-term oversold cross only inside a long-term uptrend. Research only.",
+    "enabled": true,
+    "timeframe": "1d"
+  },
+  "universe": {
+    "exchange": "NSE",
+    "instrument_type": "EQ",
+    "symbols": []
+  },
+  "indicators": [
+    {"id": "ma10", "type": "SMA", "period": 10, "field": "close"},
+    {"id": "ma100", "type": "SMA", "period": 100, "field": "close"},
+    {"id": "low-5", "type": "LOWEST", "period": 5, "field": "low"}
+  ],
+  "entry": {
+    "operator": "AND",
+    "conditions": [
+      {"operator": "GT", "left": {"field": "close"}, "right": {"indicator": "ma100"}},
+      {"operator": "CROSS_ABOVE", "left": {"field": "close"}, "right": {"indicator": "low-5", "offset": -1}},
+      {"operator": "LT", "left": {"field": "close"}, "right": {"indicator": "ma10"}}
+    ]
+  },
+  "exit": {
+    "condition": {"operator": "CROSS_ABOVE", "left": {"field": "close"}, "right": {"indicator": "ma10"}},
+    "max_holding_sessions": 15
+  },
+  "risk": {
+    "stop_loss": {"type": "percent", "value": 5},
+    "take_profit": {"type": "percent", "value": 10}
+  },
+  "position_sizing": {"type": "fixed_fraction", "value": 0.05},
+  "trading_costs": {"profile": "nse-equity-example", "commission_bps": 5, "slippage_bps": 10}
+}

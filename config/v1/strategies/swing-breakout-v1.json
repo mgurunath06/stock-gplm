@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "strategy": {
+    "id": "swing-breakout-v1",
+    "name": "Swing Breakout",
+    "description": "Default example combining long-term regime, base, breakout and volume confirmation. Research only.",
+    "enabled": true,
+    "timeframe": "1d"
+  },
+  "universe": {
+    "exchange": "NSE",
+    "instrument_type": "EQ",
+    "symbols": []
+  },
+  "indicators": [
+    {"id": "ma50", "type": "SMA", "period": 50, "field": "close"},
+    {"id": "ma100", "type": "SMA", "period": 100, "field": "close"},
+    {"id": "ma200", "type": "SMA", "period": 200, "field": "close"},
+    {"id": "vol-ma20", "type": "SMA_VOLUME", "period": 20, "field": "volume"},
+    {"id": "high-20", "type": "HIGHEST", "period": 20, "field": "high"},
+    {"id": "high-252", "type": "HIGHEST", "period": 252, "field": "high"},
+    {"id": "roc-20", "type": "PERCENT_CHANGE", "period": 20, "field": "close"}
+  ],
+  "entry": {
+    "operator": "AND",
+    "conditions": [
+      {"operator": "GT", "left": {"field": "close"}, "right": {"indicator": "ma50"}},
+      {"operator": "GT", "left": {"indicator": "ma50"}, "right": {"indicator": "ma100"}},
+      {"operator": "GT", "left": {"field": "close"}, "right": {"indicator": "ma200"}},
+      {"operator": "GTE", "left": {"field": "close"}, "right": {"operator": "MULTIPLY", "operands": [{"indicator": "high-252"}, {"constant": 0.75}]}},
+      {"operator": "GTE", "left": {"indicator": "roc-20"}, "right": {"constant": -0.1}},
+      {"operator": "LTE", "left": {"indicator": "roc-20"}, "right": {"constant": 0.15}},
+      {"operator": "CROSS_ABOVE", "left": {"field": "close"}, "right": {"indicator": "high-20", "offset": -1}},
+      {"operator": "GTE", "left": {"field": "volume"}, "right": {"operator": "MULTIPLY", "operands": [{"indicator": "vol-ma20"}, {"constant": 1.5}]}}
+    ]
+  },
+  "exit": {
+    "condition": {"operator": "CROSS_BELOW", "left": {"field": "close"}, "right": {"indicator": "ma50"}},
+    "max_holding_sessions": 120
+  },
+  "risk": {
+    "stop_loss": {"type": "percent", "value": 8},
+    "take_profit": {"type": "percent", "value": 18}
+  },
+  "position_sizing": {"type": "fixed_fraction", "value": 0.1},
+  "trading_costs": {"profile": "nse-equity-example", "commission_bps": 5, "slippage_bps": 10}
+}
