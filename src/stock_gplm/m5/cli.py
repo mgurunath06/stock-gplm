@@ -12,7 +12,7 @@ from stock_gplm.v1.schema import validate_strategy
 
 from .adapter import HistoricalDataAdapter
 from .discovery import discover
-from .evidence import load_etf_heuristic, load_reference_evidence, read_json
+from .evidence import load_etf_heuristic, load_holdout_boundary, load_reference_evidence, read_json
 from .models import DataEligibilityRequest, UniverseRequest, universe_problems
 from .run_store import RunIntegrityError, compare_runs, load_run, make_replayer
 from .runner import BacktestSettings, run_historical_backtest
@@ -46,7 +46,9 @@ def main(argv: list[str] | None = None) -> int:
 
     disc = commands.add_parser("discover", help="read-only coverage inventory of published segments")
     disc.add_argument("--etf-heuristic", type=Path, default=Path("config/m37/etf-symbol-heuristic.json"))
-    disc.add_argument("--verify", action="store_true", help="re-run validate_daily on every segment")
+    disc.add_argument("--verify", action="store_true",
+                      help="validate pre-cutoff segments; protected segments are never opened (needs --m32-run)")
+    disc.add_argument("--m32-run", type=Path, help="hash-verified M3.2 run directory supplying the holdout cutoff")
     disc.add_argument("--output", type=Path, required=True)
 
     for name in ("assess", "backtest"):
@@ -55,8 +57,6 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--mode", choices=["STRICT_RESEARCH", "DIAGNOSTIC_ONLY"], required=True)
         command.add_argument("--start", required=True)
         command.add_argument("--end", required=True)
-        command.add_argument("--trust-policy", type=Path, help="separate M5.1.1 approval trust-policy file")
-        command.add_argument("--trust-policy-sha256", help="out-of-band SHA-256 of --trust-policy")
     assess = commands.choices["assess"]
     assess.add_argument("--symbol", required=True)
     assess.add_argument("--expected-token")
@@ -78,22 +78,20 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("runs", nargs="+", type=Path)
     compare.add_argument("--evidence", type=Path, help="replay-verify runs against this evidence-paths file")
     compare.add_argument("--registry", type=Path, help="strategy registry used to replay-verify runs")
-    compare.add_argument("--trust-policy", type=Path, help="separate M5.1.1 approval trust-policy file")
-    compare.add_argument("--trust-policy-sha256", help="out-of-band SHA-256 of --trust-policy")
     export = commands.add_parser("export", help="write the verified report of one run to a new file")
     export.add_argument("run", type=Path)
     export.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
 
     def registered_evidence(path: Path):
-        policy_path = getattr(args, "trust_policy", None)
-        policy_hash = getattr(args, "trust_policy_sha256", None)
-        if (policy_path is None) != (policy_hash is None):
-            parser.error("--trust-policy and --trust-policy-sha256 are required together")
-        return load_reference_evidence(path, trust_policy_path=policy_path, trust_policy_sha256=policy_hash)
+        return load_reference_evidence(path)
 
     if args.command == "discover":
-        report = discover(args.raw_root, load_etf_heuristic(args.etf_heuristic), verify=args.verify)
+        if args.verify and args.m32_run is None:
+            parser.error("--verify requires --m32-run so protected segments are never opened")
+        holdout = load_holdout_boundary(args.m32_run) if args.verify else None
+        report = discover(args.raw_root, load_etf_heuristic(args.etf_heuristic), verify=args.verify,
+                          holdout=holdout)
         _write_new(args.output, report, args.raw_root)
         print(json.dumps({k: v for k, v in report.items() if k != "per_symbol"}, indent=2))
         return 0

@@ -357,11 +357,17 @@ class HistoricalDataAdapter:
                       "done_sha256": file_sha256(files[".json.gz.done"]),
                       "meta_sha256": file_sha256(files[".meta.json"])}
             segments.append(record)
+            if any(i.code == "partition_metadata" for i in report.publication_integrity.issues):
+                fail("METADATA_MISMATCH", f"{stem}: {[i.message for i in report.publication_integrity.issues]}")
+                continue
             if report.disposition == "REJECT_PUBLICATION":
                 fail("SEGMENT_REJECTED", f"{stem}: {[i.message for i in report.publication_integrity.issues]}")
                 continue
             if report.disposition != "ACCEPT":
-                fail("SEGMENT_QUARANTINED", f"{stem}: {report.disposition}")
+                # Malformed or out-of-window development rows are never skipped: the
+                # whole segment fails and every row-level issue is reported.
+                issues = [f"{i.code}@{i.record}: {i.message}" for i in report.content_quality.issues]
+                fail("SEGMENT_QUARANTINED", f"{stem}: {report.disposition}: {issues}")
                 continue
             metadata, _ = read_json(files[".meta.json"], MAX_SIDECAR)
             expected_meta = {"source": "shoonya", "symbol": request.symbol, "from": seg_start, "to": seg_end}
@@ -611,10 +617,6 @@ class HistoricalDataAdapter:
         try:
             reloaded = load_reference_evidence(
                 Path(self.evidence.config_path),
-                trust_policy_path=(Path(self.evidence.trust_policy_path)
-                                   if self.evidence.trust_policy_path else None),
-                trust_policy_sha256=(self.evidence.trust_policy.policy_sha256
-                                     if self.evidence.trust_policy else None),
             )
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise StaleAssessmentError(f"{symbol}: registered evidence can no longer be loaded: {exc}") from exc

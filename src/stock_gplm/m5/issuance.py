@@ -33,7 +33,7 @@ and bars give the same decision. Any change to that content changes the hash and
 voids the seal.
 
 Signer handout (M5.1.1). There is no module-level signing function. Each seal
-kind (``decision``, ``universe``, ``evidence``) can be claimed exactly once, and
+kind (``decision``, ``universe``, ``evidence``, ``trust_policy``) can be claimed exactly once, and
 the issuing modules claim theirs while ``stock_gplm.m5`` is imported, before any
 caller code can run. The signer then lives only in the closure of the single
 adapter or loader function that produces that kind, so importing any package
@@ -48,7 +48,7 @@ import hmac
 import secrets
 from typing import Any, Callable
 
-SEAL_KINDS = frozenset({"decision", "universe", "evidence"})
+SEAL_KINDS = frozenset({"decision", "universe", "evidence", "trust_policy"})
 
 
 def _issuer() -> tuple[Callable[[str], Callable[[str], str]], Callable[[str, str, object], bool]]:

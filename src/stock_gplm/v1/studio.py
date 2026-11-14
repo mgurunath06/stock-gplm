@@ -363,8 +363,7 @@ def _write_launch_token(path: Path, token: str) -> None:
 
 def make_server(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
                 m5_evidence: Path | None = None, raw_root: Path | None = None,
-                m5_reports: Path | None = None, token_path: Path | None = None,
-                trust_policy: Path | None = None, trust_policy_sha256: str | None = None) -> LoopbackHTTPServer:
+                m5_reports: Path | None = None, token_path: Path | None = None) -> LoopbackHTTPServer:
     """Build the Studio server; any non-loopback bind is refused before a socket is opened."""
     if not isinstance(host, str) or host not in LOOPBACK_BIND:
         raise ValueError(f"Strategy Studio binds only to {sorted(LOOPBACK_BIND)}; refused {host!r}")
@@ -381,10 +380,7 @@ def make_server(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, 
             raise ValueError("--m5-evidence requires --raw-root and --m5-reports")
         Path(m5_reports).mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(Path(m5_reports), 0o700)
-        if (trust_policy is None) != (trust_policy_sha256 is None):
-            raise ValueError("trust policy path and out-of-band SHA-256 are required together")
-        evidence = load_reference_evidence(m5_evidence, trust_policy_path=trust_policy,
-                                           trust_policy_sha256=trust_policy_sha256)
+        evidence = load_reference_evidence(m5_evidence)
         research = HistoricalResearchService(raw_root, evidence, m5_reports, registry)
     token = secrets.token_urlsafe(32)
     handler = type("BoundStudioHandler", (StudioHandler,), {
@@ -405,12 +401,10 @@ def make_server(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, 
 
 def serve(registry_path: Path, host: str = "127.0.0.1", port: int = 8765, *,
           m5_evidence: Path | None = None, raw_root: Path | None = None, m5_reports: Path | None = None,
-          token_path: Path | None = None, trust_policy: Path | None = None,
-          trust_policy_sha256: str | None = None) -> None:
+          token_path: Path | None = None) -> None:
     """Serve the Studio on loopback only (see :func:`make_server`)."""
     server = make_server(registry_path, host, port, m5_evidence=m5_evidence, raw_root=raw_root,
-                         m5_reports=m5_reports, token_path=token_path, trust_policy=trust_policy,
-                         trust_policy_sha256=trust_policy_sha256)
+                         m5_reports=m5_reports, token_path=token_path)
     print(f"Strategy Studio: http://{host}:{server.server_address[1]}/?token=<read-owner-only-token-file> "
           f"(token file: {server.token_path})")
     try:
@@ -428,12 +422,9 @@ def main() -> int:
     parser.add_argument("--raw-root", type=Path, help="published Shoonya NSE daily root (read only)")
     parser.add_argument("--m5-reports", type=Path, help="new or existing directory for immutable run reports")
     parser.add_argument("--token-file", type=Path, help="owner-only per-launch token file")
-    parser.add_argument("--trust-policy", type=Path, help="separate M5.1.1 approval trust-policy file")
-    parser.add_argument("--trust-policy-sha256", help="out-of-band SHA-256 of --trust-policy")
     args = parser.parse_args()
     serve(args.registry, args.host, args.port, m5_evidence=args.m5_evidence, raw_root=args.raw_root,
-          m5_reports=args.m5_reports, token_path=args.token_file, trust_policy=args.trust_policy,
-          trust_policy_sha256=args.trust_policy_sha256)
+          m5_reports=args.m5_reports, token_path=args.token_file)
     return 0
 
 

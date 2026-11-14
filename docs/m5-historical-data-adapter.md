@@ -9,8 +9,10 @@ writes nothing inside raw-data directories.
 M5.1 (see `docs/m51-integrity-hardening.md`) adds trusted issuance of eligibility,
 all-or-nothing requested universes, corporate-action reconciliation, one verified
 run loader, portable provenance, programmatic loopback enforcement in the Studio,
-one terminal valuation policy and precise holdout accounting. M5.1.1 isolates
-development validation from protected candle content.
+one terminal valuation policy and precise holdout accounting. M5.1.2 replaces
+the M5.1.1 decode-before-cutoff validator: only segments whose metadata-verified
+declared window ends before the cutoff are opened (see
+`docs/m512-critical-remediation.md`).
 
 ```
 published segments ──► HistoricalDataAdapter ──► DataEligibilityDecision (+ VerifiedHistoricalDataset)
@@ -28,10 +30,10 @@ immutable strategy version ──► shared V1 evaluator ──► generic portf
 | `stock_gplm.m5.evidence` | Read-only, sealed loaders for the holdout, calendar, listing, alias, corporate-action, master, ETF-heuristic, price-basis and adjustment-event evidence |
 | `stock_gplm.m5.authority` | Source-document registrations and separately hash-pinned reviewer trust policy; self-asserted approval is never authoritative |
 | `stock_gplm.m5.adapter` | `HistoricalDataAdapter.assess` / `assess_universe`: the only component that releases historical bars |
-| `stock_gplm.m5.holdout_validation` | M5-only whole-source integrity checks plus pre-cutoff candle validation for straddling segments |
+| `stock_gplm.m5.holdout_validation` | M5.1.2 partition gate: verifies filename/`.meta.json` windows before opening, opens only wholly pre-cutoff segments, rejects all others unopened |
 | `stock_gplm.m5.provenance` | Portable content identity (in `run_id`) and environmental provenance (recorded only) |
 | `stock_gplm.m5.run_store` | The one verified run loader: listing, details, reports, export, comparison, replay |
-| `stock_gplm.m5.discovery` | Read-only coverage inventory, optionally re-running `validate_daily` on every segment |
+| `stock_gplm.m5.discovery` | Read-only coverage inventory; `--verify` needs `--m32-run` and validates only pre-cutoff segments |
 | `stock_gplm.m5.runner` | Causal per-instrument signal evaluation, simulation, metrics, atomic run publication, run comparison |
 | `stock_gplm.m5.studio_api` | Server-side historical workflow behind the loopback Strategy Studio |
 | `stock_gplm.m5.cli` | `discover`, `assess`, `backtest`, `compare`, `export` |
@@ -51,7 +53,7 @@ immutable strategy version ──► shared V1 evaluator ──► generic portf
 | Corporate-action economics | M3.9-B validated, licence-approved `CorporateActionEvent` records, read from a `stock-gplm.m51-adjustment-events.v1` file in their own `to_dict` shape |
 | Provider price basis | `stock-gplm.m51-provider-price-basis.v1` reviewed registration (symbols, date range, hash-bound identifier); none exists for real data |
 | ETF exclusion | M3.7 `etf-symbol-heuristic.json`, recorded as `HEURISTIC`, not as evidence |
-| Evidence authority, ETF/equity classification and cost schedule | M5.1.1 registrations and out-of-band hash-pinned trust policy; see `docs/m511-evidence-authority.md` |
+| Evidence authority, ETF/equity classification and cost schedule | M5.1.1 registrations approved only through the M5.1.2 OS-governed trust root; see `docs/m511-evidence-authority.md` and `docs/m512-critical-remediation.md` |
 
 The M2.5-R calendar format was checked against the real M2.5-R implementation: a
 synthetic registration produced by `stock_gplm.m25r.calendar.register_calendar`
@@ -121,25 +123,37 @@ cutoff is **2025-10-21** (the 6–12 month horizon; shorter horizons start
 2026-04-29). A request ending on or after the cutoff is `REJECTED`. Segments
 starting after the request end are never opened.
 
-A segment that overlaps the request but straddles the cutoff is handled by the
-M5-only isolation validator. It verifies the immutable compressed bytes,
-completion marker, metadata and declared record count for the whole source, but
-decodes ShoonyaDailyV1 candle values only for rows dated before the cutoff.
-Protected OHLCV/schema/duplicate/chronology details therefore cannot affect
-development eligibility or research results. Every run records:
+Partitioning (M5.1.2). A record's date cannot be read without decompressing and
+parsing the payload, so payload dates never decide whether a payload is opened.
+Before any payload byte is read, the segment's filename window and its
+`.meta.json` `from`/`to`/`symbol` must agree exactly; missing or inconsistent
+partition metadata is `METADATA_MISMATCH`. A segment is opened only when that
+declared window ends strictly before the cutoff. A segment that reaches the
+cutoff, including one that straddles it, is `SEGMENT_REJECTED` with
+`holdout_partition_required` and its payload is never read. Opened segments go
+through the unchanged `validate_daily`: a malformed row, or a row dated outside
+the declared window, quarantines the whole segment with each row-level issue in
+the failure message. Nothing is skipped.
 
-| Field | Meaning | Value |
-| --- | --- | --- |
-| `protected_rows_decoded_during_source_validation` | protected candles parsed as ShoonyaDailyV1 content | always 0 |
-| `protected_source_byte_integrity_checked` | full payload and sidecars remained covered by publication-integrity checks | always true |
-| `protected_rows_released_to_execution` | protected rows given to the evaluator or simulator | always 0 (asserted) |
-| `protected_rows_scored_or_trained` | protected rows scored or used for training | always 0; M5 never scores or trains |
+Every run records:
+
+| Field | Meaning |
+| --- | --- |
+| `partition_policy` | `DECLARED_WINDOW_STRICTLY_BEFORE_CUTOFF_VERIFIED_BEFORE_OPEN` |
+| `opened_segment_windows` | declared windows of every opened segment; `run_store` re-derives it from the stored decisions and rejects a run whose list differs or reaches the cutoff |
+| `protected_rows_released_to_execution` | protected rows given to the evaluator or simulator; always 0 (asserted) |
+| `protected_rows_scored_or_trained` | always 0; M5 never scores or trains |
+
+The M5.1.1 fields `protected_rows_decoded_during_source_validation` and
+`protected_source_byte_integrity_checked` were self-reported claims and are
+removed. The real Shoonya layout uses calendar-year segments, so the 2025
+segment straddles the 2025-10-21 cutoff and is rejected until it is republished
+as separate immutable pre-cutoff and protected segments (see the migration in
+`docs/m512-critical-remediation.md`).
 
 Pre-M5.1 runs recorded `locked_holdout_accessed: false`. That flag meant only
 "not released, scored or trained". It never meant that protected rows were not
-decoded. New runs no longer write it. A payload-byte change after assessment
-still fails freshness revalidation; that provenance guard does not expose or
-use protected candle values.
+decoded. New runs no longer write it.
 
 ## Canonical bars
 
@@ -296,8 +310,8 @@ their exact version and hash.
 ## Command line
 
 ```bash
-# read-only coverage inventory (add --verify to re-run validate_daily on every segment)
-.venv/bin/python -m stock_gplm.m5.cli discover --verify --output reports/m5/discovery.json
+# read-only coverage inventory; --verify validates pre-cutoff segments only and needs the M3.2 run
+.venv/bin/python -m stock_gplm.m5.cli discover --verify --m32-run <m32-run-dir> --output reports/m5/discovery.json
 
 # one eligibility decision
 .venv/bin/python -m stock_gplm.m5.cli assess --evidence config/m5/evidence-paths.example.json \

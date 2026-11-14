@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from stock_gplm.m39b import AdjustmentMode, CandleSeries, RawCandle, adjust_series
 from stock_gplm.v1.evaluator import evaluate_strategy
@@ -40,6 +40,7 @@ from .models import (
     VerifiedHistoricalDataset,
     canonical_hash,
 )
+from .holdout_validation import PARTITION_POLICY
 from .provenance import content_identity, environment_provenance
 
 RUN_CONTRACT = "stock-gplm.m5-historical-backtest-run.v3"
@@ -59,6 +60,12 @@ ANALYTICAL_FILES = ("run.json", "signals.json", "orders.json", "trades.json", "e
 ENVIRONMENT_FILE = "environment.json"  # hashed in the manifest but non-analytical; never compared on replay
 # M3.2 boundaries (unchanged): five shorter horizons 2026-04-29, 6-12m 2025-10-21; M5 uses the earliest.
 HOLDOUT_POLICY = "EARLIEST_M32_LOCKED_HOLDOUT_FIRST_AS_OF_ACROSS_HORIZONS"
+
+
+def opened_segment_windows(decisions: Iterable[Mapping[str, Any]]) -> list[list[str]]:
+    """Sorted unique declared ``[start, end]`` windows of every segment recorded in ``decisions``."""
+    return [list(window) for window in sorted(
+        {tuple(segment["window"]) for decision in decisions for segment in decision["segments"]})]
 
 
 @dataclass(frozen=True)
@@ -350,6 +357,11 @@ def build_run(
     if len({d.decision.holdout_cutoff for d in datasets}) != 1:
         raise ValueError("datasets disagree on the locked-holdout boundary")
     released_protected = sum(1 for d in datasets for bar in d.bars if cutoff is None or bar.date >= cutoff)
+    # Derived, re-checkable evidence (run_store re-derives it): the declared windows of every
+    # segment payload the adapter opened. Not a self-reported "nothing decoded" counter.
+    opened_windows = opened_segment_windows(d.decision.to_dict() for d in datasets)
+    if cutoff is None or any(window[1] >= cutoff for window in opened_windows):
+        raise AssertionError("a segment reaching the locked holdout was opened for development")
     run = {
         **run_binding, "run_id": run_id, "input_provenance": input_provenance,
         "classification": STRICT_CLASSIFICATION if investable else DIAGNOSTIC_CLASSIFICATION,
@@ -382,8 +394,8 @@ def build_run(
         "holdout_cutoff": cutoff,
         "holdout_access": {
             "policy": HOLDOUT_POLICY, "cutoff": cutoff,
-            "protected_rows_decoded_during_source_validation": 0,
-            "protected_source_byte_integrity_checked": True,
+            "partition_policy": PARTITION_POLICY,
+            "opened_segment_windows": opened_windows,
             "protected_rows_released_to_execution": released_protected,
             "protected_rows_scored_or_trained": 0,
         },
@@ -448,9 +460,9 @@ def render_markdown(run: Mapping[str, Any]) -> str:
         f"Python {run['code']['python']['version']})",
         f"- Eligibility issuance: {run['eligibility_issuance']}; requested universe "
         f"`{str(run['requested_universe'].get('universe_sha256'))[:16]}`",
-        f"- Locked holdout from {run['holdout_access']['cutoff']}: "
-        f"{run['holdout_access']['protected_rows_decoded_during_source_validation']} protected row(s) decoded "
-        f"during source validation; full source-byte integrity checked, "
+        f"- Locked holdout from {run['holdout_access']['cutoff']}: only segments whose metadata-verified declared "
+        f"window ends before the cutoff were opened (latest opened window end "
+        f"{max((w[1] for w in run['holdout_access']['opened_segment_windows']), default='none')}); "
         f"{run['holdout_access']['protected_rows_released_to_execution']} released "
         f"to execution, {run['holdout_access']['protected_rows_scored_or_trained']} scored or trained", "",
         "| Metric | Value |", "| --- | --- |",

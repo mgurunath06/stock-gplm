@@ -14,9 +14,14 @@ and a canonical provenance hash. The loader verifies the actual source-document
 bytes and every identity hash.
 
 Authority additionally requires a separate
-`stock-gplm.m511-approval-trust-policy.v1`. Its file SHA-256 must be supplied to
-`load_reference_evidence` out of band together with the policy path. The policy
-must trust the named reviewer and contain an exact approval for the
+`stock-gplm.m511-approval-trust-policy.v1`. **M5.1.2 change:** the M5.1.1
+caller-supplied policy path and "out-of-band" SHA-256 let a caller vouch for its
+own policy, so they were removed. The policy is now selected and hash-pinned
+only by the OS-governed administrative trust root
+`/etc/stock-gplm/m5-approval-trust-root.json`; see
+`docs/m512-critical-remediation.md` for the trust boundary, initialization,
+rotation and compromise recovery. The policy must trust the named reviewer (who
+must also be authorized by the trust root) and contain an exact approval for the
 registration/provenance/approval-record tuple. A `SYNTHETIC` registration can
 never be approved, even when a policy lists it. No trust policy or production
 approval is included in this repository.
@@ -50,6 +55,6 @@ profile ID. Diagnostic runs may continue to use explicitly labelled assumptions.
 ## Availability
 
 The loaders and fail-closed policy are implemented. Genuine approved source
-documents, reviewer approvals, an out-of-band trust-policy hash, authoritative
+documents, reviewer approvals, an installed administrative trust root, authoritative
 classification and a verified cost schedule are not available, so strict
 real-data research remains `BLOCKED`.

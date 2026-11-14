@@ -854,42 +854,37 @@ def test_G_zero_costs_make_both_bases_equal() -> None:
 
 # ======================================================================= H: holdout wording
 
-def test_H_holdout_access_distinguishes_decoded_released_and_scored(tmp_path: Path) -> None:
+def test_H_holdout_access_records_derived_partition_evidence_not_a_decode_counter(tmp_path: Path) -> None:
     run, directory, _ = _strict_run(tmp_path)
     access = run["holdout_access"]
     assert access["cutoff"] == run["holdout_cutoff"] == "2024-10-01"
-    assert access["protected_rows_decoded_during_source_validation"] == 0
-    assert access["protected_source_byte_integrity_checked"] is True
+    # M5.1.2: the unsupported self-reported "0 protected rows decoded" claim is gone. The run
+    # records the declared windows actually opened, which run_store re-derives from decisions.
+    assert "protected_rows_decoded_during_source_validation" not in access
+    assert "protected_source_byte_integrity_checked" not in access
+    assert access["opened_segment_windows"] == [["2024-01-01", "2024-06-30"], ["2024-07-01", "2024-09-30"]]
+    assert all(end < access["cutoff"] for _, end in access["opened_segment_windows"])
     assert access["protected_rows_released_to_execution"] == 0 and access["protected_rows_scored_or_trained"] == 0
     assert "locked_holdout_accessed" not in run
-    assert "decoded during source validation" in (directory / "report.md").read_text()
+    report = (directory / "report.md").read_text()
+    assert "decoded during source validation" not in report and "latest opened window end 2024-09-30" in report
     assert canonical_hash(run["holdout_access"])  # finite, serializable evidence
 
 
 def _corrupt_only_protected_candle_content(raw_root: Path) -> None:
-    """Rewrite synthetic protected rows and republish matching integrity sidecars."""
+    """Replace each protected payload with bytes no decoder can parse, keeping its sidecars valid."""
     for symbol in PAIR:
-        payload = raw_root / symbol / "2024-07-01_2024-12-31.json.gz"
-        rows = json.loads(gzip.decompress(payload.read_bytes()))
-        changed = 0
-        for index, serialized in enumerate(rows):
-            row = json.loads(serialized)
-            if row["time"].endswith(("OCT-2024", "NOV-2024", "DEC-2024")):
-                # Preserve only the date used to identify the isolation side.  The
-                # protected candle schema and values are intentionally invalid.
-                rows[index] = json.dumps({"time": row["time"], "protected": "not decoded"})
-                changed += 1
-        assert changed > 0
-        rewritten = gzip.compress(json.dumps(rows).encode(), mtime=0)
-        payload.write_bytes(rewritten)
-        digest = hashlib.sha256(rewritten).hexdigest()
-        meta_path = payload.with_name("2024-07-01_2024-12-31.meta.json")
+        payload = raw_root / symbol / "2024-10-01_2024-12-31.json.gz"
+        poisoned = b"PROTECTED-HOLDOUT-NOT-GZIP-NOT-JSON"
+        payload.write_bytes(poisoned)
+        digest = hashlib.sha256(poisoned).hexdigest()
+        meta_path = payload.with_name("2024-10-01_2024-12-31.meta.json")
         meta = json.loads(meta_path.read_text())
         meta["sha256_compressed"] = digest
         meta_path.write_text(json.dumps(meta))
         done_path = Path(f"{payload}.done")
         done = json.loads(done_path.read_text())
-        done.update(sha256=digest, bytes=len(rewritten))
+        done.update(sha256=digest, bytes=len(poisoned))
         done_path.write_text(json.dumps(done))
 
 

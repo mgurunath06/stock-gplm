@@ -178,7 +178,7 @@ def test_contradictory_overlapping_segments_rejected(tmp_path: Path) -> None:
 
 def test_publication_gap_is_evidence_not_fabrication(tmp_path: Path) -> None:
     raw, evidence = build_world(tmp_path)
-    for path in (raw / "ALPHA-EQ").glob("2024-07-01_2024-12-31*"):
+    for path in (raw / "ALPHA-EQ").glob("2024-07-01_2024-09-30*"):
         path.unlink()
     decision, dataset = assess(raw, evidence, mode=DIAG)
     assert "PUBLICATION_COVERAGE_GAP" in codes(decision)
@@ -429,8 +429,9 @@ def test_run_provenance_points_to_exact_immutable_version(tmp_path: Path) -> Non
     assert stored.config_hash == run["strategy_config_hash"] == validate_strategy(run["strategy_config_snapshot"]).config_hash
     assert run["holdout_cutoff"] == HOLDOUT and "locked_holdout_accessed" not in run
     access = run["holdout_access"]
-    assert access["protected_rows_decoded_during_source_validation"] == 0
-    assert access["protected_source_byte_integrity_checked"] is True
+    assert access["partition_policy"] == "DECLARED_WINDOW_STRICTLY_BEFORE_CUTOFF_VERIFIED_BEFORE_OPEN"
+    assert access["opened_segment_windows"] == [["2024-01-01", "2024-06-30"], ["2024-07-01", "2024-09-30"]]
+    assert "protected_rows_decoded_during_source_validation" not in access
     assert access["protected_rows_released_to_execution"] == access["protected_rows_scored_or_trained"] == 0
     assert all(d["decision"]["status"] == "ELIGIBLE" for d in run["datasets"])
 

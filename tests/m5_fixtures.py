@@ -76,11 +76,13 @@ def write_segment(raw_root: Path, symbol: str, start: str, end: str, rows: list[
 
 def write_symbol(raw_root: Path, symbol: str, phase: float = 0.0, *, drop: set[str] = frozenset(),
                  extra_days: list[str] | None = None) -> list[tuple]:
-    """Two published windows (H1 and H2 2024), the second straddling the synthetic holdout."""
+    """Physically separate development segments from the synthetic protected segment."""
     days = sorted({*sessions(START, date(2024, 12, 31)), *(extra_days or [])})
     rows = [r for r in price_path(days, phase) if r[0] not in drop]
     write_segment(raw_root, symbol, "2024-01-01", "2024-06-30", [r for r in rows if r[0] <= "2024-06-30"])
-    write_segment(raw_root, symbol, "2024-07-01", "2024-12-31", [r for r in rows if r[0] >= "2024-07-01"])
+    write_segment(raw_root, symbol, "2024-07-01", "2024-09-30",
+                  [r for r in rows if "2024-07-01" <= r[0] <= "2024-09-30"])
+    write_segment(raw_root, symbol, "2024-10-01", "2024-12-31", [r for r in rows if r[0] >= "2024-10-01"])
     return rows
 
 
@@ -260,3 +262,55 @@ def waive_strict_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     import stock_gplm.m5.runner as runner
     monkeypatch.setattr(adapter, "strict_authority_failures", lambda evidence, request=None: [])
     monkeypatch.setattr(runner, "_strict_cost_profile", lambda datasets, mode, strategy, settings: None)
+
+
+# --------------------------------------------------------------------------- M5.1.2 trust root
+
+def approval_for(registration: dict[str, Any]) -> dict[str, str]:
+    return {key: registration[key] for key in (
+        "registration_id", "provenance_hash", "reviewer_identity", "approval_record")} | {"status": "APPROVED"}
+
+
+def trust_policy_value(approvals: list[dict[str, str]], reviewers: list[str] | None = None) -> dict[str, Any]:
+    value = {"contract": "stock-gplm.m511-approval-trust-policy.v1", "schema_version": 1,
+             "trusted_reviewers": reviewers or ["test-reviewer"], "approvals": approvals}
+    value["policy_id"] = canonical_hash(value)
+    return value
+
+
+def trust_root_value(policy_bytes: bytes, *, reviewers: list[str] | None = None, generation: int = 1,
+                     status: str = "ACTIVE", revoked: list[str] | None = None,
+                     policy_file: str = "approval-trust-policy.json") -> dict[str, Any]:
+    value = {"contract": "stock-gplm.m512-approval-trust-root.v1", "schema_version": 1, "generation": generation,
+             "status": status, "policy_file": policy_file,
+             "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+             "trusted_reviewers": reviewers or ["test-reviewer"], "revoked_policy_sha256": revoked or [],
+             "initialized_at_utc": "2026-11-14T00:00:00Z"}
+    value["root_id"] = canonical_hash({key: value[key] for key in sorted(value)})
+    return value
+
+
+def install_trust_root(directory: Path, monkeypatch: pytest.MonkeyPatch, policy: dict[str, Any], *,
+                       research_uid: int | None = None, **root_options: Any) -> Path:
+    """Install a SYNTHETIC administrative trust root in ``directory`` and point the anchor at it.
+
+    The anchor's administrative owner is the test user, so ``research_uid`` (default:
+    a different uid) simulates the separate research account. This exercises the
+    loader's logic; it does not exercise real root ownership, which tests cannot create.
+    """
+    import os
+
+    from stock_gplm.m5 import authority
+
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o755)
+    policy_bytes = json.dumps(policy).encode()
+    root = trust_root_value(policy_bytes, **root_options)
+    (directory / root["policy_file"]).write_bytes(policy_bytes)
+    (directory / authority.TRUST_ROOT_FILE).write_text(json.dumps(root))
+    for name in (root["policy_file"], authority.TRUST_ROOT_FILE):
+        os.chmod(directory / name, 0o644)
+    owner = os.geteuid()
+    monkeypatch.setattr(authority, "_ANCHOR", authority.TrustAnchor(directory, owner, directory))
+    monkeypatch.setattr(authority, "_effective_uid", lambda: owner + 1 if research_uid is None else research_uid)
+    return directory

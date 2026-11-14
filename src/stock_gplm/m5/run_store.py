@@ -61,8 +61,10 @@ from .runner import (
     BacktestSettings,
     _encode,
     build_run,
+    opened_segment_windows,
     render_markdown,
 )
+from .holdout_validation import PARTITION_POLICY
 
 INTEGRITY_VERIFIED = "INTEGRITY_VERIFIED"
 REPLAY_VERIFIED = "REPLAY_VERIFIED"
@@ -253,6 +255,14 @@ def load_run(directory: Path) -> VerifiedRun:
         if run["holdout_access"]["protected_rows_released_to_execution"] != 0 or run["holdout_access"][
                 "protected_rows_scored_or_trained"] != 0:
             raise _fail(directory, "run records locked-holdout rows released or scored")
+        if current_contract:
+            # M5.1.2: re-derive the opened-segment evidence from the stored decisions instead of
+            # trusting a recorded claim; any opened window reaching the cutoff fails verification.
+            access, cutoff = run["holdout_access"], run["holdout_cutoff"]
+            windows = opened_segment_windows(d["decision"] for d in run["datasets"])
+            if (access.get("partition_policy") != PARTITION_POLICY or access.get("opened_segment_windows") != windows
+                    or not isinstance(cutoff, str) or any(window[1] >= cutoff for window in windows)):
+                raise _fail(directory, "run holdout partition evidence is missing, inconsistent or reaches the cutoff")
         tables = {name: _strict_json(directory, name, payloads[name])
                   for name in ("signals.json", "orders.json", "trades.json", "equity-curve.json")}
         cost = run["cost_model"]

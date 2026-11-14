@@ -11,7 +11,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from m5_fixtures import build_world, settings_dict, strategy_config
+from m5_fixtures import (
+    approval_for,
+    build_world,
+    install_trust_root,
+    settings_dict,
+    strategy_config,
+    trust_policy_value,
+)
 
 from stock_gplm.m5 import (
     BacktestSettings,
@@ -116,35 +123,28 @@ def _registration(directory: Path, *, environment: str = "SYNTHETIC", name: str 
     return path, value
 
 
-def _policy(directory: Path, registration: dict) -> tuple[Path, str]:
-    approval = {key: registration[key] for key in (
-        "registration_id", "provenance_hash", "reviewer_identity", "approval_record"
-    )} | {"status": "APPROVED"}
-    value = {"contract": "stock-gplm.m511-approval-trust-policy.v1", "schema_version": 1,
-             "trusted_reviewers": ["test-reviewer"], "approvals": [approval]}
-    value["policy_id"] = canonical_hash(value)
-    path = directory / "trust-policy.json"
-    path.write_text(json.dumps(value))
-    return path, hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_self_asserted_or_synthetic_registration_never_confers_authority(tmp_path: Path) -> None:
+def test_self_asserted_or_synthetic_registration_never_confers_authority(tmp_path: Path, monkeypatch) -> None:
     registration_path, raw = _registration(tmp_path)
     registration = load_evidence_registration(registration_path)
-    policy_path, policy_hash = _policy(tmp_path, raw)
-    policy = load_trust_policy(policy_path, policy_hash)
+    install_trust_root(tmp_path / "admin", monkeypatch, trust_policy_value([approval_for(raw)]))
+    policy = load_trust_policy()
+    assert policy is not None and policy.governed
     assert registration.approval_status == "APPROVED"  # self-asserted metadata is parsed...
     assert not policy.approves(registration)  # ...but SYNTHETIC can never enter the trusted domain.
 
 
-def test_trust_policy_requires_the_out_of_band_exact_hash(tmp_path: Path) -> None:
+def test_trust_policy_accepts_no_caller_path_or_checksum(tmp_path: Path) -> None:
+    """M5.1.2 (finding C): the M5.1.1 caller-supplied path + "out-of-band" SHA-256 is gone."""
     registration_path, raw = _registration(tmp_path)
     assert load_evidence_registration(registration_path)
-    policy_path, _ = _policy(tmp_path, raw)
-    with pytest.raises(ValueError, match="out-of-band"):
-        load_trust_policy(policy_path, "not-a-hash")
-    with pytest.raises(ValueError, match="does not match"):
-        load_trust_policy(policy_path, "0" * 64)
+    policy_path = tmp_path / "trust-policy.json"
+    policy_path.write_text(json.dumps(trust_policy_value([approval_for(raw)])))
+    with pytest.raises(TypeError):
+        load_trust_policy(policy_path, file_sha256(policy_path))  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        load_reference_evidence(policy_path, trust_policy_path=policy_path,  # type: ignore[call-arg]
+                                trust_policy_sha256=file_sha256(policy_path))
+    assert load_trust_policy() is None  # no administrative trust root is installed
 
 
 def test_registration_verifies_actual_source_document_bytes(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_registration_verifies_actual_source_document_bytes(tmp_path: Path) -> N
         load_evidence_registration(registration_path)
 
 
-def test_renamed_synthetic_classification_and_cost_files_remain_unapproved(tmp_path: Path) -> None:
+def test_renamed_synthetic_classification_and_cost_files_remain_unapproved(tmp_path: Path, monkeypatch) -> None:
     _, evidence = build_world(tmp_path)
     evidence_dir = Path(evidence.config_path).parent
     classification = {"contract": "stock-gplm.m511-instrument-classification.v1", "schema_version": 1,
@@ -179,24 +179,16 @@ def test_renamed_synthetic_classification_and_cost_files_remain_unapproved(tmp_p
         evidence_dir, name="official-cost-approval", evidence_type="COST_SCHEDULE",
         dependencies={"payload": file_sha256(costs_path)},
     )
-    approvals = []
-    for registration in (class_registration, cost_registration):
-        approvals.append({key: registration[key] for key in (
-            "registration_id", "provenance_hash", "reviewer_identity", "approval_record"
-        )} | {"status": "APPROVED"})
-    policy = {"contract": "stock-gplm.m511-approval-trust-policy.v1", "schema_version": 1,
-              "trusted_reviewers": ["test-reviewer"], "approvals": approvals}
-    policy["policy_id"] = canonical_hash(policy)
-    policy_path = evidence_dir / "trust-policy.json"
-    policy_path.write_text(json.dumps(policy))
+    install_trust_root(tmp_path / "admin", monkeypatch,
+                       trust_policy_value([approval_for(class_registration), approval_for(cost_registration)]))
     paths = json.loads(Path(evidence.config_path).read_text())
     paths["instrument_classification"] = {
         "payload": classification_path.name, "registration": class_registration_path.name}
     paths["cost_schedule"] = {"payload": costs_path.name, "registration": cost_registration_path.name}
     Path(evidence.config_path).write_text(json.dumps(paths))
 
-    loaded = load_reference_evidence(
-        Path(evidence.config_path), trust_policy_path=policy_path, trust_policy_sha256=file_sha256(policy_path))
+    loaded = load_reference_evidence(Path(evidence.config_path))
+    assert loaded.trust_policy is not None and loaded.trust_policy.governed
     assert loaded.instrument_classification and not loaded.instrument_classification.authority_approved
     assert loaded.cost_schedule and not loaded.cost_schedule.authority_approved
     request = DataEligibilityRequest("ALPHA-EQ", "2024-01-01", "2024-09-30", "STRICT_RESEARCH")

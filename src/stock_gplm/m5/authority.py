@@ -1,23 +1,80 @@
-"""Versioned evidence registration and explicit approval trust policy.
+"""Versioned evidence registration and an OS-governed approval trust root (M5.1.2).
 
-An evidence registration cannot approve itself.  Authority exists only when a
-separately supplied trust-policy file has the exact out-of-band SHA-256 expected
-by the caller and contains a matching approval by a trusted reviewer.
+Finding C (M5.1.1): a caller that supplies both a trust-policy file *and* its
+"out-of-band" SHA-256 controls both sides of the comparison, so it can approve
+its own registrations. M5.1.2 removes every caller-facing policy/checksum input.
+
+Trust anchor. The only approval authority is a separately governed trust root,
+``/etc/stock-gplm/m5-approval-trust-root.json`` (contract
+``stock-gplm.m512-approval-trust-root.v1``). It is selected by a fixed path,
+never by a research argument, and is accepted only when:
+
+* the trust root, the policy file it names and the directory holding them are
+  regular, non-symlink entries opened with ``O_NOFOLLOW`` and owned by the
+  administrative account (uid 0), with no group/other write permission;
+* every ancestor directory up to ``/`` is administrator-owned and not
+  group/other-writable, so the research account cannot swap a parent;
+* the research process is *not* running as the administrative account (a
+  process that can rewrite its own trust root has no independent authority);
+* the trust root's content hash matches its ``root_id``, its status is
+  ``ACTIVE``, it pins the policy's exact file SHA-256, and the policy SHA-256 is
+  not in its ``revoked_policy_sha256`` list;
+* every reviewer and approval in the policy is authorized by the trust root.
+
+The loaded :class:`ApprovalTrustPolicy` carries a process-local issuance seal. A
+policy object constructed by a caller never approves anything. No private key
+or secret exists or is stored in this repository; the authority is the OS
+account boundary, which the research user cannot cross. See
+``docs/m512-critical-remediation.md`` for initialization, rotation and
+compromise recovery.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-from dataclasses import dataclass
+import stat
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from .issuance import _issues, verify_seal
 from .models import canonical_hash
 
 REGISTRATION_CONTRACT = "stock-gplm.m511-evidence-registration.v1"
 TRUST_POLICY_CONTRACT = "stock-gplm.m511-approval-trust-policy.v1"
+TRUST_ROOT_CONTRACT = "stock-gplm.m512-approval-trust-root.v1"
+TRUST_ROOT_FILE = "m5-approval-trust-root.json"
+
+
+@dataclass(frozen=True)
+class TrustAnchor:
+    """Where the administrative trust root lives and which account must own it.
+
+    The production value is fixed below. It is not a parameter of any research
+    API; tests substitute it only by patching this module, which is the
+    same-interpreter attacker already declared out of scope.
+    """
+    directory: Path
+    owner_uid: int
+    boundary: Path = Path("/")  # every directory from ``directory`` up to this one is checked
+
+    @property
+    def root_path(self) -> Path:
+        return self.directory / TRUST_ROOT_FILE
+
+
+_ANCHOR = TrustAnchor(Path("/etc/stock-gplm"), 0, Path("/"))
+_TRUST_ROOT_FIELDS = frozenset({
+    "contract", "schema_version", "root_id", "generation", "status", "policy_file", "policy_sha256",
+    "trusted_reviewers", "revoked_policy_sha256", "initialized_at_utc",
+})
+
+
+def _effective_uid() -> int:
+    return os.geteuid()
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 _REGISTRATION_FIELDS = frozenset({
     "contract", "schema_version", "registration_id", "evidence_type", "source_identity",
@@ -84,8 +141,29 @@ class ApprovalTrustPolicy:
     policy_sha256: str
     trusted_reviewers: frozenset[str]
     approvals: dict[str, dict[str, str]]
+    trust_root_id: str
+    trust_root_sha256: str
+    trust_root_generation: int
+    issuance_seal: str = field(default="", compare=False, repr=False)
+
+    def digest(self) -> str:
+        """Content identity covered by the issuance seal."""
+        return canonical_hash({
+            "policy_id": self.policy_id, "policy_sha256": self.policy_sha256,
+            "trusted_reviewers": sorted(self.trusted_reviewers),
+            "approvals": [self.approvals[key] for key in sorted(self.approvals)],
+            "trust_root_id": self.trust_root_id, "trust_root_sha256": self.trust_root_sha256,
+            "trust_root_generation": self.trust_root_generation,
+        })
+
+    @property
+    def governed(self) -> bool:
+        """True only for a policy loaded by :func:`load_trust_policy` in this process and unchanged."""
+        return verify_seal("trust_policy", self.digest(), self.issuance_seal)
 
     def approves(self, registration: EvidenceRegistration) -> bool:
+        if not self.governed:
+            return False  # caller-constructed or edited policies never confer authority
         approval = self.approvals.get(registration.registration_id)
         return bool(
             registration.environment == "PRODUCTION"
@@ -162,13 +240,99 @@ def load_evidence_registration(path: Path) -> EvidenceRegistration:
     )
 
 
-def load_trust_policy(path: Path, expected_sha256: str) -> ApprovalTrustPolicy:
-    """Load a policy only when its digest was supplied out of band by the caller."""
-    if not isinstance(expected_sha256, str) or _HEX.fullmatch(expected_sha256) is None:
-        raise ValueError("an out-of-band trust-policy SHA-256 is required")
-    value, digest = _read_json(path)
-    if digest != expected_sha256:
-        raise ValueError("trust-policy file does not match the out-of-band SHA-256")
+def _check_governed_stat(st: os.stat_result, what: str, anchor: TrustAnchor) -> None:
+    if st.st_uid != anchor.owner_uid:
+        raise ValueError(f"administrative trust {what} is not owned by the administrative account")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError(f"administrative trust {what} must not be group/other writable")
+
+
+def _read_governed_json(name: str, anchor: TrustAnchor, maximum: int = 1024 * 1024) -> tuple[dict[str, Any], str]:
+    """Read one administrator-owned file from the anchor directory without following links."""
+    if _effective_uid() == anchor.owner_uid:
+        raise ValueError("research must not run as the administrative trust-root account")
+    directory = anchor.directory
+    if not directory.is_absolute() or not (directory == anchor.boundary or anchor.boundary in directory.parents):
+        raise ValueError("administrative trust directory must be absolute and inside its checked boundary")
+    chain = [directory, *directory.parents]
+    for ancestor in chain[:chain.index(anchor.boundary) + 1]:
+        st = os.lstat(ancestor)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError(f"administrative trust path component is not a real directory: {ancestor}")
+        _check_governed_stat(st, f"directory {ancestor}", anchor)
+    descriptor = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    try:
+        st = os.fstat(descriptor)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > maximum:
+            raise ValueError(f"administrative trust input must be a bounded regular file: {name}")
+        _check_governed_stat(st, f"file {name}", anchor)
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError(f"administrative trust input exceeds {maximum} bytes: {name}")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError("administrative trust input must be a JSON object")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def _unique_identities(value: Any, what: str) -> list[str]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and item.strip() for item in value) \
+            or len(value) != len(set(value)):
+        raise ValueError(f"{what} requires unique non-empty identities")
+    return value
+
+
+def _load_trust_root(anchor: TrustAnchor) -> tuple[dict[str, Any], str]:
+    value, digest = _read_governed_json(TRUST_ROOT_FILE, anchor)
+    if set(value) != _TRUST_ROOT_FIELDS or value["contract"] != TRUST_ROOT_CONTRACT or value["schema_version"] != 1:
+        raise ValueError("unsupported administrative trust-root contract or fields")
+    binding = {key: value[key] for key in sorted(_TRUST_ROOT_FIELDS - {"root_id"})}
+    if value["root_id"] != canonical_hash(binding):
+        raise ValueError("administrative trust-root identifier does not match its content")
+    if value["status"] != "ACTIVE":
+        raise ValueError("administrative trust root is not ACTIVE (revoked or suspended)")
+    if isinstance(value["generation"], bool) or not isinstance(value["generation"], int) or value["generation"] < 1:
+        raise ValueError("administrative trust-root generation must be a positive integer")
+    policy_file = value["policy_file"]
+    if (not isinstance(policy_file, str) or not policy_file or policy_file == TRUST_ROOT_FILE
+            or Path(policy_file).is_absolute() or len(Path(policy_file).parts) != 1 or policy_file in {".", ".."}):
+        raise ValueError("administrative trust root must name one policy file in its own directory")
+    if not isinstance(value["policy_sha256"], str) or _HEX.fullmatch(value["policy_sha256"]) is None:
+        raise ValueError("administrative trust root requires a lowercase policy SHA-256")
+    _unique_identities(value["trusted_reviewers"], "administrative trust root")
+    revoked = value["revoked_policy_sha256"]
+    if not isinstance(revoked, list) or not all(isinstance(item, str) and _HEX.fullmatch(item) for item in revoked):
+        raise ValueError("administrative trust root revoked_policy_sha256 must list SHA-256 values")
+    if value["policy_sha256"] in revoked:
+        raise ValueError("administrative trust root pins a revoked policy")
+    try:
+        initialized = datetime.fromisoformat(value["initialized_at_utc"].replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("administrative trust-root timestamp must be ISO-8601") from exc
+    if initialized.tzinfo is None:
+        raise ValueError("administrative trust-root timestamp must include a timezone")
+    return value, digest
+
+
+@_issues("trust_policy")
+def load_trust_policy(*, _sign: Any = None) -> ApprovalTrustPolicy | None:
+    """Load the policy pinned by the administrative trust root; absence leaves strict research blocked.
+
+    Takes no path or checksum: research inputs cannot select or vouch for a policy.
+    Returns ``None`` only when no trust root is installed; every other problem raises.
+    """
+    anchor = _ANCHOR
+    try:
+        os.lstat(anchor.root_path)
+    except FileNotFoundError:
+        return None
+    root, root_digest = _load_trust_root(anchor)
+    value, digest = _read_governed_json(root["policy_file"], anchor)
+    if digest != root["policy_sha256"]:
+        raise ValueError("active trust policy does not match the administrative trust-root SHA-256")
     if set(value) != {"contract", "schema_version", "policy_id", "trusted_reviewers", "approvals"}:
         raise ValueError("trust policy has missing or unsupported fields")
     if value["contract"] != TRUST_POLICY_CONTRACT or value["schema_version"] != 1:
@@ -178,6 +342,8 @@ def load_trust_policy(path: Path, expected_sha256: str) -> ApprovalTrustPolicy:
         isinstance(item, str) and item for item in reviewers
     ):
         raise ValueError("trust policy requires unique reviewer identities")
+    if not set(reviewers) <= set(root["trusted_reviewers"]):
+        raise ValueError("trust policy contains a reviewer not authorized by the administrative trust root")
     approvals: dict[str, dict[str, str]] = {}
     if not isinstance(value["approvals"], list):
         raise ValueError("trust policy approvals must be a list")
@@ -196,4 +362,6 @@ def load_trust_policy(path: Path, expected_sha256: str) -> ApprovalTrustPolicy:
     binding = {key: value[key] for key in ("contract", "schema_version", "trusted_reviewers", "approvals")}
     if value["policy_id"] != canonical_hash(binding):
         raise ValueError("trust-policy identifier does not match its content")
-    return ApprovalTrustPolicy(value["policy_id"], digest, frozenset(reviewers), approvals)
+    policy = ApprovalTrustPolicy(value["policy_id"], digest, frozenset(reviewers), approvals,
+                                 root["root_id"], root_digest, root["generation"])
+    return replace(policy, issuance_seal=_sign(policy.digest()))

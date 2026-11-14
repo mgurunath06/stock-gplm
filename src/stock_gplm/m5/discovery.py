@@ -1,9 +1,12 @@
 """Read-only discovery of published Shoonya NSE daily segments.
 
 Discovery inspects names and sidecar completeness only. With ``verify=True`` it
-also runs the established :func:`validate_daily` publication/content check on
-every payload. It never writes inside the raw root and never infers listing,
-calendar or alias facts from what it finds.
+requires a hash-verified M3.2 holdout boundary and runs
+:func:`~stock_gplm.m5.holdout_validation.validate_daily_for_development` on each
+segment: only metadata-verified pre-cutoff payloads are opened, and segments
+reaching the locked holdout are reported ``NOT_OPENED_LOCKED_HOLDOUT`` without
+being read (M5.1.2). It never writes inside the raw root and never infers
+listing, calendar or alias facts from what it finds.
 """
 from __future__ import annotations
 
@@ -11,16 +14,29 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from stock_gplm.ingestion.daily import validate_daily
-
 from .adapter import LOCK_NAME, _segments, publication_lock_active
-from .evidence import EtfHeuristic
+from .evidence import EtfHeuristic, HoldoutBoundary
+from .holdout_validation import validate_daily_for_development
 
 DISCOVERY_CONTRACT = "stock-gplm.m5-discovery.v1"
 
 
-def discover(raw_root: Path, etf: EtfHeuristic, *, verify: bool = False) -> dict[str, Any]:
+def _verdict(path: Path, holdout: HoldoutBoundary) -> str:
+    report = validate_daily_for_development(path, holdout.cutoff)
+    codes = {issue.code for issue in report.publication_integrity.issues}
+    if "holdout_partition_required" in codes:
+        return "NOT_OPENED_LOCKED_HOLDOUT"
+    if "partition_metadata" in codes:
+        return "NOT_OPENED_PARTITION_METADATA"
+    return report.disposition
+
+
+def discover(raw_root: Path, etf: EtfHeuristic, *, verify: bool = False,
+             holdout: HoldoutBoundary | None = None) -> dict[str, Any]:
+    """Inventory published segments; ``verify`` requires the hash-verified ``holdout`` boundary."""
     raw_root = Path(raw_root)
+    if verify and not isinstance(holdout, HoldoutBoundary):
+        raise ValueError("discovery verification requires a hash-verified M3.2 holdout boundary")
     symbols: list[dict[str, Any]] = []
     totals: Counter[str] = Counter()
     dispositions: Counter[str] = Counter()
@@ -46,7 +62,7 @@ def discover(raw_root: Path, etf: EtfHeuristic, *, verify: bool = False) -> dict
             "last_window_end": max(s.split("_")[1] for s in complete) if complete else None,
         }
         if verify:
-            verdicts = Counter(validate_daily(groups[stem][".json.gz"]).disposition for stem in complete)
+            verdicts = Counter(_verdict(groups[stem][".json.gz"], holdout) for stem in complete)
             item["dispositions"] = dict(sorted(verdicts.items()))
             dispositions.update(verdicts)
         symbols.append(item)
@@ -60,7 +76,8 @@ def discover(raw_root: Path, etf: EtfHeuristic, *, verify: bool = False) -> dict
         "complete_segments": totals["complete_segments"], "incomplete_segments": totals["incomplete_segments"],
         "unexpected_files": totals["unexpected_files"], "unexpected_root_entries": unexpected_root,
         "segment_windows": dict(sorted(windows.items())),
-        "verified": verify, "dispositions": dict(sorted(dispositions.items())) if verify else None,
+        "verified": verify, "holdout_cutoff": holdout.cutoff if verify and holdout else None,
+        "dispositions": dict(sorted(dispositions.items())) if verify else None,
         "per_symbol": symbols,
         "not_inferred": ["listing dates", "trading holidays", "aliases", "corporate actions",
                          "historical membership"],

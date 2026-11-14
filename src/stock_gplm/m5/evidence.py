@@ -424,7 +424,6 @@ class ReferenceEvidence:
     # M5.1.1 freshness: the evidence-paths file this was loaded from (outside the digest, so
     # identities stay relocation-stable). Strict runs reload it before execution.
     config_path: str | None = field(default=None, compare=False)
-    trust_policy_path: str | None = field(default=None, compare=False)
     issuance_seal: str = field(default="", compare=False, repr=False)
 
 
@@ -432,7 +431,7 @@ def _canonical(value: Any) -> Any:
     """Portable JSON form of evidence objects for content hashing."""
     if is_dataclass(value) and not isinstance(value, type):
         return {f.name: _canonical(getattr(value, f.name)) for f in fields(value)
-                if f.name not in {"issuance_seal", "config_path", "trust_policy_path"}}
+                if f.name not in {"issuance_seal", "config_path"}}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, Decimal):
@@ -480,8 +479,6 @@ def _registered_pair(paths: dict[str, Any], key: str, base: Path) -> tuple[Path,
 def load_reference_evidence(
     config_path: Path,
     *,
-    trust_policy_path: Path | None = None,
-    trust_policy_sha256: str | None = None,
     _sign: Any = None,
 ) -> ReferenceEvidence:
     """Load a ``stock-gplm.m5-evidence-paths.v1`` file; relative paths resolve from its directory."""
@@ -494,11 +491,7 @@ def load_reference_evidence(
         raise ValueError("unsupported M5 evidence-paths document")
     base = Path(config_path).resolve().parent
     hashes: dict[str, str] = {}
-    policy = None
-    if trust_policy_path is not None or trust_policy_sha256 is not None:
-        if trust_policy_path is None or trust_policy_sha256 is None:
-            raise ValueError("trust policy path and out-of-band SHA-256 must be supplied together")
-        policy = load_trust_policy(trust_policy_path, trust_policy_sha256)
+    policy = load_trust_policy()
     holdout = load_holdout_boundary(base / paths["m32_run"]) if paths.get("m32_run") else None
     etf = load_etf_heuristic(base / paths["etf_heuristic"])
     hashes["etf_heuristic"] = etf.source_sha256
@@ -553,10 +546,10 @@ def load_reference_evidence(
         hashes["evidence_authority_registration"] = authority.registration_sha256
     if policy is not None:
         hashes["approval_trust_policy"] = policy.policy_sha256
+        hashes["administrative_trust_root"] = policy.trust_root_sha256
     evidence = ReferenceEvidence(holdout, etf, calendar, imported.get("listing_history"),
                                  imported.get("symbol_mappings"), imported.get("corporate_actions"),
                                  events, tokens, hashes, basis.basis if basis else None, basis,
                                  policy, authority, authority_approved, classification, costs)
     return replace(evidence, config_path=str(Path(config_path).resolve()),
-                   trust_policy_path=str(Path(trust_policy_path).resolve()) if trust_policy_path else None,
                    issuance_seal=_sign(evidence_digest(evidence)))
