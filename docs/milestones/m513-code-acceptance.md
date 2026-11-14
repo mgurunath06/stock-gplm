@@ -57,7 +57,7 @@ Keep the original report next to this record if it becomes available.
 
 Checked locally on 2026-11-14:
 
-- `102198a` is an ancestor of the closing commit, and its direct parent.
+- `102198a` is an ancestor of the closing commit; `57c6544` is its direct parent.
 - `main` is an ancestor of `102198a`.
 - Only this document changed between `102198a` and the closing commit.
 
