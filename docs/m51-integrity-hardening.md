@@ -77,9 +77,17 @@ evidence-paths document.
   modules that exercise the strict run machinery opt into the explicit
   `waive_strict_authority` monkeypatch fixture. `tests/test_m511_authority.py`
   runs without it.
-- *Not yet closed (see `docs/handover/m511-to-codex.md`):* sealed objects are
-  not revalidated against their source files before strict classification
-  (freshness), and seals prove which loader ran, not whether the evidence is
+- *Freshness (M5.1.1):* segment records bind payload, `.done` and `.meta.json`
+  SHA-256. Before any `STRICT_RESEARCH` run executes, the runner calls
+  `decision.revalidate()` for every member. That call re-hashes those bytes
+  without decoding them, checks that the overlapping-segment set is unchanged,
+  and reloads the evidence-paths file to compare the evidence digest. One stale
+  member raises `StaleAssessmentError` for the whole universe, before anything
+  is written. Residual time-of-check/time-of-use window: the run uses the
+  in-memory bars verified at check time, so later file changes cannot alter that
+  run, but they are only detected by the next revalidation or replay.
+  Diagnostic runs are not revalidated.
+- *Not yet closed (see `docs/handover/m511-to-codex.md`):* seals prove which loader ran, not whether the evidence is
   authentic or approved.
 
 **Caller-supplied research is still allowed.** A list of caller-built datasets

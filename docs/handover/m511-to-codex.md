@@ -21,8 +21,8 @@ corporate actions or provider price basis evidence.
 | Worktree | `/home/mgurunath/projects/stock-gplm-m45` |
 | Branch | `fix/m511-strict-authorization` (local only, never pushed) |
 | Base | `feature/m51-integrity-hardening` @ `0a25f864dd4ea255a828a4ff6cce3a66d02c04bc` |
-| HEAD | the `fix(m511): add strict authority gates` commit (see `git log`); prior: `39e55d1` docs, `667ab61` A.1 |
-| Working tree | clean after the authority-gates commit |
+| HEAD | docs commit after `621e39e` (see `git log -1`). Code commits: `667ab61` A.1, `2cd419a` A.3/A.4, `621e39e` A.2 |
+| Working tree | clean |
 
 The main checkout `/home/mgurunath/projects/stock-gplm` is on
 `feature/v1-configurable-strategy-engine` and has the audit untracked under
@@ -33,7 +33,7 @@ The main checkout `/home/mgurunath/projects/stock-gplm` is on
 | Finding | Status | Notes |
 | --- | --- | --- |
 | A.1 importable signer | **FIXED** (`667ab61`) | See §4. |
-| A.2 freshness / revalidation | NOT STARTED | P0. Design in §6.2. |
+| A.2 freshness / revalidation | **FIXED** (`621e39e`) | See §4c. |
 | A.3 heuristic ETF + unverified costs not gated | **FIXED (gate)** | Strict always BLOCKED until authoritative sources exist. See §4b. |
 | A.4 synthetic/unapproved evidence can reach strict | **FIXED (gate)** | See §4b. The positive approval path is C (§6.4). |
 | B atomic universes | PASS in audit, no work needed | |
@@ -107,6 +107,47 @@ protection is that `EVIDENCE_AUTHORITY_UNAPPROVED` always fails until C is built
 such as `test` can appear in legitimate references; that fails closed (BLOCKED), which is
 acceptable. The waiver fixture must never move into `src/` or a non-test conftest.
 
+## 4c. Completed: A.2 — assessment freshness (`621e39e`)
+
+**Root cause.** A sealed in-memory `UniverseAssessment` stayed strict-authorizing after
+its raw root moved; the runner never re-read sources.
+
+**Remedy.**
+- `m5/adapter.py`: segment records add `done_sha256` and `meta_sha256` (bound into the
+  decision; relative names, so relocation-stable). Issued decisions get
+  `revalidator = adapter.revalidate`. `HistoricalDataAdapter.revalidate(decision)`:
+  - checks the evidence digest matches;
+  - reloads `evidence.config_path` and compares digests, so modified, removed or
+    unregistered evidence fails;
+  - checks the symbol directory exists and has no unexpected entries;
+  - checks the overlapping-segment set is unchanged;
+  - re-hashes payload, `.done` and `.meta.json` bytes (no decoding).
+- `m5/models.py`: `StaleAssessmentError(ValueError)` and a non-binding, non-serialized
+  `revalidator` field. `DataEligibilityDecision.revalidate()` fails closed when no
+  revalidator is attached.
+- `m5/evidence.py`: `ReferenceEvidence.config_path` (excluded from the digest).
+- `m5/runner.py` `_resolve_release`: strict universe → every decision revalidated (atomic);
+  strict dataset list → every dataset revalidated. Diagnostic runs are not revalidated.
+  Replay re-assesses from files, so it is unchanged.
+- `m5/__init__.py`: exports `StaleAssessmentError`.
+- `tests/test_m511_freshness.py` (13 tests; uses the test-only waiver to reach strict):
+  - unchanged sources run;
+  - each of payload modified/replaced, `.done` modified/removed, meta modified/removed
+    and symbol directory moved in BETA only blocks the whole universe and writes nothing;
+  - master modified, paths file removed and source unregistered each fail;
+  - a stale dataset list is rejected;
+  - diagnostic runs are unaffected.
+
+**Residual risks.**
+- TOCTOU: there is a window between the hash check and use. The run uses in-memory bars
+  verified at check time, so later changes cannot alter that run; they are detected only
+  by the next revalidation or by replay.
+- The payload hash recorded at assessment comes from `validate_daily`, while `.done` and
+  meta are hashed moments later in the same pass; a change in that sub-second window is
+  caught at revalidation.
+- Same-process code can replace `revalidator` (out of scope, as with seals).
+- Evidence reload re-reads the M3.2 split-plan metadata, not holdout candles.
+
 ## 5. Test results
 
 Command (the worktree has no `.venv`; without `PYTHONPATH=src` the **main checkout** is
@@ -119,7 +160,8 @@ imported instead and results are meaningless):
 | --- | --- |
 | `0a25f86` baseline | 734 passed, 2 skipped |
 | `667ab61` | **736 passed, 2 skipped, 0 failed** |
-| authority-gates commit | **745 passed, 2 skipped, 0 failed** |
+| `2cd419a` | **745 passed, 2 skipped, 0 failed** |
+| `621e39e` | **758 passed, 2 skipped, 0 failed, 0 deselected** |
 
 The two skips (`test_m22_master_validation.py:95`, `test_m2_quality.py:272`) need local
 real-data files that are not in this worktree. The audit's 736/0-skip figure came from an
@@ -155,6 +197,9 @@ schedule and authoritative classification loaders). The notes below are kept for
   the new blockers; never weaken a gate to keep an old test green.
 
 ### 6.2 P0 — freshness / revalidation (audit criterion 2)
+
+**DONE (§4c).** Remaining: Studio and CLI surface `StaleAssessmentError` as a generic
+error (the CLI exits non-zero); consider a dedicated 409 response. Original notes follow.
 
 Problem: `runner._resolve_release` (`runner.py:186-232`) trusts a sealed in-memory
 assessment; moving the raw root afterwards still yields an investable run.
