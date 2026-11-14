@@ -97,3 +97,10 @@ purge and embargo checks, and label contracts. It fits LightGBM only when every 
 daily gate passes. Its numeric dependencies are confined to the `m35` extra. The separate
 `stock_gplm.llm` package is opt-in and advisory, and no training or validation module
 imports it.
+
+M3.9 adds `stock_gplm.m39` as a separate NSE MCP reference boundary. It allowlists only NSE's
+two published HTTPS MCP paths, defaults to tool discovery, and requires explicit opt-in for one
+bounded sample over RELIANCE, INFY, or TCS before the locked holdout. Comparisons read only an
+accepted Shoonya yearly segment whose filename ends before the holdout. MCP data and reports
+cannot enter raw, dataset, feature, training, model, or backtest paths, and no research/training
+module imports M3.9. This boundary does not validate M3.6 evidence or any M3.2/M3.5 gate.

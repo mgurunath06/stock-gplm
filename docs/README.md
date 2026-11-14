@@ -22,5 +22,7 @@
 - [M3.7 evidence report — 2026-11-02](m37-evidence-report-2026-11-02.md)
 - [M3.8 signal discovery and data-quality audit](m38-signal-discovery.md)
 - [M3.8 evidence report — 2026-11-02](m38-evidence-report-2026-11-02.md)
+- [M3.9 NSE MCP reference validation](m39-nse-mcp.md)
+- [M3.9 live evidence report — 2026-11-14](m39-evidence-report-2026-11-14.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)
