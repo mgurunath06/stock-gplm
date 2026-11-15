@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "strategy": {
+    "id": "ema-rsi-trend-user-banks-v1",
+    "name": "EMA Trend RSI (user copy, banks only)",
+    "description": "User-edited copy of ema-rsi-trend-v1 restricted to three bank symbols with a tighter stop. Research only.",
+    "enabled": true,
+    "timeframe": "1d"
+  },
+  "universe": {
+    "exchange": "NSE",
+    "instrument_type": "EQ",
+    "symbols": [
+      "HDFCBANK-EQ",
+      "ICICIBANK-EQ",
+      "SBIN-EQ"
+    ]
+  },
+  "indicators": [
+    {
+      "id": "ema20",
+      "type": "EMA",
+      "period": 20,
+      "field": "close"
+    },
+    {
+      "id": "ema50",
+      "type": "EMA",
+      "period": 50,
+      "field": "close"
+    },
+    {
+      "id": "ema200",
+      "type": "EMA",
+      "period": 200,
+      "field": "close"
+    },
+    {
+      "id": "rsi14",
+      "type": "RSI",
+      "period": 14,
+      "field": "close"
+    },
+    {
+      "id": "vol-ma20",
+      "type": "SMA_VOLUME",
+      "period": 20,
+      "field": "volume"
+    }
+  ],
+  "entry": {
+    "operator": "AND",
+    "conditions": [
+      {
+        "operator": "CROSS_ABOVE",
+        "left": {
+          "indicator": "ema20"
+        },
+        "right": {
+          "indicator": "ema50"
+        }
+      },
+      {
+        "operator": "GT",
+        "left": {
+          "field": "close"
+        },
+        "right": {
+          "indicator": "ema200"
+        }
+      },
+      {
+        "operator": "GTE",
+        "left": {
+          "indicator": "rsi14"
+        },
+        "right": {
+          "constant": 50
+        }
+      },
+      {
+        "operator": "LTE",
+        "left": {
+          "indicator": "rsi14"
+        },
+        "right": {
+          "constant": 70
+        }
+      },
+      {
+        "operator": "GTE",
+        "left": {
+          "field": "volume"
+        },
+        "right": {
+          "indicator": "vol-ma20"
+        }
+      }
+    ]
+  },
+  "exit": {
+    "condition": {
+      "operator": "OR",
+      "conditions": [
+        {
+          "operator": "CROSS_BELOW",
+          "left": {
+            "indicator": "ema20"
+          },
+          "right": {
+            "indicator": "ema50"
+          }
+        },
+        {
+          "operator": "GT",
+          "left": {
+            "indicator": "rsi14"
+          },
+          "right": {
+            "constant": 80
+          }
+        }
+      ]
+    },
+    "max_holding_sessions": 60
+  },
+  "risk": {
+    "stop_loss": {
+      "type": "percent",
+      "value": 4
+    },
+    "take_profit": {
+      "type": "percent",
+      "value": 15
+    }
+  },
+  "position_sizing": {
+    "type": "fixed_fraction",
+    "value": 0.2
+  },
+  "trading_costs": {
+    "profile": "nse-equity-example",
+    "commission_bps": 5,
+    "slippage_bps": 10
+  }
+}

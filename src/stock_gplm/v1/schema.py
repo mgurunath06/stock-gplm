@@ -24,7 +24,12 @@ ALLOWED_OPERATORS = (
     LOGICAL_OPERATORS | COMPARISON_OPERATORS | ARITHMETIC_OPERATORS | ROLLING_OPERATORS
 )
 ALLOWED_FIELDS = frozenset({"open", "high", "low", "close", "volume"})
-ALLOWED_INDICATORS = frozenset({"SMA", "SMA_VOLUME", "EMA", "HIGHEST", "LOWEST", "PERCENT_CHANGE"})
+ALLOWED_INDICATORS = frozenset({
+    "SMA", "SMA_VOLUME", "EMA", "HIGHEST", "LOWEST", "PERCENT_CHANGE",
+    "RSI", "MACD", "ATR", "VOLATILITY",
+})
+# MACD is the only indicator with parameters beyond ``period`` (its slow EMA span).
+MACD_OUTPUTS = frozenset({"line", "signal", "histogram"})
 ALLOWED_TIMEFRAMES = frozenset({"1d"})
 ALLOWED_INSTRUMENT_TYPES = frozenset({"EQ"})
 ALLOWED_RISK_TYPES = frozenset({"percent"})
@@ -100,7 +105,7 @@ def _offset(value: Any, path: str) -> int:
 
 
 def _validate_indicator(raw: Any, path: str, seen: set[str]) -> dict[str, Any]:
-    item = _object(raw, path, {"id", "type", "period"}, {"field"})
+    item = _object(raw, path, {"id", "type", "period"}, {"field", "fast", "signal", "output"})
     identifier = _text(item["id"], f"{path}.id", maximum=64)
     if not _IDENTIFIER.fullmatch(identifier):
         _fail(f"{path}.id", "must match [a-z][a-z0-9_-]{0,63}")
@@ -117,7 +122,25 @@ def _validate_indicator(raw: Any, path: str, seen: set[str]) -> dict[str, Any]:
         _fail(f"{path}.field", f"must be one of {sorted(ALLOWED_FIELDS)}")
     if kind == "SMA_VOLUME" and field != "volume":
         _fail(f"{path}.field", "SMA_VOLUME requires volume")
-    return {"id": identifier, "type": kind, "period": period, "field": field}
+    if kind == "ATR" and field != "close":
+        _fail(f"{path}.field", "ATR is defined on high, low and close; field must be close")
+    if kind in {"RSI", "VOLATILITY"} and period < 2:
+        _fail(f"{path}.period", f"{kind} requires period >= 2")
+    if kind != "MACD":
+        extra = sorted({"fast", "signal", "output"} & set(item))
+        if extra:
+            _fail(path, f"{extra} are only valid for MACD")
+        # Unchanged normalization keeps config hashes of pre-existing strategies stable.
+        return {"id": identifier, "type": kind, "period": period, "field": field}
+    fast = _positive_int(item.get("fast", 12), f"{path}.fast", maximum=MAX_LOOKBACK)
+    signal = _positive_int(item.get("signal", 9), f"{path}.signal", maximum=MAX_LOOKBACK)
+    if fast >= period:
+        _fail(f"{path}.fast", "MACD fast span must be shorter than period (the slow span)")
+    output = item.get("output", "line")
+    if output not in MACD_OUTPUTS:
+        _fail(f"{path}.output", f"must be one of {sorted(MACD_OUTPUTS)}")
+    return {"id": identifier, "type": kind, "period": period, "field": field,
+            "fast": fast, "signal": signal, "output": output}
 
 
 def _validate_operand(

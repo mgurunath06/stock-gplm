@@ -1,0 +1,30 @@
+{
+  "contract": "stock-gplm.mvp-minute-experiment.v1",
+  "status": "DRAFT_NOT_AUTHORIZED",
+  "name": "minute-2026-recency-v1",
+  "purpose": "Separate study of daily trend + intraday session features on 2026 data. Distinct from M3.2; never scored against the M3.2 locked holdout.",
+  "conflict_with_m32": "All 2026 sessions fall inside or after the M3.2 locked-holdout range (earliest 2025-10-21). Executing this study consumes those dates for this study only; M3.2 models must still be scored on them exactly once, before any 2026 result is inspected. Requires explicit approval.",
+  "source": {
+    "minute_root": "CANDIDATE: a new versioned root created by the authorized copy-only reconciliation (not data/raw/shoonya/NSE/minute/)",
+    "schema": "ShoonyaMinuteV1",
+    "manifest": "REQUIRED: hash manifest of every payload before any decode",
+    "excluded_symbols": "the 25 MISSING_COLLECTION_UNKNOWN symbols"
+  },
+  "partitions": {
+    "train": ["2026-01-01", "2026-06-30"],
+    "embargo_sessions_after_train": 5,
+    "validation": ["2026-07-08", "2026-08-31"],
+    "embargo_sessions_after_validation": 5,
+    "final_test": ["2026-09-08", "2026-11-13"],
+    "final_test_rule": "Opened once, after the configuration is frozen by validation results; hashed manifest written before opening."
+  },
+  "training_windows": {
+    "window_sessions": [null, 60, 120],
+    "half_lives_sessions": [20, 60],
+    "baseline": "equal weight per window size",
+    "selection": "validation partition only"
+  },
+  "horizons_sessions": [1, 5, 20],
+  "features": {"daily": "V1 indicators (EMA, RSI, MACD, ATR, volatility, volume)", "intraday": "session summaries via stock_gplm.mvp.research.IntradayFeatureSource, available after 15:30 IST"},
+  "trial_budget": "REQUIRED before execution (proposal: 20 per horizon, shared ledger)"
+}

@@ -1,0 +1,82 @@
+schema_version: 1
+strategy:
+  id: macd-momentum-v1
+  name: MACD Momentum with Volatility Cap
+  description: "Default example: MACD histogram turns positive above the 50-day EMA while realized volatility is moderate. Research only."
+  enabled: true
+  timeframe: 1d
+universe:
+  exchange: NSE
+  instrument_type: EQ
+  symbols: []
+indicators:
+  - id: macd-hist
+    type: MACD
+    period: 26
+    fast: 12
+    signal: 9
+    output: histogram
+    field: close
+  - id: ema50
+    type: EMA
+    period: 50
+    field: close
+  - id: vol20
+    type: VOLATILITY
+    period: 20
+    field: close
+  - id: atr14
+    type: ATR
+    period: 14
+    field: close
+entry:
+  operator: AND
+  conditions:
+    - operator: CROSS_ABOVE
+      left:
+        indicator: macd-hist
+      right:
+        constant: 0
+    - operator: GT
+      left:
+        field: close
+      right:
+        indicator: ema50
+    - operator: LT
+      left:
+        indicator: vol20
+      right:
+        constant: 0.025
+    - operator: LT
+      left:
+        operator: SUBTRACT
+        operands:
+          - field: high
+          - field: low
+      right:
+        operator: MULTIPLY
+        operands:
+          - indicator: atr14
+          - constant: 2
+exit:
+  condition:
+    operator: CROSS_BELOW
+    left:
+      indicator: macd-hist
+    right:
+      constant: 0
+  max_holding_sessions: 20
+risk:
+  stop_loss:
+    type: percent
+    value: 5
+  take_profit:
+    type: percent
+    value: 12
+position_sizing:
+  type: fixed_fraction
+  value: 0.2
+trading_costs:
+  profile: nse-equity-example
+  commission_bps: 5
+  slippage_bps: 10

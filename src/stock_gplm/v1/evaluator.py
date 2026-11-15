@@ -101,6 +101,80 @@ def _percent_change(values: list[float], period: int) -> list[float | None]:
     return output
 
 
+def _ema_partial(values: list[float | None], period: int) -> list[float | None]:
+    """EMA over a series whose leading entries may be undefined (seeded by the first full SMA)."""
+    output: list[float | None] = [None] * len(values)
+    start = next((i for i, v in enumerate(values) if v is not None), None)
+    if start is None:
+        return output
+    tail = [float(v) for v in values[start:] if v is not None]
+    if len(tail) != len(values) - start:
+        raise AssertionError("undefined value after the first defined value")
+    for offset, value in enumerate(_ema(tail, period)):
+        output[start + offset] = value
+    return output
+
+
+def _rsi(values: list[float], period: int) -> list[float | None]:
+    """Wilder RSI; the first value uses the simple mean of the first ``period`` changes."""
+    output: list[float | None] = [None] * len(values)
+    if len(values) <= period:
+        return output
+    changes = [values[i] - values[i - 1] for i in range(1, len(values))]
+    gain = sum(max(c, 0.0) for c in changes[:period]) / period
+    loss = sum(max(-c, 0.0) for c in changes[:period]) / period
+
+    def value(g: float, l: float) -> float:
+        if l == 0.0:
+            return 100.0 if g > 0.0 else 50.0
+        return 100.0 - 100.0 / (1.0 + g / l)
+
+    output[period] = value(gain, loss)
+    for index in range(period + 1, len(values)):
+        change = changes[index - 1]
+        gain = (gain * (period - 1) + max(change, 0.0)) / period
+        loss = (loss * (period - 1) + max(-change, 0.0)) / period
+        output[index] = value(gain, loss)
+    return output
+
+
+def _macd(values: list[float], fast: int, slow: int, signal: int, output: str) -> list[float | None]:
+    fast_ema, slow_ema = _ema(values, fast), _ema(values, slow)
+    line = [None if f is None or s is None else f - s for f, s in zip(fast_ema, slow_ema)]
+    if output == "line":
+        return line
+    signal_line = _ema_partial(line, signal)
+    if output == "signal":
+        return signal_line
+    return [None if m is None or s is None else m - s for m, s in zip(line, signal_line)]
+
+
+def _atr(candles: tuple[dict[str, Any], ...], period: int) -> list[float | None]:
+    """Wilder average true range; the first bar has no prior close and is not used."""
+    output: list[float | None] = [None] * len(candles)
+    ranges = [max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"]))
+              for p, c in zip(candles, candles[1:])]
+    if len(ranges) < period:
+        return output
+    average = sum(ranges[:period]) / period
+    output[period] = average
+    for index in range(period, len(ranges)):
+        average = (average * (period - 1) + ranges[index]) / period
+        output[index + 1] = average
+    return output
+
+
+def _volatility(values: list[float], period: int) -> list[float | None]:
+    """Sample standard deviation of the last ``period`` daily log returns (not annualized)."""
+    output: list[float | None] = [None] * len(values)
+    returns = [None] + [math.log(values[i] / values[i - 1]) for i in range(1, len(values))]
+    for index in range(period, len(values)):
+        window = [float(r) for r in returns[index - period + 1 : index + 1] if r is not None]
+        mean = sum(window) / period
+        output[index] = math.sqrt(sum((r - mean) ** 2 for r in window) / (period - 1))
+    return output
+
+
 def compute_indicators(config: Mapping[str, Any], candles: tuple[dict[str, Any], ...]) -> dict[str, list[float | None]]:
     result: dict[str, list[float | None]] = {}
     for item in config["indicators"]:
@@ -116,6 +190,14 @@ def compute_indicators(config: Mapping[str, Any], candles: tuple[dict[str, Any],
             output = _rolling(values, item["period"], False)
         elif kind == "PERCENT_CHANGE":
             output = _percent_change(values, item["period"])
+        elif kind == "RSI":
+            output = _rsi(values, item["period"])
+        elif kind == "MACD":
+            output = _macd(values, item["fast"], item["period"], item["signal"], item["output"])
+        elif kind == "ATR":
+            output = _atr(candles, item["period"])
+        elif kind == "VOLATILITY":
+            output = _volatility(values, item["period"])
         else:  # protected by schema validation
             raise AssertionError(f"unhandled indicator {kind}")
         result[item["id"]] = output

@@ -159,3 +159,12 @@ registry and `demo-report.json`. Its artificial 300-session fixture triggers the
 swing breakout on one date and the mean-reversion rule on a different date; each
 enters on the following session through the same evaluator and backtester. The
 report is labelled `SYNTHETIC_ENGINEERING_DEMO_NOT_MARKET_EVIDENCE`.
+
+## Indicators added for the five-stock MVP (2026-11-15)
+
+`RSI`, `MACD`, `ATR` and `VOLATILITY` join `SMA`, `SMA_VOLUME`, `EMA`, `HIGHEST`,
+`LOWEST` and `PERCENT_CHANGE`. `MACD` accepts the optional `fast` (default 12), `signal`
+(default 9) and `output` (`line`, `signal` or `histogram`) fields, with `period` as the
+slow span. These fields are rejected on every other indicator. `ATR` requires
+`field: close`. Values are undefined (`None`, never a signal) until enough history
+exists. See [mvp-five-stock.md](mvp-five-stock.md).

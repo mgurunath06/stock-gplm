@@ -1,0 +1,25 @@
+{
+  "contract": "stock-gplm.mvp-experiment.v1",
+  "name": "five-stock-diagnostic-v1",
+  "m32_run": "../../../stock-gplm/reports/m32/26e41d003ff0c3265b3598a7f4b1ea1e51a5dde0a277603796972f7282167213",
+  "m32_run_id": "26e41d003ff0c3265b3598a7f4b1ea1e51a5dde0a277603796972f7282167213",
+  "split_plan_sha256": "5c0b0a9dd2260483eed8ba437b92e82697b5fc7537b08ee36e9ecdf787165dd7",
+  "raw_root": "../../../stock-gplm/data/raw/shoonya/NSE",
+  "symbols": ["RELIANCE-EQ", "HDFCBANK-EQ", "ICICIBANK-EQ", "INFY-EQ", "SBIN-EQ"],
+  "strategies": [
+    "../v1/strategies/swing-breakout-v1.json",
+    "../v1/strategies/mean-reversion-v1.json",
+    "../v1/strategies/ema-rsi-trend-v1.json",
+    "../v1/strategies/macd-momentum-v1.yaml",
+    "../v1/strategies/user/ema-rsi-trend-user-banks-v1.json"
+  ],
+  "horizons": {"short": 5, "swing": 20, "positional": 60},
+  "evaluation_start": "2023-11-01",
+  "evaluation_end": "2024-12-31",
+  "portfolio": {"initial_capital": 1000000.0, "max_open_positions": 5, "max_position_fraction": 0.2, "max_gross_exposure": 1.0},
+  "costs": {
+    "buy_statutory_bps": 12.41,
+    "sell_statutory_bps": 10.91,
+    "basis": "ASSUMPTION copied from config/m5/backtest-settings.example.json (NSE delivery statutory charges); brokerage/slippage from each strategy. Verify against current schedules."
+  }
+}
