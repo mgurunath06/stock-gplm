@@ -40,6 +40,22 @@ untouched outcomes. Otherwise it returns `UNCERTAIN` / `NO_TRADE`. `prediction-r
 command that reads the requested outcome. `prediction-walk-forward` runs freeze then reveal in strict
 chronological order and resumes through prediction natural keys.
 
+Every prediction now owns an immutable, content-addressed feature snapshot. The snapshot records the
+completed source bar and causally available higher-timeframe bars, raw OHLCV, all model feature values,
+declaratively configured report indicators with their parameters, fired and non-fired Stock-DNA
+conditions, fingerprints and implementation versions. Undefined values are retained as `null` with an
+explicit reason. Reveal reads only the frozen prediction and never recalculates its snapshot.
+Predictions frozen before snapshots existed (for example the original August 2025 daily run) receive
+one reconstruction from the same as-of data, stored first-write-wins and labelled
+`RECONSTRUCTED_FOR_LEGACY_PREDICTION` in every step; it is never presented as frozen evidence.
+
+Each named walk-forward is range-specific. `walk-forward-summary.json` contains the displayed steps and
+run totals; `walk-forward-steps.json` embeds the complete nested snapshots; and
+`walk-forward-steps.csv` flattens them into review columns such as `1d_EMA_20` and `15m_RSI_14`.
+`prediction-evaluate` accepts `--start`, `--end`, `--timeframe`, `--horizon` and `--run-name`. With no
+filters it is explicitly cumulative. Intraday walk-forward horizons count accepted completed bars, not
+sessions; incomplete resampling buckets are skipped and never become prediction cutoffs.
+
 ## Run locally (PowerShell, repository root)
 
 ```powershell
@@ -63,15 +79,29 @@ $env:PYTHONUTF8="1"
 # Only after the prior command has frozen the row, reveal the actual target outcome.
 .\windows\gplm.cmd prediction-reveal --prediction "<prediction_id>"
 
-# Aggregate every frozen/revealed ICICIBANK forecast.
+# Explicitly cumulative mode: aggregate every frozen/revealed ICICIBANK forecast.
 .\windows\gplm.cmd prediction-evaluate --stock "ICICIBANK" --name icicibank-evaluation
 
 # Owner-operated chronological evaluation; rerun the same command to resume.
 .\windows\gplm.cmd prediction-walk-forward --stock "ICICIBANK" --start 2025-01-01 --end 2025-08-13 --timeframe 1d --horizon 1 --name icicibank-wf-2025
 
+# Rebuild the existing August daily report from frozen records (no duplicate predictions).
+.\windows\gplm.cmd prediction-walk-forward --stock "ICICIBANK" --start 2025-08-01 --end 2025-08-29 --timeframe 1d --horizon 1 --name icicibank-daily-aug-2025
+
+# Separate bounded 15-minute, one-completed-bar horizon run. Add --details for console evidence.
+.\windows\gplm.cmd prediction-walk-forward --stock "ICICIBANK" --start 2025-08-01 --end 2025-08-29 --timeframe 15m --horizon 1 --name icicibank-15m-aug-2025
+
 # Synthetic correctness verifier; exit 2 means correctness passed but tracked catalogue gaps remain.
 .\windows\verify.cmd
 ```
+
+The daily command plans one step per accepted daily session. The 15-minute command can plan roughly
+25 times as many steps per complete session and will therefore take materially longer. Both commands
+checkpoint through immutable prediction natural keys and append-only evaluations: rerun the identical
+command after interruption to reuse completed steps. Expected output is the concise prediction-versus-
+actual table, run-specific totals, and paths under
+`<home>\reports\prediction-evaluation\<name>\`. Snapshot calculation reuses the prediction-time feature
+matrix; it does not run a separate catalogue-wide feature job.
 
 Outputs are `<home>\reports\feature-coverage\<name>\feature-coverage.csv` and `summary.json`.
 No unsupported calculation is promoted by cache success: it remains `BLOCKED_MISSING_DATA` or
