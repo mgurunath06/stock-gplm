@@ -1,5 +1,6 @@
 # Documentation
 
+- [M5.6 autonomous strategy discovery](m56-autonomous-strategy-discovery.md)
 - [M1 usage and file contract](m1-ingestion.md)
 - [One-segment real-data acceptance](real-data-acceptance.md)
 - [M2 historical inventory and data quality](m2-historical-quality.md)

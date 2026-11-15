@@ -44,7 +44,8 @@ def fmt_secs(s: float | None) -> str:
 class Progress:
     FIELDS = ("task", "stock", "timeframe", "session", "step", "steps", "model", "horizon", "epoch", "epochs",
               "train_loss", "train_acc", "oos_acc", "oos_n", "trades", "net_return", "device", "gpu_mem", "warnings",
-              "errors", "note")
+              "errors", "note", "eligible_references", "evaluated_rules", "generated_candidates",
+              "rejected_candidates", "completed_folds")
 
     def __init__(self, path: Path | None, stream: TextIO | None = None, quiet: bool = False, line_interval: float = 5.0):
         self.path = path
@@ -125,14 +126,17 @@ class Progress:
                 "oosn": f(s.get("oos_n")), "trades": f(s.get("trades")), "net": f(s.get("net_return"), 4),
                 "device": f(s.get("device")), "gpu": f(s.get("gpu_mem")), "el": fmt_secs(s["elapsed_s"]),
                 "eta": fmt_secs(s.get("eta_s_estimate")), "warn": f(s.get("warnings")), "err": f(s.get("errors")),
-                "note": f(s.get("note"))[:90]}
+                "note": f(s.get("note"))[:90], "eligible": f(s.get("eligible_references")),
+                "evaluated": f(s.get("evaluated_rules")), "generated": f(s.get("generated_candidates")),
+                "rejected": f(s.get("rejected_candidates")), "folds": f(s.get("completed_folds"))}
 
     def _line(self) -> str:
         v = self._vals()
         return (f"[{v['el']}] {v['task']} {v['stock']} {v['tf']} session {v['session']} step {v['steps']} "
                 f"units {v['units']} model {v['model']} h={v['h']} epoch {v['epoch']} loss {v['loss']} "
                 f"train_acc {v['tacc']} oos_acc {v['oos']} (n={v['oosn']}) trades {v['trades']} net {v['net']} "
-                f"device {v['device']} {v['gpu']} eta~{v['eta']} warn {v['warn']} err {v['err']}")
+                f"refs {v['eligible']} eval {v['evaluated']} gen {v['generated']} reject {v['rejected']} "
+                f"folds {v['folds']} device {v['device']} {v['gpu']} eta~{v['eta']} warn {v['warn']} err {v['err']}")
 
     def _draw(self) -> None:
         v = self._vals()
@@ -141,6 +145,7 @@ class Progress:
             f"  stock {v['stock']:<14} timeframe {v['tf']:<4} session {v['session']:<12} step {v['steps']}",
             f"  progress {v['units']:<24} model {v['model']:<9} horizon {v['h']:<4} epoch {v['epoch']}",
             f"  train loss {v['loss']:<10} train acc {v['tacc']:<7} sequential OOS acc {v['oos']} (n={v['oosn']})",
+            f"  refs {v['eligible']:<6} evaluated {v['evaluated']:<6} generated {v['generated']:<6} rejected {v['rejected']:<6} folds {v['folds']}",
             f"  trades evaluated {v['trades']:<8} mean net return {v['net']:<9} device {v['device']} {v['gpu']}",
             f"  warnings {v['warn']}  errors {v['err']}  {v['note']}",
         ]

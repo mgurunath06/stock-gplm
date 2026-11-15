@@ -1,0 +1,364 @@
+An architectural rule library of **300 non-fundamental, algorithmic trading and screening strategies** tailored for Indian equities (NSE/BSE) can be structured across **six distinct quantitative pillars**, featuring **50 concrete, rule-based strategies in each category** (`6 × 50 = 300 strategies`). Every strategy includes its market psychology ("What it means") and exact mathematical/logical pseudo-code so you can ingest them directly into your app's rule engine.
+
+### The 6 Non-Fundamental Strategy Pillars (Taxonomy Discovery)
+
+1. **Trend Following & Momentum (50 Strategies):** Moving average systems, directional trend indicators, breakouts, and relative strength.
+2. **Volume, Delivery & Accumulation (50 Strategies):** Volume-Price Analysis (VPA), NSE/BSE delivery spikes, institutional footprint, and volume oscillators.
+3. **Mean Reversion, Oscillators & Divergence (50 Strategies):** Overbought/oversold stretches, momentum divergences, statistical Z-score reversions, and indicator hooks.
+4. **Volatility, Range Contraction & Intraday Gaps (50 Strategies):** Volatility squeezes, ATR expansions, Opening Range Breakouts (ORB), and gap mechanics.
+5. **Price Action, Candlesticks & Market Structure (50 Strategies):** Multi-candle patterns, Smart Money Concepts (SMC/ICT), Fibonacci retracements, and geometric chart structures.
+6. **Indian F&O, Quantitative & Relative Strength (50 Strategies):** Open Interest (OI) build-ups, PCR/Max Pain mechanics, sector rotation vs. Nifty 50, and calendar/seasonality anomalies.
+
+---
+
+### Category 1: Trend Following & Momentum (50 Strategies)
+
+*Core Principle: Stocks showing sustained directional velocity continue outperforming due to institutional re-rating and phased fund accumulation.*
+
+1. **Golden Cross (50/200 SMA):** Long-term bull cycle initiation. `SMA(50)[t] > SMA(200)[t] AND SMA(50)[t-1] <= SMA(200)[t-1]`
+2. **Death Cross (50/200 SMA):** Long-term bear market confirmation. `SMA(50)[t] < SMA(200)[t] AND SMA(50)[t-1] >= SMA(200)[t-1]`
+3. **Swing EMA Crossover (9/21 EMA):** Short-term momentum ignition. `EMA(9)[t] crosses above EMA(21)[t] AND Close > EMA(50)`
+4. **Positional EMA Crossover (20/50 EMA):** Medium-term institutional trend shift. `EMA(20)[t] crosses above EMA(50)[t] AND ADX(14) > 20`
+5. **Triple EMA Ribbon Fan-Out (5/8/13 EMA):** High-velocity impulse wave starting. `EMA(5) > EMA(8) > EMA(13) AND (EMA(5) - EMA(13)) expanding over 3 bars`
+6. **Minervini Trend Template (Stage 2):** Institutional super-performance alignment. `Close > SMA(50) > SMA(150) > SMA(200) AND SMA(200)[t] > SMA(200)[t-20] AND Close >= 1.3 * Low_52W`
+7. **Hull Moving Average (HMA) Turn:** Zero-lag trend reversal upwards. `HMA(21)[t] > HMA(21)[t-1] AND HMA(21)[t-1] <= HMA(21)[t-2]`
+8. **VWMA over SMA Confirmation:** Volume-weighted price leading raw price. `VWMA(20) crosses above SMA(20) AND Close > VWMA(20)`
+9. **KAMA (Kaufman Adaptive MA) Breakout:** Noise-adjusted trend acceleration. `Close crosses above KAMA(10, 2, 30) AND KAMA slope > 0`
+10. **200-DMA Slope Acceleration:** Secular bull trend strengthening. `Close > SMA(200) AND (SMA(200)[t] - SMA(200)[t-10]) / SMA(200)[t-10] > 0.01`
+11. **MACD Signal Line Bullish Cross:** Momentum accelerating above its 9-period average. `MACD_Line(12,26) crosses above Signal_Line(9)`
+12. **MACD Zero-Line Breakout:** Transition from negative to positive trend regime. `MACD_Line(12,26) crosses above 0 AND MACD_Hist > 0`
+13. **MACD Histogram Slingshot:** Pullback inside an existing uptrend resolving higher. `MACD_Line > 0 AND MACD_Hist < 0 for 3 bars, then MACD_Hist[t] > MACD_Hist[t-1]`
+14. **Impulse MACD Surge:** Strong trend expansion filtering sideways chop. `MACD_Line > Signal_Line AND MACD_Line > Upper_StdDev_Band(MACD, 20)`
+15. **PPO (Percentage Price Oscillator) Breakout:** Normalized momentum cross across varied stock price levels. `PPO(12,26) crosses above PPO_Signal(9) AND PPO > 0`
+16. **ADX Trend Ignition:** Market transitioning from consolidation to strong trend. `ADX(14) crosses above 25 AND +DI(14) > -DI(14)`
+17. **DMI Bullish Dominance:** Buyers overpowering sellers with rising trend strength. `+DI(14) crosses above -DI(14) AND ADX(14)[t] > ADX(14)[t-1]`
+18. **ADX Shark Fin (Climax Filter):** Identifying fresh trend vs exhausted trend. `ADX(14) > 20 AND ADX(14) < 40 AND ADX rising for 3 consecutive bars`
+19. **Supertrend Bullish Flip:** Volatility-adjusted trend support established. `Close crosses above Supertrend(10, 3)`
+20. **Dual Supertrend Confluence:** Multi-timeframe or dual-sensitivity trend lock. `Close > Supertrend(10, 3) AND Close > Supertrend(20, 5)`
+21. **Parabolic SAR Trend Catch:** Accelerating stop-and-reverse trend trigger. `Close crosses above PSAR(0.02, 0.2) AND EMA(20) > EMA(50)`
+22. **Ichimoku Kumo Cloud Breakout:** Price clearing multi-period equilibrium resistance. `Close > MAX(Senkou_Span_A, Senkou_Span_B) AND Chikou_Span > Close[t-26]`
+23. **Ichimoku TK Cross above Cloud:** Strongest bullish signal in Ichimoku system. `Tenkan_Sen(9) crosses above Kijun_Sen(26) AND Close > Kumo_Cloud`
+24. **Kijun-Sen Trend Bounce:** Institutional dip-buying at 26-period midpoint. `Close > Kumo_Cloud AND Low <= Kijun_Sen(26) AND Close > Kijun_Sen(26)`
+25. **Aroon Bullish Emergence:** New highs occurring much more recently than lows. `Aroon_Up(25) crosses above 70 AND Aroon_Down(25) < 30`
+26. **Aroon Oscillator Zero Cross:** Net trend bias shifting positive. `(Aroon_Up(25) - Aroon_Down(25)) crosses above 0`
+27. **Vortex Indicator Bullish Cross:** Positive trend movement overtaking negative vortex movement. `VI_Plus(14) crosses above VI_Minus(14) AND High[t] > High[t-1]`
+28. **52-Week High Breakout:** All overhead historical supply cleared for the past year. `Close[t] > MAX(High, 252)[t-1] AND Volume > 1.5 * SMA(Volume, 20)`
+29. **All-Time High (ATH) Blue Sky Breakout:** Zero trapped sellers in stock history. `Close[t] > All_Time_High[t-1]`
+30. **Donchian Channel 20-Day Breakout (Turtle Entry):** Classic systematic trend-following trigger. `Close[t] > MAX(High, 20)[t-1]`
+31. **Donchian Channel 55-Day Breakout:** Macro trend breakout filter. `Close[t] > MAX(High, 55)[t-1]`
+32. **Darvas Box Top Breakout:** Price escaping a defined multi-week consolidation ceiling. `Close > Box_High (where Box_High held unbreached for >= 5 bars)`
+33. **Multi-Month Base Breakout:** Long-term accumulation resolving into markup phase. `(MAX(High, 60) - MIN(Low, 60)) / MIN(Low, 60) < 0.15 AND Close[t] > MAX(High, 60)[t-1]`
+34. **First Pullback to 20 EMA after Breakout:** Low-risk entry after initial breakout impulse. `High[t-5..t-1] > High_52W AND Low[t] <= EMA(20) * 1.01 AND Close[t] > Open[t]`
+35. **Rate of Change (ROC) Thrust:** Rapid price velocity acceleration. `ROC(12) crosses above 10% AND Volume > SMA(Volume, 20)`
+36. **Coppock Curve Bull Turn:** Long-term cyclical momentum turning positive. `WMA(ROC(14) + ROC(11), 10) crosses above 0`
+37. **TSI (True Strength Index) Signal Cross:** Double-smoothed momentum confirmation. `TSI(25, 13) crosses above EMA(TSI, 7) AND TSI > 0`
+38. **KST (Know Sure Thing) Momentum Cross:** Multi-timeframe weighted ROC alignment. `KST crosses above SMA(KST, 9) AND Close > SMA(50)`
+39. **TRIX Triple Exponential Cross:** Filtered trend impulse free of short-term whipsaws. `TRIX(15) crosses above EMA(TRIX, 9)`
+40. **Chande Momentum Oscillator (CMO) Trend Surge:** Pure momentum exceeding trend threshold. `CMO(14) crosses above 50`
+41. **Schaff Trend Cycle (STC) Acceleration:** Cycle + MACD hybrid signaling fast trend start. `STC(10, 23, 50) crosses above 25`
+42. **Heikin-Ashi Strong Bull Run:** Continuous smoothed buying pressure without lower shadows. `HA_Close > HA_Open for 3 bars AND HA_Low == HA_Open`
+43. **Linear Regression Slope Breakout:** Statistical price trajectory steepening sharply. `LinReg_Slope(Close, 20) > 0 AND R_Squared(Close, 20) > 0.80`
+44. **Elder Impulse System Green Bar:** Both trend (EMA) and momentum (MACD-H) aligned upward. `EMA(13)[t] > EMA(13)[t-1] AND MACD_Hist(12,26,9)[t] > MACD_Hist[t-1]`
+45. **Guppy Multiple Moving Average (GMMA) Expansion:** Traders (short EMAs) pulling away from investors (long EMAs). `MIN(EMA 3,5,8,10,12,15) > MAX(EMA 30,35,40,45,50,60) AND spread widening`
+46. **Relative Vigor Index (RVI) Cross:** Bulls consistently closing prices near the top of the daily range. `RVI(10) crosses above RVI_Signal(4)`
+47. **BOP (Balance of Power) Sustained Positive:** Institutional buying power dominating session closes. `SMA( (Close - Open) / (High - Low), 14 ) > 0.3`
+48. **DPO (Detrended Price Oscillator) Cycle Thrust:** Short-term cycle lifting in alignment with main trend. `DPO(20) crosses above 0 AND Close > SMA(50)`
+49. **McGinley Dynamic Breakout:** Adaptive moving average that adjusts for market speed changes. `Close crosses above McGinley_Dynamic(14) AND Volume > SMA(Volume, 20)`
+50. **3-Bar Momentum Ignition:** Sudden wide-range expansion out of quiet trading. `Close[t] > High[t-1] AND Range[t] > 2 * ATR(14) AND Close in top 20% of day's range`
+
+---
+
+### Category 2: Volume, Delivery & Accumulation (50 Strategies)
+
+*Core Principle: Price can be manipulated on low liquidity in Indian mid/small-caps, but volume and NSE/BSE Demat delivery data reveal genuine institutional commitment.*
+
+1. **Decreasing Volume on Price Pullback:** Retail profit-booking without institutional selling. `Close > EMA(50) AND Close[t] < Close[t-1] < Close[t-2] AND Vol[t] < Vol[t-1] < Vol[t-2] < SMA(Vol, 20)`
+2. **Volume Climax Breakout:** Massive institutional participation clearing resistance. `Close > MAX(High, 20)[t-1] AND Volume > 3.0 * SMA(Volume, 20)`
+3. **Volume Pocket Pivot (O'Neil/Kacher):** Quiet institutional buying inside a consolidation base. `Close > Open AND Volume[t] > MAX(Volume of all Down Days in last 10 sessions)`
+4. **Dry-Up Volume Base (VDU):** Complete exhaustion of sellers right before a breakout. `Volume[t] == MIN(Volume, 50) AND (High - Low) < 0.5 * ATR(14)`
+5. **NSE Delivery Percentage Spike:** Buyers taking physical delivery into Demat accounts rather than intraday flipping. `Close > Close[t-1] * 1.02 AND Delivery_Pct > 65% AND Delivery_Vol > 2 * SMA(Delivery_Vol, 20)`
+6. **Rising Price + Rising Delivery (3-Day Accumulation):** Sustained multi-day fund buying on NSE/BSE. `Close rising for 3 days AND Delivery_Pct rising for 3 days AND Delivery_Pct > 50%`
+7. **High Delivery at Support Zone:** Strong hands absorbing panic selling at key moving average. `Low <= SMA(200) * 1.02 AND Close > Open AND Delivery_Vol > 2.5 * SMA(Delivery_Vol, 20)`
+8. **Low Delivery Price Drop (Fake Selloff):** Intraday bears pushing price down without real share liquidation. `Close < Close[t-1] * 0.98 AND Delivery_Pct < 25% AND Close > SMA(50)`
+9. **On-Balance Volume (OBV) Breakout Ahead of Price:** Smart money accumulating before price breaks resistance. `OBV[t] > MAX(OBV, 30)[t-1] AND Close[t] < MAX(High, 30)[t-1]`
+10. **OBV Bullish Trend Confirmation:** Volume flow rising in lockstep with price trend. `SMA(OBV, 10) > SMA(OBV, 30) AND Close > SMA(50)`
+11. **OBV Bearish Divergence:** Price making new highs on net declining volume flow. `High[t] > High[t-10] AND OBV[t] < OBV[t-10]`
+12. **Chaikin Money Flow (CMF) Zero Cross:** Sustained accumulation over a 20-day lookback. `CMF(20) crosses above 0.10`
+13. **CMF Institutional Thrust:** Heavy closing-range buying pressure over multiple weeks. `CMF(20) > 0.25 for 5 consecutive sessions`
+14. **Accumulation/Distribution (A/D) Line New High:** Intraday closes consistently near the high on heavy volume. `AD_Line[t] > MAX(AD_Line, 50)[t-1]`
+15. **Chaikin Oscillator Bullish Turn:** Momentum of the Accumulation/Distribution line accelerating. `EMA(AD_Line, 3) crosses above EMA(AD_Line, 10)`
+16. **Money Flow Index (MFI) Oversold Rebound:** Volume-weighted RSI showing strong buyer entry after dip. `MFI(14) crosses above 20 AND Close > Open`
+17. **MFI Bullish Divergence:** Price prints lower low while volume-weighted money flow prints higher low. `Low[t] < Low[t-n] AND MFI(14)[t] > MFI(14)[t-n]`
+18. **MFI 80+ Momentum Thrust:** Extreme institutional money inflow during breakout. `MFI(14) > 80 AND Close > MAX(High, 20)[t-1]`
+19. **VWAP Reclaim (Intraday):** Buyers regaining control above institutional benchmark price. `Low < VWAP AND Close crosses above VWAP AND Volume > SMA(Volume, 20)`
+20. **VWAP Support Bounce:** Trend day continuation off institutional average price. `Close > VWAP for > 2 hours, Low touches VWAP ± 0.15%, Close > Open`
+21. **Anchored VWAP (AVWAP) Breakout from Earnings:** Buyers overpowering post-earnings sellers. `Close crosses above AVWAP(anchored at last Quarterly Result Date)`
+22. **Anchored VWAP Pullback from 52-Week Low:** Institutional cost-basis defense on uptrend dip. `Low touches AVWAP(anchored at 52W_Low) AND Close > AVWAP`
+23. **Multi-Day VWAP Pinch:** Price compressed between 5-day VWAP and 20-day SMA, breaking higher. `Close crosses above MAX(VWAP_5D, SMA_20) on Volume > 1.5x Avg`
+24. **Volume Profile Point of Control (POC) Breakout:** Price clearing the price level with highest historical traded volume. `Close crosses above Volume_Profile_POC(60 days) with Volume > 1.5x Avg`
+25. **Value Area High (VAH) Acceptance:** Price escaping the 70% volume concentration zone upward. `2 consecutive closes above Value_Area_High(30 days)`
+26. **Low Volume Node (LVN) Fast Traverse:** Price entering a volume vacuum where little resistance exists. `Close enters LVN_Zone AND Momentum(5) > 0`
+27. **Volume Rate of Change (VROC) Explosion:** Sudden awakening of a dormant stock. `VROC(14) > 200% AND Close > Open AND (Close - Open) > ATR(14)`
+28. **Klinger Volume Oscillator (KVO) Cross:** Long-term money flow trend outpacing short-term fluctuations. `KVO(34, 55) crosses above KVO_Signal(13) AND Close > EMA(50)`
+29. **Ease of Movement (EOM) Bullish Breakout:** Price advancing easily on moderate volume (lack of overhead supply). `SMA(EOM(14), 14) crosses above 0`
+30. **Force Index (Elder) Pullback Buy:** Short-term selling wave exhausted inside a larger uptrend. `EMA(Close, 13) rising AND Force_Index(2) dips below 0 then turns up`
+31. **Force Index (13-Period) Zero Cross:** Intermediate buying power overtaking selling power. `EMA( (Close[t] - Close[t-1]) * Volume, 13 ) crosses above 0`
+32. **Negative Volume Index (NVI) Smart Money Signal:** Price rising on quiet days (traditionally linked to informed accumulation). `NVI crosses above EMA(NVI, 255)`
+33. **Positive Volume Index (PVI) Crowd Momentum:** Retail and momentum crowd joining the rally. `PVI crosses above EMA(PVI, 255) AND NVI > EMA(NVI, 255)`
+34. **Twiggs Money Flow (TMF) Breakout:** True-range adjusted accumulation breaking positive. `TMF(21) crosses above 0 AND Close > High[t-1]`
+35. **Volume-Weighted MACD (VW-MACD) Cross:** MACD calculated using VWMA instead of EMA to weight volume. `VWMA(12) - VWMA(26) crosses above EMA(VW_MACD, 9)`
+36. **Wyckoff Spring (Stopping Volume at Support):** False breakdown below support instantly bought up on heavy volume. `Low < MIN(Low, 20)[t-1] AND Close > MIN(Low, 20)[t-1] AND Volume > 2 * SMA(Volume, 20)`
+37. **Wyckoff Upthrust After Distribution (Short):** False breakout above resistance rejected on high volume. `High > MAX(High, 20)[t-1] AND Close < MAX(High, 20)[t-1] AND Volume > 2 * SMA(Volume, 20)`
+38. **Effort vs. Result Bullish Absorption (VPA):** Massive volume on a down bar, but spread is tiny (buyers absorbing all market sells). `Volume > 2.5 * SMA(Volume, 20) AND (High - Low) < 0.6 * ATR(14) AND Low == MIN(Low, 10)`
+39. **Effort vs. Result Bearish Topping (VPA):** Huge volume on an up bar, but price fails to make progress. `Volume > 2.5 * SMA(Volume, 20) AND (High - Low) < 0.6 * ATR(14) AND High == MAX(High, 20)`
+40. **No Supply Test Bar (VPA):** Narrow-range down bar on ultra-low volume inside an uptrend. `Close > SMA(50) AND Close < Open AND (High - Low) < 0.7 * ATR(14) AND Volume < MIN(Volume, 5)`
+41. **No Demand Up Bar (VPA Short):** Narrow-range up bar with upper wick on low volume in a downtrend. `Close < SMA(50) AND Close > Open AND Volume < MIN(Volume, 5) AND Upper_Wick > Body`
+42. **Stopping Volume Hammer:** Panic cascade halted by institutional limit orders. `Down trend for 5 bars, Volume[t] > 2.5 * SMA(Volume, 20) AND Lower_Wick > 2 * Body`
+43. **Up/Down Volume Ratio Surge:** 50-day volume on up-days vastly exceeding volume on down-days. `SUM(Volume on Up Days, 50) / SUM(Volume on Down Days, 50) > 1.5`
+44. **Intraday Opening Volume Shock (9:15 AM):** First 15-minute volume exceeds 30% of the entire 20-day daily average volume. `Volume(9:15-9:30) > 0.30 * SMA(Daily_Volume, 20) AND Close(9:30) > Open(9:15)`
+45. **Closing Bell Institutional Sweep (3:00–3:30 PM):** Heavy institutional basket buying in the final 30 minutes of NSE session. `Volume(15:00-15:30) > 2 * Avg_30m_Vol AND Close(15:30) == High_of_Day`
+46. **Block Deal / Bulk Deal Follow-Through:** Price holding above the VWAP of a high-volume institutional block session. `Volume[t-1] > 5 * SMA(Volume, 20) AND Close[t] > High[t-1]`
+47. **Price-Volume Trend (PVT) Breakout:** Cumulative volume adjusted by percentage price change breaking highs. `PVT[t] > MAX(PVT, 40)[t-1]`
+48. **Intraday Intensity Index (III) Surge:** Tracking where the close sits inside the high-low range multiplied by volume. `SUM( (2*Close - High - Low) / (High - Low) * Volume, 21 ) > 0`
+49. **Weis Wave Cumulative Volume Breakout:** Wave volume on current rally leg exceeds prior rally wave volume. `Cumulative_Wave_Vol(Up_Wave) > Cumulative_Wave_Vol(Prev_Up_Wave)`
+50. **Float Turnover Velocity:** High percentage of free-float shares changing hands during a base breakout. `SUM(Volume, 5) / Free_Float_Shares > 0.15 AND Close > SMA(50)`
+
+---
+
+### Category 3: Mean Reversion, Oscillators & Divergence (50 Strategies)
+
+*Core Principle: Extreme emotional stretches away from statistical equilibrium snap back once short-term buyers or sellers are exhausted.*
+
+1. **Connors RSI(2) Extreme Oversold:** Ultra-short-term panic dip inside a long-term uptrend. `Close > SMA(200) AND RSI(2) < 10` (Exit when `Close > SMA(5)`)
+2. **RSI(2) Cumulative 2-Day Stretch:** Deep two-day washout offering high win-rate bounce. `Close > SMA(200) AND (RSI(2)[t] + RSI(2)[t-1]) < 15`
+3. **Classic RSI(14) Oversold Reclaim:** Momentum recovering from oversold territory. `RSI(14)[t-1] < 30 AND RSI(14)[t] crosses above 30`
+4. **Classic RSI(14) Overbought Rejection:** Momentum rolling over from extreme froth. `RSI(14)[t-1] > 70 AND RSI(14)[t] crosses below 70`
+5. **RSI Bullish Regular Divergence:** Downside momentum waning as price prints a final lower low. `Low[t] < Low[t-n] AND RSI(14)[t] > RSI(14)[t-n] AND RSI(14)[t] < 35`
+6. **RSI Bearish Regular Divergence:** Upside momentum exhausting as price prints a marginal higher high. `High[t] > High[t-n] AND RSI(14)[t] < RSI(14)[t-n] AND RSI(14)[t] > 65`
+7. **RSI Hidden Bullish Divergence (Trend Continuation):** Oscillator resets lower on a pullback while price holds a higher low. `Close > SMA(50) AND Low[t] > Low[t-n] AND RSI(14)[t] < RSI(14)[t-n]`
+8. **RSI Hidden Bearish Divergence:** Oscillator spikes higher on a dead-cat bounce while price makes a lower high. `Close < SMA(50) AND High[t] < High[t-n] AND RSI(14)[t] > RSI(14)[t-n]`
+9. **Cardwell RSI Bullish Range Shift Support:** In bull markets, RSI oscillates between 40 and 80; 40 acts as floor. `Close > SMA(200) AND RSI(14) touches 40..45 AND turns up`
+10. **RSI Failure Swing Bottom (W-Bottom on RSI):** RSI double-bottoms and breaks its internal peak independently of price. `RSI_Low1 < 30, Bounce to Peak1, RSI_Low2 > RSI_Low1, then RSI crosses above Peak1`
+11. **Stochastic Slow Oversold Cross:** Price closing near the bottom of its 14-day range turning upward. `%K(14,3) crosses above %D(3) AND %K < 20`
+12. **Stochastic Pop (Trend Pullback):** Fast stochastic resetting during a strong trend. `Close > SMA(50) AND %K(14,3) dips below 30 then crosses above %D(3)`
+13. **Stochastic RSI (StochRSI) Fast Reversal:** High-sensitivity oscillator catching exact swing turns. `StochRSI_K(14,14,3) crosses above StochRSI_D(3) below 0.20`
+14. **Williams %R Oversold Snapback:** Momentum snapping back from the bottom 20% of its 14-day range. `Williams_R(14) crosses above -80 AND Close > EMA(50)`
+15. **CCI (Commodity Channel Index) -100 Reclaim:** Price recovering from a statistical -1 standard deviation stretch. `CCI(20)[t-1] < -100 AND CCI(20)[t] crosses above -100`
+16. **CCI Zero-Line Rejection Bounce:** Pullback to mean inside an established uptrend. `Close > SMA(100) AND CCI(20) dips to [-20, +20] AND turns upward`
+17. **Bollinger Band Lower Piercing Reversion (Slingshot):** Price stretched > 2 standard deviations below 20-day mean snapping back. `Low[t-1] < BB_Lower(20, 2) AND Close[t] > BB_Lower(20, 2) AND Close[t] > High[t-1]`
+18. **Bollinger %B Oversold Hook:** Normalized position within Bollinger Bands reversing from below zero. `Pct_B(20, 2)[t-1] < 0 AND Pct_B(20, 2)[t] > 0.10`
+19. **Double Bollinger Band Mean Reversion:** Rejecting from the 2-SD band back toward the 1-SD inner zone. `Low touches BB_Lower(20, 2) AND Close reclaims BB_Lower(20, 1)`
+20. **Keltner Channel Extreme Stretch Fade:** Price stretched far outside ATR-based envelope. `Low < KC_Lower(20, 2.5) AND RSI(14) < 30 AND Close > Open`
+21. **Z-Score Price Distance Reversion (-2.5 SD):** Pure statistical mean reversion from 20-day moving average. `Z_Score = (Close - SMA(20)) / StdDev(Close, 20); Trigger when Z_Score < -2.5 then crosses above -2.0`
+22. **Distance from 200-DMA Extreme Rubberband:** Stock stretched > 25% below its 200-DMA snapping back to mean. `(Close - SMA(200)) / SMA(200) < -0.25 AND Close > High[t-1]`
+23. **200-DMA Institutional Touch Bounce:** First test of 200-day moving average after >= 6 months above it. `MIN(Close, 120)[t-1] > SMA(200) AND Low[t] <= SMA(200) * 1.01 AND Close[t] > SMA(200)`
+24. **50-DMA Swing Pullback Bounce:** Classic institutional support defense in an active bull trend. `SMA(50) > SMA(200) AND Low touches SMA(50) ± 0.5% AND Close > Open`
+25. **3-Day / 5-Day Consecutive Down-Days Fade:** Quant mean-reversion rule exploiting multi-day retail panic. `Close > SMA(200) AND Close < Close[1] < Close[2] < Close[3] < Close[4]`
+26. **5-Day Low in Uptrend (Larry Connors):** Buying short-term weakness in a strong stock. `Close > SMA(200) AND Close[t] == MIN(Close, 5)`
+27. **Ultimate Oscillator (UO) Bullish Reversal:** Multi-timeframe (7, 14, 28) weighted oscillator avoiding false divergence. `UO(7,14,28) Bullish Divergence AND UO crosses above 35`
+28. **DeMarker (DeM) Exhaustion Reversal:** Intra-period high/low comparison showing seller exhaustion. `DeMarker(14) < 0.30 for 3 bars then crosses above 0.30`
+29. **MACD Histogram Peak/Trough Reversal:** Momentum deceleration signaling an early counter-trend bounce. `MACD_Hist < 0 AND MACD_Hist[t] > MACD_Hist[t-1] > MACD_Hist[t-2] after hitting 20-bar low`
+30. **Awesome Oscillator (AO) Twin Peaks Bottom:** Two troughs below zero where the second trough is higher, followed by green bar. `AO < 0 AND Trough_2 > Trough_1 AND AO[t] > AO[t-1]`
+31. **Awesome Oscillator Saucer Pullback:** 3-bar momentum reset above zero line. `AO > 0 AND AO falls for 2 bars (red) then prints higher bar (green)`
+32. **Fisher Transform Extreme Reversal:** Gaussian normal distribution transform catching sharp turning points. `Fisher(9) < -1.5 AND Fisher(9) crosses above Fisher_Trigger`
+33. **Inverse Fisher Transform on RSI:** Crispy 0-to-100 boundary oscillation trigger. `IFTRSI(14) crosses above 20`
+34. **WaveTrend Oscillator (LazyBear) Oversold Cross:** Channel-normalized momentum turn popular in algorithmic scalping/swing. `WT1 crosses above WT2 AND WT1 < -60`
+35. **Woodies CCI Hook from Extreme:** Fast CCI(6) and CCI(14) hooking back from +/- 200 levels. `CCI(14) < -200 AND CCI(14)[t] > CCI(14)[t-1] + 25`
+36. **Intraday VWAP 2-Standard Deviation Fade:** Price stretched 2 SDs away from intraday VWAP reverting to mean. `Close < (VWAP - 2 * Intraday_StdDev) AND RSI(5) < 20`
+37. **Linear Regression Channel Lower Band Bounce:** Price hitting the -2 SD parallel line of a 50-bar regression channel. `Low <= LinReg_Line(50) - 2 * StdErr(50) AND Close > Open`
+38. **Envelope Channel (SMA 20 ± 5%) Reversion:** Fixed percentage deviation mean reversion for low-beta Nifty 50 stocks. `Low < SMA(20) * 0.95 AND Close > Open`
+39. **Laguerre RSI Fractal Reset:** Time-warped RSI resetting to zero during minor pullbacks in an uptrend. `Close > SMA(100) AND Laguerre_RSI(0.5)[t-1] == 0 AND Laguerre_RSI[t] > 0.15`
+40. **Center of Gravity (COG) Oscillator Turn:** Ehlers zero-lag oscillator identifying cycle troughs. `COG(10) crosses above COG_Signal(3) at 10-bar low`
+41. **Relative Vigor Index (RVI) Oversold Divergence:** Closing strength diverging positively from price lows. `Low[t] < Low[t-10] AND RVI(10)[t] > RVI(10)[t-10]`
+42. **Momentum Pinball (Linda Raschke):** 1-period ROC of 3-period RSI catching 2-day swing turns. `RSI(ROC(Close, 1), 3) < 30 on Day 1; Buy breakout of Day 2 first hour high`
+43. **ATR Stretch from 21-EMA Fade:** Price stretched > 3.5x ATR away from its 21-EMA (exhaustion warning). `(Close - EMA(21)) / ATR(14) > 3.5 AND Close < Open` (Short/Profit-taking rule)
+44. **Psychological Round Number Bounce (₹100, ₹500, ₹1000):** Retail limit-order clustering at major round figures. `Low within 0.3% of Major_Round_Number AND RSI(14) < 35 AND Close > Round_Number`
+45. **Weekly RSI Oversold + Daily Bullish Cross:** Multi-timeframe mean reversion alignment. `Weekly_RSI(14) < 35 AND Daily_RSI(14) crosses above 40`
+46. **Pivot Point S2 / S3 Intraday Reversion:** Algorithmic mean reversion from extreme daily floor pivots. `Low <= Pivot_S2 AND Close reclaims Pivot_S2 on 15m chart`
+47. **Camarilla H3 / L3 Range Reversion:** Classic intraday institutional fade between Camarilla L3 and H3 bands. `Low pierces Camarilla_L3 AND 5m candle closes back above L3` (Target: H3)
+48. **Qstick Indicator Zero Reclaim:** Moving average of candlestick bodies (`Close - Open`) turning positive after washout. `SMA(Close - Open, 14) crosses above 0 after hitting 30-bar low`
+49. **Pretty Good Oscillator (PGO) Mean Reversion:** Distance from SMA expressed in ATR units snapping back from -3.0. `PGO = (Close - SMA(14)) / ATR(14); Trigger when PGO crosses above -2.5 from below -3.0`
+50. **RSI + Bollinger Confluence Washout:** Dual confirmation of statistical distance and momentum exhaustion. `Close < BB_Lower(20, 2) AND RSI(14) < 25 AND next bar Close > prev High`
+
+---
+
+### Category 4: Volatility, Range Contraction & Intraday Gaps (50 Strategies)
+
+*Core Principle: Volatility is more cyclical than price. Extreme compression (low volatility) always precedes explosive expansion (high volatility).*
+
+1. **TTM Squeeze (Bollinger inside Keltner):** Classic volatility coiling before directional explosion. `BB_Upper(20, 2) < KC_Upper(20, 1.5) AND BB_Lower(20, 2) > KC_Lower(20, 1.5) for >= 5 bars; Trigger when BB expands outside KC with Momentum > 0`
+2. **Bollinger Band Width (BBW) 6-Month Low:** Historical volatility compression breakout. `BB_Width(20, 2)[t-1] == MIN(BB_Width, 120) AND Close[t] > BB_Upper(20, 2)`
+3. **NR7 (Toby Crabel Narrowest Range of 7 Days):** Coiled spring daily bar setup. `(High - Low)[t-1] == MIN(High - Low, 7); Trigger Buy when Price > High[t-1]`
+4. **NR4 (Narrowest Range of 4 Days) in Uptrend:** Short-term pause before trend resumption. `Close > SMA(50) AND Range[t-1] == MIN(Range, 4) AND High[t] > High[t-1]`
+5. **NR7 + Inside Bar Combo (NR7-ID):** Double compression—narrowest range of 7 days that is also contained inside prior bar. `Range[t-1] == MIN(Range, 7) AND High[t-1] < High[t-2] AND Low[t-1] > Low[t-2]`
+6. **Inside Bar Breakout (Daily/Weekly):** Uncertainty pause resolving in the direction of the dominant trend. `High[t-1] < High[t-2] AND Low[t-1] > Low[t-2] AND Close[t] > High[t-2]`
+7. **Double Inside Bar (II Pattern):** Two consecutive inside bars showing extreme equilibrium before violent move. `Inside_Bar[t-1] AND Inside_Bar[t-2]; Trigger on break of Mother_Bar High`
+8. **Fakey Pattern (Inside Bar False Breakout):** Stop-hunt below Inside Bar low that reverses and breaks the high. `Low[t] < Low[Mother_Bar] AND Close[t] > High[Inside_Bar]`
+9. **Mark Minervini VCP (Volatility Contraction Pattern):** Progressive tightening of price pullbacks from left to right (e.g., -20%, -10%, -4%). `Pullback_1_Depth > Pullback_2_Depth > Pullback_3_Depth AND Pullback_3_Depth < 6% AND Volume drying up`
+10. **ATR Contraction Base:** 14-day Average True Range dropping to a 3-month low while price holds near highs. `ATR(14) == MIN(ATR(14), 60) AND Close >= 0.92 * High_52W`
+11. **ATR Volatility Breakout (Keltner Impulse):** Daily range expands beyond 2x ATR from previous close. `Close[t] > Close[t-1] + (2.0 * ATR(14)) AND Volume > 1.5 * SMA(Volume, 20)`
+12. **Choppiness Index (CHOP) Trend Awakening:** Market transitioning from extreme sideways chop (> 61.8) to trend (< 38.2). `CHOP(14)[t-2] > 61.8 AND CHOP(14)[t] crosses below 50 AND Close > EMA(20)`
+13. **Chaikin Volatility Expansion:** Rate of change of the trading range surging on a breakout. `Chaikin_Vol(10, 10) crosses above 20% AND Close > MAX(High, 20)[t-1]`
+14. **Historical Volatility Ratio (HVR) Compression (Connors):** Short-term HV drops below 50% of long-term HV. `HV(6) / HV(100) < 0.50; Buy break of highest high of last 3 bars`
+15. **Standard Deviation Channel Squeeze:** 10-day standard deviation falls below 20% of its 100-day average. `StdDev(Close, 10) == MIN(StdDev(Close, 10), 60) AND Close > SMA(50)`
+16. **15-Minute Opening Range Breakout (ORB-15):** Classic Indian intraday momentum rule after 9:15–9:30 AM volatility settles. `Close(15m) > High(9:15-9:30) AND Volume(breakout bar) > 1.5 * Avg_15m_Vol AND Close > VWAP`
+17. **30-Minute Opening Range Breakout (ORB-30):** Conservative intraday breakout waiting for first half-hour balance. `Close(15m) > High(9:15-9:45) AND Price > Prev_Day_High`
+18. **5-Minute ORB Scalper on Gap-Up Stocks:** Fast momentum capture on news-driven stocks at 9:20 AM. `Open > Prev_High * 1.01 AND Close(5m) > High(9:15-9:20)`
+19. **ORB + Inside Bar (ORB-ID):** Yesterday was an Inside Day; today breaks the 15-min Opening Range AND yesterday's high. `Inside_Day[t-1] AND Price > ORB_15_High AND Price > High[t-1]`
+20. **ORB Failure / Bull Trap Reversal:** Price breaks above 15m ORB high on low volume, then crashes back below ORB low. `High > ORB_15_High, then Close(15m) crosses below ORB_15_Low`
+21. **Breakaway Gap Up on Volume:** Gap above a multi-week resistance zone that never fills. `Open[t] > MAX(High, 30)[t-1] * 1.01 AND Close[t] > Open[t] AND Volume > 2.5 * SMA(Volume, 20)`
+22. **Gap and Go (Power Earnings Gap):** Stock gaps up > 3% on earnings/news and holds above the first 15m low. `(Open[t] - Close[t-1]) / Close[t-1] > 0.03 AND Low[t] >= Open[t] * 0.99`
+23. **Bullish Gap Fill Reversal:** Stock opens gap-down into support, fills the gap back to yesterday's close, and continues higher. `Open[t] < Low[t-1] AND Price crosses above Close[t-1]`
+24. **Bearish Exhaustion Gap Fade:** Stock gaps up > 4% after an extended 8-day rally and immediately prints a red candle below Open. `RSI(14)[t-1] > 75 AND Open[t] > High[t-1] * 1.03 AND Close(15m) < Open[t]`
+25. **Oops! Reversal Signal (Larry Williams):** Stock gaps below yesterday's low, creating retail panic, then rallies back above yesterday's low. `Open[t] < Low[t-1] AND High[t] crosses above Low[t-1]`
+26. **Island Cluster Reversal:** Gap down followed by consolidation, then a gap up leaving "trapped" bears on an island. `Gap_Down at [t-k], Consolidation for k bars, then Low[t] > High[t-1]`
+27. **Central Pivot Range (CPR) Narrow Width Breakout:** Ultra-tight CPR (Top Central Pivot to Bottom Central Pivot < 0.2%) guarantees a trending day on NSE. `abs(TC - BC) / Pivot < 0.002 AND Close(15m) > MAX(TC, BC)`
+28. **Virgin CPR Bounce / Rejection:** An untested CPR from the prior 3–5 sessions acts as an institutional magnet and wall. `Price tests Virgin_CPR_Zone from prior session AND prints reversal candle`
+29. **Ascending CPR Trend Alignment:** Today's CPR is completely higher than yesterday's CPR. `BC[t] > TC[t-1] AND Price > TC[t] AND Price > VWAP`
+30. **Camarilla H4 Breakout (Momentum Day):** Price clearing the Camarilla H4 resistance signals a runaway trend day toward H5. `Close(15m) > Camarilla_H4 AND Volume > 1.5x Avg`
+31. **Chandelier Exit Breakout Re-Entry:** Price reclaiming the 22-period ATR trailing ceiling. `Close crosses above (MAX(High, 22) - 3 * ATR(22))`
+32. **Donchian Width Squeeze:** 20-day Donchian channel width contracts to < 8% before breaking upper band. `(MAX(High, 20) - MIN(Low, 20)) / MIN(Low, 20) < 0.08 AND Close > MAX(High, 20)[t-1]`
+33. **Mass Index Reversal Bulge:** High-low range widens enough to trigger a trend reversal signal (27 to 26.5 cross). `Mass_Index(9, 25) rises above 27.0 then crosses below 26.5`
+34. **Ulcer Index Low-Stress Uptrend:** Strong return accompanied by minimal drawdown volatility. `ROC(20) > 10% AND Ulcer_Index(14) < 3.0`
+35. **Relative Volatility Index (RVI by Dorsey) Breakout:** Standard deviation directional bias confirming price breakout. `RVI_Vol(14) crosses above 50 AND Close > High[t-1]`
+36. **Intraday Volatility Compression (11:30 AM – 1:30 PM Lull Breakout):** Midday tight range in Indian market breaking out when European markets open (1:30 PM IST). `(High - Low between 11:30-13:15) < 0.3 * Daily_ATR AND Close(13:30) > High(11:30-13:15)`
+37. **Wide Range Bar (WRB) Ignition:** Candle range is largest of last 10 sessions, closing in top 10% of its range. `(High - Low)[t] == MAX(High - Low, 10) AND (Close - Low) / (High - Low) > 0.90`
+38. **WRB Hidden Gap Absorption:** After a Wide Range Bar, price consolidates inside the top 30% of the WRB for 3 days without retracing. `Low[t-2..t] > (Low[WRB] + 0.7 * Range[WRB])`
+39. **Upper Circuit Continuation (NSE Filter Mechanics):** Stock locked at 5%/10%/20% upper circuit with pending buy orders follow-through next morning. `Close[t-1] == Upper_Circuit_Price AND Open[t] > Close[t-1]`
+40. **Volatility Stop (VStop) Flip:** ATR-based dynamic trailing stop flipping from bearish (above price) to bullish (below price). `Close crosses above VStop(20, 2.0)`
+41. **Bollinger Band Walk (Riding the Band):** High-momentum trend where price closes between the 1-SD and 2-SD upper bands for 5+ bars. `Close > BB_Upper(20, 1) for 5 consecutive bars AND BB_Width expanding`
+42. **Gopalakrishnan Range Index (GAPO) Smooth Trend:** Low fractal irregularity indicating smooth institutional trend. `GAPO(14) < 0.40 AND Close > SMA(50)`
+43. **Fractal Chaos Bands Breakout:** Price clearing the upper Williams Fractal boundary after a flat line period. `Close > Upper_Fractal_Band AND Upper_Fractal_Band flat for >= 5 bars`
+44. **Intraday ATR Exhaustion Cap (Profit Target / Fade):** Stock has already moved 1.5x its 14-day daily ATR intraday, making further upside low-probability. `(High_Today - Low_Today) > 1.5 * Daily_ATR(14)`
+45. **Starc Bands Volatility Breakout:** Price breaking above SMA(6) + 2*ATR(15) envelope on heavy volume. `Close > SMA(6) + 2 * ATR(15) AND Volume > 2 * SMA(Volume, 20)`
+46. **3-Week Tight Closes (O'Neil):** Three consecutive weekly closes within 1% to 1.5% of each other near highs. `abs(Weekly_Close[t] - Weekly_Close[t-1]) / Weekly_Close[t-1] < 0.015 for 3 weeks, then breakout`
+47. **High-Tight Flag (Power Play):** Stock doubles (100% gain) in < 8 weeks, then consolidates tightly (< 15% drawdown) for 3–5 weeks. `ROC(40) > 80% AND Max_Drawdown(15) < 15% AND Close breaks flag high`
+48. **Parkinson High-Low Volatility Breakout:** Range-based volatility estimator spiking out of a 30-day trough. `Parkinson_Vol(10) crosses above SMA(Parkinson_Vol, 30) from 30-day low`
+49. **Yang-Zhang Overnight Gap Volatility Filter:** Distinguishing stocks driven by overnight news gaps vs intraday trend. `Yang_Zhang_Vol(20) expanding AND Intraday_Vol > Overnight_Vol`
+50. **Squeeze Pro (High/Mid/Low Compression):** Bollinger Band inside 1.0x ATR Keltner Channel (ultra-tight compression). `BB_Upper(20, 2) < KC_Upper(20, 1.0) AND BB_Lower(20, 2) > KC_Lower(20, 1.0)`
+
+---
+
+### Category 5: Price Action, Candlesticks & Market Structure (50 Strategies)
+
+*Core Principle: Pure price geometry and order-book liquidity pools reflect human psychology, stop-loss clusters, and institutional limit-order execution.*
+
+1. **Bullish Engulfing at Support:** Buyers completely overwhelm prior day's sellers at a key level. `Close[t-1] < Open[t-1] AND Close[t] > Open[t] AND Close[t] >= Open[t-1] AND Open[t] <= Close[t-1] near SMA(50)`
+2. **Bearish Engulfing at Resistance:** Sellers erase prior day's gains at swing highs. `Close[t-1] > Open[t-1] AND Close[t] < Open[t] AND Open[t] >= Close[t-1] AND Close[t] <= Open[t-1]`
+3. **Hammer / Bullish Pin Bar:** Deep intraday selloff rejected fiercely, leaving a long lower tail (> 2x body). `(MIN(Open, Close) - Low) > 2 * abs(Close - Open) AND (High - MAX(Open, Close)) < 0.2 * (High - Low)`
+4. **Shooting Star / Bearish Pin Bar:** Intraday rally rejected at highs, trapping breakout buyers. `(High - MAX(Open, Close)) > 2 * abs(Close - Open) AND (MIN(Open, Close) - Low) < 0.2 * (High - Low)`
+5. **Morning Star (3-Bar Bottom):** Large red bar, small indecision star, followed by large green bar reclaiming > 50% of Bar 1. `Bar1_Red AND abs(Close[t-1]-Open[t-1]) < 0.3*Range AND Close[t] > (Open[t-2] + Close[t-2])/2`
+6. **Evening Star (3-Bar Top):** Mirror reversal at the top of an extended rally. `Bar1_Green AND Bar2_Small_Body AND Close[t] < (Open[t-2] + Close[t-2])/2`
+7. **Piercing Line Reversal:** Gap down open that rallies to close above the midpoint of yesterday's red candle. `Open[t] < Low[t-1] AND Close[t] > (Open[t-1] + Close[t-1]) / 2`
+8. **Dark Cloud Cover:** Gap up open that sells off to close below the midpoint of yesterday's green candle. `Open[t] > High[t-1] AND Close[t] < (Open[t-1] + Close[t-1]) / 2`
+9. **Three White Soldiers:** Three consecutive strong green candles closing near their highs after a base. `Close > Open for 3 bars AND each Open inside prior body AND each Close > prior High`
+10. **Three Black Crows:** Three consecutive strong red candles signaling aggressive institutional liquidation. `Close < Open for 3 bars AND each Close < prior Low`
+11. **Bullish Marubozu (Full Body Impulse):** Opening at the exact low and closing at the exact high—total buyer dominance. `Close > Open AND (High - Close) / (High - Low) < 0.05 AND (Open - Low) / (High - Low) < 0.05`
+12. **Bullish Harami Cross (Inside Doji):** Large red candle followed by a tight Doji completely inside the prior body. `Bar1_Red_Wide AND Open[t] ≈ Close[t] inside Bar1_Body; Trigger on break of Bar1_High`
+13. **Bullish Kicker (Strongest Candlestick Signal):** Red candle followed by a gap up above the prior open that runs higher. `Close[t-1] < Open[t-1] AND Open[t] > Open[t-1] AND Close[t] > Open[t]`
+14. **Rising Three Methods (5-Bar Continuation):** Large green bar, 3 small red pullback bars staying inside Bar 1's range, then a new breakout green bar. `High[t-3..t-1] < High[t-4] AND Low[t-3..t-1] > Low[t-4] AND Close[t] > High[t-4]`
+15. **Tweezer Bottom:** Two consecutive candles printing the exact same low price at support, proving a hard institutional floor. `abs(Low[t] - Low[t-1]) / Low[t] < 0.001 AND Close[t] > Open[t]`
+16. **Dragonfly Doji at Demand Zone:** Open, High, and Close are nearly identical at the top of a long lower shadow. `abs(Close - Open) < 0.1 * Range AND (High - MAX(Open, Close)) < 0.1 * Range`
+17. **Market Structure Break of Structure (BOS - Bullish):** Price in an uptrend closes convincingly above the prior swing high. `Low_Swing[t] > Low_Swing[t-1] AND Close crosses above High_Swing[t-1]`
+18. **Change of Character (CHoCH - Bullish Reversal):** First time a downtrending stock breaks above its most recent lower-high. `Downtrend (LH/LL) active, then Close[t] > Most_Recent_Lower_High`
+19. **Smart Money Fair Value Gap (FVG) Tap:** 3-candle impulse leaves an unmitigated price gap between Candle 1 High and Candle 3 Low; buy when price retraces into it. `Low[t-2] > High[t-4] (Bullish FVG created); Trigger when Low[t] dips into [High[t-4], Low[t-2]]`
+20. **Bullish Order Block (OB) Mitigation:** The last down-candle before a violent bullish Break of Structure acts as institutional demand on retest. `Retest of [Low, High] of last Red candle prior to BOS + Volume spike`
+21. **Liquidity Sweep / Stop-Hunt Reversal (Turtle Soup):** Price briefly pokes below a major 20-day swing low to trigger retail stop-losses, then closes strongly back above it. `Low[t] < MIN(Low, 20)[t-1] AND Close[t] > MIN(Low, 20)[t-1] AND Close[t] > Open[t]`
+22. **Equal Highs (EQH) Liquidity Magnet Breakout:** Multiple touches at the exact same resistance build a massive stop-buy pool above it. `3+ Swing Highs within 0.5% tolerance; Buy when Close clears max high on 2x Volume`
+23. **Support-Turned-Resistance Flip (Polarity Principle):** Broken resistance zone holds as support on the first throwback retest. `Close broke above Resistance_Zone [t-5..t-2], now Low[t] touches Resistance_Zone AND Close[t] > Open[t]`
+24. **Higher High, Higher Low (HH/HL) Dow Theory Sequence:** Pure structural trend filter without lagging indicators. `Swing_High(1) > Swing_High(2) AND Swing_Low(1) > Swing_Low(2)`
+25. **Cup and Handle Breakout:** Rounded multi-month accumulation base ("Cup") followed by a shallow 5–12% drift ("Handle") breaking highs. `Cup_Depth 15%..35%, Handle_Depth < 12% in upper half of Cup, Close > Handle_High`
+26. **Double Bottom (W-Pattern) Neckline Breakout:** Two distinct tests of support separated by a center peak; triggered when price clears the center peak. `abs(Low1 - Low2) < 2% AND Close crosses above Center_Peak_High`
+27. **Inverse Head and Shoulders Breakout:** Left shoulder, deeper head (washout), higher right shoulder breaking the horizontal/sloping neckline. `Low(Head) < Low(LS) AND Low(RS) > Low(Head) AND Close > Neckline`
+28. **Ascending Triangle Breakout:** Flat horizontal resistance met by rising swing lows (buyers stepping in higher each dip). `Highs flat within 1% (3 touches) AND Swing_Lows rising; Trigger on Close > Flat_High`
+29. **Symmetrical Triangle Coil Breakout:** Converging lower highs and higher lows breaking out with volume. `LH slope < 0 AND HL slope > 0 AND Close > Upper_Trendline`
+30. **Falling Wedge Bullish Reversal:** Downward-sloping converging channel where downside momentum dies out. `Both Upper and Lower trendlines slope down, converging; Trigger on Close > Upper_Trendline`
+31. **Bull Flag / Pennant Continuation:** Sharp flagpole rally (> 15% in 5–10 bars) followed by a parallel downward-drifting channel on low volume. `Flagpole ROC(8) > 15%, Flag retracement < 38.2% of pole, Close breaks upper flag channel`
+32. **Rectangle / Darvas Range Breakout:** Horizontal channel bounded by parallel support and resistance for >= 20 bars. `(Range_High - Range_Low) / Range_Low < 12% for 20 bars; Trigger Close > Range_High`
+33. **Rounding Bottom (Saucer Accumulation):** Slow, gradual transition from downtrend to flat base to uptrend over 60+ bars. `Quadratic curve fit a*t^2 + b*t + c where a > 0 AND Close > 60-day High`
+34. **Measured Move (ABCD Pattern):** Leg AB rally, BC pullback (38.2%–61.8%), followed by CD leg targeting `CD = AB`. `Close > High(B) after bouncing from Fib_50_618(A, B)`
+35. **Three Drives Pattern (Harmonic Exhaustion):** Three symmetrical pushes to a low with 1.272 / 1.618 Fibonacci extensions signaling reversal. `Drive3_Low == 1.272 * Extension(Drive2) AND RSI Bullish Divergence`
+36. **Gartley 222 Harmonic Bullish Pattern:** Specific Fibonacci retracement geometry (XA -> AB 0.618 -> BC 0.382..0.886 -> CD 0.786 of XA). `Price reaches 0.786 retracement of XA leg AND prints bullish reversal candle`
+37. **Bat Harmonic Pattern (0.886 Deep Retracement):** Deep institutional limit-order sweep just above the origin point X. `Point D tests 0.886 retracement of XA leg AND RSI(14) < 30`
+38. **Fibonacci Golden Pocket Pullback (61.8% – 65%):** The highest-probability algorithmic retracement zone of an impulse wave. `Low dips into [0.618, 0.650] retracement of (Swing_Low to Swing_High) AND Close > 0.618_Level`
+39. **Fibonacci 38.2% Shallow Power Trend Pullback:** In runaway bull trends, institutions don't let stocks pull back to 50%; they buy at 38.2%. `ADX(14) > 30 AND Low touches 0.382 retracement of prior swing leg AND bounces`
+40. **Fibonacci 1.272 / 1.618 Extension Target & Breakout:** Momentum acceleration once price clears 100% of prior swing range. `Close crosses above 1.00_Swing_High, riding momentum to 1.272 and 1.618 extensions`
+41. **Andrews Pitchfork Median Line Magnet:** Price bouncing off the lower parallel tine of a 3-point pivot pitchfork targeting the Median Line. `Low touches Pitchfork_Lower_Line AND Close > Open` (Target: Median Line)
+42. **Trendline 3rd Touch Bounce:** A rising diagonal support line validated by 2 swing lows is bought on the 3rd test. `Low touches Line(Swing_Low_1, Swing_Low_2) ± 0.5% AND Close > Open`
+43. **Downward Trendline Breakout + Retest:** Breaking a multi-month diagonal resistance line and holding it from above. `Close crosses above Diagonal_Resistance(LH1, LH2, LH3) with Volume > 1.5x Avg`
+44. **Broadening Formation (Megaphone) Lower Boundary Bounce:** Expanding volatility swings bought at the lower diverging trendline. `Highs making HH AND Lows making LL; Trigger on Hammer at Lower_Boundary`
+45. **Quasimodo (Over and Under) Reversal:** High, Low, Higher High, Lower Low (Break of Structure), then entry on retest of the original first High level. `Retest of Left_Shoulder level after both a Higher High and a Lower Low have printed`
+46. **1-2-3 Trend Reversal (Victor Sperandeo):** 1) Trendline broken, 2) Retest fails to make new low, 3) Price breaks above the intervening bounce peak. `Downtrend line broken -> Higher Low formed (Point 2) -> Close > Point 1 Peak`
+47. **2B Reversal Rule (Sperandeo Stop-Hunt):** Price makes a new high/low, fails to follow through, and immediately closes back inside the prior range. `Low[t] < Swing_Low[t-n] AND Close[t] > Swing_Low[t-n]`
+48. **Ross Hook (1-2-3 Continuation):** After a 1-2-3 breakout, the first minor 1–3 bar pause creates a "Ross Hook"; buying the break of that hook. `1-2-3 Breakout active -> 1-2 bar pullback -> Close > Hook_High`
+49. **Wolfe Wave 5th Point Reversal:** 5-wave wedge channel where Point 5 slightly overshoots the 1-3 trendline, targeting the 1-4 EPA line. `Low[Wave5] pierces Line(Wave1, Wave3) AND closes back inside wedge`
+50. **Point & Figure (P&F) Double/Triple Top Breakout:** Pure price-movement box matrix (ignoring time) breaking above prior X-columns. `X_Column rises 1 box above two previous X_Column peaks (3-box reversal setting)`
+
+---
+
+### Category 6: Indian F&O, Quantitative & Relative Strength (50 Strategies)
+
+*Core Principle: Stocks do not move in a vacuum. In India, NSE Futures & Options (F&O) positioning, Nifty/Sector relative strength, and statistical arbitrage drive institutional alpha.*
+
+1. **Mansfield Relative Strength (RS) Zero Breakout:** Stock beginning to outperform the Nifty 50 benchmark over a 52-week baseline. `Mansfield_RS(Stock, Nifty50, 52W) crosses above 0 AND Close > SMA(50)`
+2. **RS Line New High Before Price (O'Neil Blue Dot):** The `Stock / Nifty 50` ratio hits a 52-week high while the stock price is still inside a base. `RS_Ratio = Close / Nifty_Close; RS_Ratio[t] == MAX(RS_Ratio, 252) AND Close < High_52W`
+3. **Alpha Rotation (Top Decile RS Rank):** Quant cross-sectional momentum ranking all NSE 500 stocks by 3M/6M/12M returns. `Percentile_Rank(0.4*ROC_63 + 0.3*ROC_126 + 0.3*ROC_252) >= 90`
+4. **Sector + Stock Dual RS Alignment (Top-Down Momentum):** Buying the strongest stock inside the strongest NSE sectoral index (e.g., Nifty IT, Nifty Pharma, Nifty PSU Bank). `Sector_RS_vs_Nifty > 0 AND Stock_RS_vs_Sector > 0 AND Close > EMA(20)`
+5. **Relative Rotation Graph (RRG) Leading Quadrant Crossover:** Stock or sector moving from "Improving" quadrant into "Leading" quadrant vs Nifty 50. `JdK_RS_Ratio crosses above 100 AND JdK_RS_Momentum > 100`
+6. **Low-Beta High-Alpha Defensive Momentum:** High risk-adjusted return (Sharpe/Sortino momentum) outperforming without wild swings. `ROC(126) > 20% AND Beta_vs_Nifty(252) < 0.85`
+7. **Nifty Down / Stock Green (Divergent Relative Strength):** On a day when Nifty 50 drops > 1%, stocks that close up > 1% on heavy volume reveal aggressive institutional accumulation. `Nifty_ROC(1) < -1.0% AND Stock_ROC(1) > +1.0% AND Volume > 1.5 * SMA(Volume, 20)`
+8. **F&O Long Buildup (Price Up + OI Up):** Institutional traders aggressively adding fresh long Futures contracts on NSE. `Futures_Price_Change > +1.5% AND Open_Interest_Change > +5.0% AND Volume > Avg`
+9. **F&O Short Covering Rally (Price Up + OI Down):** Trapped short sellers forced to buy back Futures contracts, fueling a sharp squeeze. `Futures_Price_Change > +1.5% AND Open_Interest_Change < -5.0% after multi-day OI buildup`
+10. **F&O Short Buildup (Price Down + OI Up):** Fresh institutional shorting in Futures—used for shorting or avoiding long traps. `Futures_Price_Change < -1.5% AND Open_Interest_Change > +5.0%`
+11. **F&O Long Unwinding (Price Down + OI Down):** Long holders booking profits or exiting positions without aggressive fresh shorting. `Futures_Price_Change < -1.5% AND Open_Interest_Change < -5.0%`
+12. **Futures Premium Expansion (Basis Surge):** Futures price trading at a widening premium over Spot price (Cost of Carry expansion), indicating bullish demand. `Basis = (Futures_Close - Spot_Close) / Spot_Close; Basis > 0.008 AND Basis[t] > Basis[t-1]`
+13. **Futures Discount Backwardation Squeeze:** Stock Futures deeply in discount (`Futures < Spot`) due to heavy retail shorting, breaking above spot VWAP (short squeeze setup). `Futures_Close < Spot_Close AND Spot_Price breaks 5-day High`
+14. **Rollover Percentage + Roll Cost Surge (Expiry Week):** During NSE monthly expiry week, high rollover % combined with rising roll cost proves bulls are carrying positions to next series. `Rollover_Pct > 78% (or > 3M Avg) AND Roll_Cost_Bps expanding AND Price > VWAP`
+15. **Put-Call Ratio (PCR) Extreme Oversold Reversal:** Stock or Index OI PCR dropping to extreme bearish levels where puts are over-owned. `PCR_OI < 0.60 AND PCR_OI turns upward AND Price > Prev_Hour_High`
+16. **PCR Bullish Trend Support (Put Writing Dominance):** Heavy Put writing raising PCR above 1.2 during an uptrend. `PCR_OI crosses above 1.15 AND Spot_Close > EMA(20)`
+17. **Option Chain Call Wall Breakout (Gamma Squeeze):** When Spot price clears the strike price with the highest Call Open Interest, Call writers scramble to cover, creating an explosive gamma rally. `Spot_Price > Strike(MAX_Call_OI) AND Call_OI at that strike starts declining (negative Change in OI)`
+18. **Option Chain Put Wall Floor Bounce:** The strike with maximum Put Open Interest acts as a hard institutional floor. `Spot_Low tests Strike(MAX_Put_OI) AND Change_in_Put_OI > 0 (writers defending strike)`
+19. **Max Pain Convergence (Expiry Week Mean Reversion):** During the final 2–3 days before NSE monthly expiry, stock price gravitates toward the Option Max Pain strike. `Days_to_Expiry <= 3 AND abs(Spot - Max_Pain) / Spot > 3% AND Price moving toward Max_Pain`
+20. **Implied Volatility (IV) Rank Crush Post-Event:** Selling volatility or entering directional swings once IV Rank drops from > 80 after earnings/budget. `IV_Rank(252)[t-1] > 80 AND IV_Rank[t] drops > 15 points AND Price breaks event high`
+21. **India VIX Spike > 20 Panic Washout Buy:** When India VIX surges > 20% in a week and starts mean-reverting lower, high-beta Nifty stocks stage sharp rallies. `India_VIX > 20 AND India_VIX[t] < India_VIX[t-1] AND Stock_RSI(14) > 35`
+22. **F&O Ban List Exit Momentum:** Stocks in the NSE F&O Ban list (Market-Wide Position Limit > 95%) that drop below 80% MWPL exit the ban and see fresh institutional derivative inflows. `Status[t-1] == "In_Ban" AND Status[t] == "Out_of_Ban" AND Price > High[t-1]`
+23. **Statistical Pairs Trading (Cointegrated Spread Z-Score):** Trading two historically linked Indian stocks (e.g., HDFC Bank vs ICICI Bank, TCS vs Infosys) when their spread diverges. `ADF_P_Value(StockA, StockB) < 0.05 AND Spread_Z_Score < -2.0` (Long Stock A, Short Stock B)
+24. **Stock vs. Sector ETF Mean Reversion:** A major constituent diverges > 2 SDs below its parent sector index (e.g., SBI vs Nifty Bank) while trend remains intact. `Z_Score(Stock_Close / Sector_Close, 20) < -2.0 AND Stock_Close > SMA(200)`
+25. **Kalman Filter Dynamic Mean Tracking:** State-space estimation tracking the true underlying equilibrium price without fixed lookback lag. `Close crosses above Kalman_Estimate AND Kalman_Velocity > 0`
+26. **Hurst Exponent Regime Router (H > 0.5 vs H < 0.5):** Mathematical meta-filter that detects if a stock is currently trending (`H > 0.55`) or mean-reverting (`H < 0.45`). `Hurst(100) > 0.60 -> Enable Trend Rules; Hurst(100) < 0.40 -> Enable Mean Reversion Rules`
+27. **Shannon Entropy Predictability Filter:** Measuring randomness in binary up/down day sequences; low entropy signals structured institutional order flow. `Sample_Entropy(Close_Returns, 20) in bottom 20th percentile AND ROC(10) > 0`
+28. **Autocorrelation (Serial Correlation) Momentum:** Positive lag-1 to lag-5 return autocorrelation indicating persistent multi-day institutional execution. `Autocorr(Returns, Lag=1, Window=30) > 0.20 AND Return[t] > 0`
+29. **Variance Ratio Test Breakout:** Variance of 10-day returns exceeding 10x the variance of 1-day returns proves a non-random trending regime. `Var(Return_10D) / (10 * Var(Return_1D)) > 1.30 AND Close > SMA(20)`
+30. **Fama-French 12-1 Momentum (Skipping Recent Month):** Classic quantitative factor: ranking stocks by 12-month return excluding the most recent 1 month (which tends to mean-revert). `Return(t-252 to t-21) in top 10% of universe AND Return(t-21 to t) < 0 (dip buy)`
+31. **52-Week High Anchoring Factor (George & Hwang):** Stocks trading closest to their 52-week high (`Close / High_52W > 0.95`) have the strongest post-news drift due to psychological anchoring. `Close / MAX(High, 252) > 0.95 AND Volume > SMA(Volume, 20)`
+32. **Amihud Illiquidity Ratio Drop (Liquidity Awakening):** A sharp drop in price impact per rupee traded shows deep institutional liquidity entering a mid-cap stock. `Amihud_Ratio(20) = Avg(abs(Return) / Traded_Value); Trigger when Amihud drops 50% below 100D avg`
+33. **Turn-of-the-Month (SIP Inflow) Effect:** In India, massive retail SIP inflows hit mutual funds between the 28th of Month 1 and the 5th of Month 2, lifting Nifty/Midcap leaders. `Calendar_Day >= 28 OR Calendar_Day <= 4 AND Stock in Nifty_Midcap_100 AND Close > EMA(20)`
+34. **Pre-Expiry Thursday/Wednesday Short Squeeze:** Short option writers covering positions on the day before NSE weekly/monthly expiry. `Day == Expiry_Minus_1 AND Spot > Yesterday_High AND Call_OI unwinding at ATM strikes`
+35. **Post-Earnings Announcement Drift (PEAD Technical Proxy):** A stock that gaps up > 4% on quarterly results volume continues drifting higher for 20–40 trading days. `Gap_Up > 4% on Volume > 3x Avg within last 10 days AND Price pulls back to 10-EMA`
+36. **Overnight vs. Intraday Return Divergence:** Stocks where cumulative overnight returns (`Open[t] - Close[t-1]`) are strongly positive while intraday returns are flat show institutional overnight accumulation. `SUM(Overnight_Return, 20) > 8% AND SUM(Intraday_Return, 20) < 0`
+37. **Up-Minus-Down (UMD) Volatility Asymmetry:** Upside semi-deviation (volatility on green days) vastly exceeding downside semi-deviation (volatility on red days). `StdDev(Positive_Returns, 30) / StdDev(Negative_Returns, 30) > 1.6`
+38. **Skewness Breakout (Positive Return Skew):** Distribution of 60-day daily returns shifting to high positive skewness (frequent small dips, explosive green days). `Skewness(Daily_Returns, 60) > 1.0 AND Close > SMA(50)`
+39. **Kaufman Efficiency Ratio (ER) Smooth Trend:** Net price displacement divided by total sum of absolute daily moves approaching 1.0 (zero noise). `abs(Close[t] - Close[t-10]) / SUM(abs(Close[i] - Close[i-1]), 10) > 0.65`
+40. **Dynamic Time Warping (DTW) Pattern Match:** Algorithmic template matching comparing the last 20 normalized bars against historical pre-breakout signatures. `DTW_Distance(Normalized_Close[t-20..t], Ideal_VCP_Template) < Threshold`
+41. **Z-Score of Volume-Weighted Price Velocity:** Combining price Z-score and volume Z-score into a single composite institutional ignition score. `Z_Score(ROC_5, 60) * Z_Score(Volume, 60) > 4.0 AND ROC_5 > 0`
+42. **Beta-Adjusted Residual Momentum:** Stripping out Nifty 50 market movement (`Return_Stock - Beta * Return_Nifty`) to isolate pure idiosyncratic stock momentum. `SUM(Idiosyncratic_Return, 20) in top 5% of NSE universe`
+43. **Maximum Adverse Excursion (MAE) Tight Trend:** Stock advancing for 15+ sessions where no single intraday low breaches the prior 3-day low. `For i in 1..15: Low[t-i] >= MIN(Low, 3)[t-i-1]`
+44. **Intraday First-Hour vs. Last-Hour Smart Money Index (SMI):** Retail trades the erratic first 30 mins (`9:15–9:45`); institutions dominate the final hour (`14:30–15:30`). `SMI = Prev_SMI - Return(9:15-9:45) + Return(14:30-15:30); Trigger when SMI hits 20-day high`
+45. **FII / DII Cash Flow Regime Alignment:** Conditioning high-beta breakout strategies to fire only when net institutional cash flow (`FII_Net + DII_Net`) is positive over 5 days. `SUM(FII_Cash_Net + DII_Cash_Net, 5) > 0 AND Nifty_50 > EMA(20)`
+46. **52-Week Low to High Recovery Velocity (Turnaround Quant):** Stocks that were down > 40% from highs, formed a 3-month flat bottom, and just reclaimed their 200-DMA. `Max_Drawdown_1Yr > 40% AND Range(60) < 15% AND Close crosses above SMA(200)`
+47. **Cross-Asset Ratio Signal (Nifty Bank / Nifty 50 Ratio):** Using BankNifty relative strength as a macro risk-on filter for domestic cyclical stocks. `SMA(BankNifty / Nifty50, 10) > SMA(BankNifty / Nifty50, 30)`
+48. **Dual Momentum (Absolute + Relative):** Antonacci framework: stock must beat both its own 6-month past (Absolute Momentum > Risk-Free Rate) AND beat the Nifty 50 (Relative Momentum). `ROC(126) > 3.5% (6M T-Bill proxy) AND ROC(126) > Nifty_ROC(126)`
+49. **Sortino Momentum Ranking:** Ranking momentum stocks by dividing 6-month return purely by downside deviation, avoiding erratic pump-and-dump stocks. `Sortino_6M = Return(126) / Downside_StdDev(126) > 2.5`
+50. **Multi-Factor Quant Composite Score (Trend + Volume + RS + Vol-Compression):** Master ingestion rule combining the 4 non-fundamental pillars into a 0–100 composite rank. `0.25*Rank(RS_6M) + 0.25*Rank(Delivery_Spike) + 0.25*Rank(ADX_Trend) + 0.25*Rank(1/BB_Width) > 85`
+
+---
+
+### How to Architect This in Your App's Rule Engine
+
+Instead of hardcoding 300 separate scripts, build an **AST (Abstract Syntax Tree) or JSON Expression Evaluator** around **5 atomic primitives**:
+
+* **Data Series (`Series`):** `Open, High, Low, Close, Volume, Delivery_Pct, OI, Futures_Close, Nifty_Close`
+* **Transforms (`Indicators`):** `SMA, EMA, RSI, ATR, BB_Upper, BB_Lower, VWAP, ADX, Supertrend, Z_Score, MAX, MIN, ROC`
+* **Operators (`Comparators`):** `>, <, >=, <=, ==, crosses_above, crosses_below, between`
+* **Lookbacks (`Offsets`):** `[t]`, `[t-1]`, `[t-n]`, `Window(20)`
+* **Regime Tag (`Metadata`):** Tag every strategy with `"regime": "TREND" | "MEAN_REVERSION" | "VOLATILITY_BREAKOUT"` so your app automatically applies the right stop-loss logic (e.g., `2x ATR Trailing Stop` for Trend vs `SMA(5) Exit` for Mean Reversion).

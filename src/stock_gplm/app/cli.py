@@ -8,6 +8,7 @@ Everyday commands::
     gplm daily --stocks RELIANCE,HDFCBANK,ICICIBANK --device auto [--refresh]
     gplm dashboard [--port 8765] [--open]
     gplm discover --stocks RELIANCE,HDFCBANK --data all-local --timeframes auto --budget deep --device auto --resume
+    gplm m56 --stocks RELIANCE,HDFCBANK --timeframes 15m,1d --mode both --budget standard --device auto --resume
     gplm replay --stocks RELIANCE --start 2026-08-13 --device auto
     gplm strategies list | show ID | export --id ID | copy ID | edit ID --set exit.max_hold_bars=7 | activate ID | history ID
     gplm audit --run RUN_ID | --prediction PRED_ID | --verify | --export predictions --format csv | --backup
@@ -230,6 +231,40 @@ def cmd_discover(args: argparse.Namespace) -> int:
         return res
 
     return _run(args, "discover", work, be)
+
+
+def cmd_m56(args: argparse.Namespace) -> int:
+    """Run the complete M5.6 reference coverage plus open-ended local discovery workflow."""
+    be = _backend(args.device)
+
+    def work(app: Any) -> dict[str, Any]:
+        from .m56 import TIMEFRAMES, run_m56
+
+        syms = _symbols(args, app)
+        tfs = list(TIMEFRAMES) if args.timeframes == "all" else [x.strip() for x in args.timeframes.split(",")]
+        bad = sorted(set(tfs) - set(TIMEFRAMES))
+        if bad:
+            raise ValueError(f"unsupported timeframes: {bad}")
+        result = run_m56(app, syms, tfs, be, catalogue=Path(args.catalogue).resolve(), mode=args.mode,
+                         budget=args.budget, manifest_only=args.manifest_only, start=args.start, end=args.end)
+        if not args.json:
+            _p(f"M5.6 catalogue: {result['reference_count']} references (minimum, not a ceiling)")
+            _p(f"  manifest: {result['manifest']}")
+            if result.get("reference"):
+                rr = result["reference"]
+                _p(f"  reference combinations: {rr['combinations']}  validation results: "
+                   f"{rr['validation_results']}  holdout scores: {rr['holdout_scores']}")
+                for key, value in sorted(rr["coverage"].items()):
+                    _p(f"    {key:<30} {value}")
+            for row in result.get("leaderboard", []):
+                best = row.get("best")
+                label = best["strategy_id"] if best else "NO VALIDATED STRATEGY"
+                _p(f"  {row['symbol']:<16} {row['timeframe']:>3} {row['regime']:<10} {label}")
+            if result.get("report"):
+                _p(f"  report: {result['report']}")
+        return result
+
+    return _run(args, "m56", work, be)
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
@@ -604,6 +639,19 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--start")
     d.add_argument("--end")
     d.add_argument("--skip-engine", action="store_true", help="run only the batched broad screen")
+    m56 = add("m56", cmd_m56, "M5.6 full reference-library coverage plus autonomous local discovery")
+    stocks(m56)
+    device(m56)
+    m56.add_argument("--catalogue", default=str(Path(__file__).resolve().parents[3] / "config" / "strategies" /
+                                                "reference-300-strategies.txt"))
+    m56.add_argument("--mode", choices=["reference", "discovery", "both"], default="both")
+    m56.add_argument("--timeframes", default="all", help="all, or comma list from 1m,5m,15m,30m,60m,1d,1w")
+    m56.add_argument("--budget", choices=["quick", "standard", "deep"], default="standard")
+    m56.add_argument("--start")
+    m56.add_argument("--end")
+    m56.add_argument("--resume", action="store_true", help="reuse immutable caches/checkpoints; this is the default")
+    m56.add_argument("--fresh", action="store_true", help="new run record; immutable evidence and holdout locks remain")
+    m56.add_argument("--manifest-only", action="store_true", help="register/verify all 300 without candle evaluation")
     r = add("replay", cmd_replay, "historical rolling walk-forward replay (also issues the live forecast)")
     stocks(r)
     device(r)

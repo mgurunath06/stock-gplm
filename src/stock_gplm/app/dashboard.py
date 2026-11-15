@@ -205,6 +205,24 @@ def rolling_series(s: Settings, lane: str, source: str, horizon: int) -> list[di
     return out
 
 
+def m56_leaderboard(s: Settings) -> list[dict[str, Any]]:
+    rows = _rows(s, "SELECT strategy_id, classification, origin, symbol, timeframe, regime, evidence_stage, "
+                    "metrics_json, data_fingerprint, device, created_utc FROM m56_results ORDER BY created_utc")
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        row["metrics"] = json.loads(row.pop("metrics_json"))
+        grouped.setdefault((row["symbol"], row["timeframe"], row["regime"]), []).append(row)
+    out = []
+    for (symbol, timeframe, regime), values in sorted(grouped.items()):
+        valid = [v for v in values if v["classification"] == "VALIDATED"]
+        valid.sort(key=lambda v: ((v["metrics"].get("mean_net") or -1e9),
+                                  (v["metrics"].get("effective_n") or 0)), reverse=True)
+        out.append({"symbol": symbol, "timeframe": timeframe, "regime": regime,
+                    "status": "VALIDATED" if valid else "NO VALIDATED STRATEGY",
+                    "best": valid[0] if valid else None, "result_count": len(values)})
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     settings: Settings
 
@@ -241,6 +259,22 @@ class Handler(BaseHTTPRequestHandler):
                 (q.get("symbol", ""), q.get("symbol", ""), q.get("mode", ""), q.get("mode", ""), q.get("actionable", ""),
                  q.get("actionable", "0"), int(q.get("limit", 300)))),
             "/api/strategies": lambda: strategies(s),
+            "/api/m56/coverage": lambda: _rows(
+                s, "SELECT reference_id, symbol, timeframe, status, reason, requirements_json, strategy_sha256, "
+                   "created_utc FROM m56_coverage WHERE (?='' OR run_id=?) AND (?='' OR symbol=?) "
+                   "ORDER BY reference_id, symbol, timeframe LIMIT ?",
+                (q.get("run", ""), q.get("run", ""), q.get("symbol", ""), q.get("symbol", ""),
+                 int(q.get("limit", 10000)))),
+            "/api/m56/coverage_counts": lambda: _rows(
+                s, "SELECT status, COUNT(*) n FROM m56_coverage WHERE (?='' OR run_id=?) GROUP BY status ORDER BY status",
+                (q.get("run", ""), q.get("run", ""))),
+            "/api/m56/results": lambda: _rows(
+                s, "SELECT strategy_id, classification, origin, symbol, timeframe, regime, evidence_stage, metrics_json, "
+                   "lineage_json, data_fingerprint, device, created_utc FROM m56_results WHERE (?='' OR symbol=?) "
+                   "AND (?='' OR timeframe=?) ORDER BY created_utc DESC LIMIT ?",
+                (q.get("symbol", ""), q.get("symbol", ""), q.get("timeframe", ""), q.get("timeframe", ""),
+                 int(q.get("limit", 2000)))),
+            "/api/m56/leaderboard": lambda: m56_leaderboard(s),
             "/api/strategy": lambda: {"versions": _rows(s, "SELECT * FROM strategies WHERE strategy_id=? ORDER BY version",
                                                         (q.get("id", ""),)),
                                       "document": _strategy_doc(s, q.get("id", "")),

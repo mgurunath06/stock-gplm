@@ -97,6 +97,24 @@ CREATE TABLE IF NOT EXISTS checkpoints (key TEXT PRIMARY KEY, run_id TEXT, paylo
   payload_sha TEXT NOT NULL, updated_utc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS config_snapshots (sha256 TEXT PRIMARY KEY, path TEXT NOT NULL, content TEXT NOT NULL,
   first_seen_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS m56_catalogues (
+  catalogue_sha256 TEXT PRIMARY KEY, source_path TEXT NOT NULL, contract TEXT NOT NULL,
+  strategy_count INTEGER NOT NULL, manifest_path TEXT NOT NULL, created_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS m56_coverage (
+  run_id TEXT NOT NULL, reference_id TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+  status TEXT NOT NULL, reason TEXT NOT NULL, requirements_json TEXT NOT NULL, strategy_sha256 TEXT NOT NULL,
+  created_utc TEXT NOT NULL, PRIMARY KEY(run_id, reference_id, symbol, timeframe));
+CREATE INDEX IF NOT EXISTS m56_coverage_status ON m56_coverage(run_id, status);
+CREATE TABLE IF NOT EXISTS m56_results (
+  result_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, strategy_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+  classification TEXT NOT NULL, origin TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+  regime TEXT NOT NULL, evidence_stage TEXT NOT NULL, metrics_json TEXT NOT NULL, lineage_json TEXT NOT NULL,
+  data_fingerprint TEXT NOT NULL, device TEXT NOT NULL, created_utc TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS m56_results_board ON m56_results(symbol, timeframe, regime, classification);
+CREATE TABLE IF NOT EXISTS m56_method_runs (
+  method_run_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, method TEXT NOT NULL, symbol TEXT,
+  timeframe TEXT, status TEXT NOT NULL, device TEXT NOT NULL, checkpoint_key TEXT,
+  generated INTEGER NOT NULL, evaluated INTEGER NOT NULL, detail_json TEXT NOT NULL, created_utc TEXT NOT NULL);
 CREATE TRIGGER IF NOT EXISTS predictions_no_update BEFORE UPDATE ON predictions
   BEGIN SELECT RAISE(ABORT, 'predictions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS predictions_no_delete BEFORE DELETE ON predictions
@@ -109,6 +127,14 @@ CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
   BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
   BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS m56_coverage_no_update BEFORE UPDATE ON m56_coverage
+  BEGIN SELECT RAISE(ABORT, 'M5.6 coverage is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS m56_coverage_no_delete BEFORE DELETE ON m56_coverage
+  BEGIN SELECT RAISE(ABORT, 'M5.6 coverage is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS m56_results_no_update BEFORE UPDATE ON m56_results
+  BEGIN SELECT RAISE(ABORT, 'M5.6 results are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS m56_results_no_delete BEFORE DELETE ON m56_results
+  BEGIN SELECT RAISE(ABORT, 'M5.6 results are append-only'); END;
 """
 
 GENESIS = "0" * 64
@@ -386,7 +412,8 @@ class AuditDB:
     # ------------------------------------------------------------------ export / backup
     def export_table(self, table: str, fmt: str, where: str = "", params: Sequence[Any] = ()) -> str:
         allowed = {"runs", "events", "data_files", "data_issues", "candle_cache", "strategies", "models", "champions",
-                   "training_history", "predictions", "evaluations", "api_calls", "checkpoints"}
+                   "training_history", "predictions", "evaluations", "api_calls", "checkpoints", "m56_catalogues",
+                   "m56_coverage", "m56_results", "m56_method_runs"}
         if table not in allowed:
             raise ValueError(f"unknown table {table}")
         rows = self.q(f"SELECT * FROM {table} {where}", params)
