@@ -71,26 +71,26 @@ Run these from `H:\Guru\Learning\StockGLPM\app` in PowerShell. The first command
 integrity check and does not read candles:
 
 ```powershell
-.\windows\gplm.cmd m56 --stocks RELIANCE --manifest-only --mode reference --device cpu
+.\windows\gplm.cmd m56 --stocks "RELIANCE" --manifest-only --mode reference --device cpu
 ```
 
 Bounded end-to-end research (recommended first real run):
 
 ```powershell
-.\windows\gplm.cmd m56 --stocks RELIANCE,HDFCBANK,ICICIBANK --timeframes 15m,60m,1d,1w --mode both --budget quick --device auto --resume
+.\windows\gplm.cmd m56 --stocks "RELIANCE,HDFCBANK,ICICIBANK" --timeframes "15m,60m,1d,1w" --mode both --budget quick --device auto --resume
 ```
 
 All locally eligible NSE equities and all seven timeframes:
 
 ```powershell
-.\windows\gplm.cmd m56 --universe all --timeframes all --mode both --budget deep --device gpu --resume
+.\windows\gplm.cmd m56 --universe all --timeframes "all" --mode both --budget deep --device gpu --resume
 ```
 
 Reference-only or discovery-only runs:
 
 ```powershell
-.\windows\gplm.cmd m56 --stocks RELIANCE --timeframes 1d,1w --mode reference --budget standard --device cpu --resume
-.\windows\gplm.cmd m56 --stocks RELIANCE --timeframes 5m,15m,60m,1d --mode discovery --budget deep --device gpu --resume
+.\windows\gplm.cmd m56 --stocks "RELIANCE" --timeframes "1d,1w" --mode reference --budget standard --device cpu --resume
+.\windows\gplm.cmd m56 --stocks "RELIANCE" --timeframes "5m,15m,60m,1d" --mode discovery --budget deep --device gpu --resume
 ```
 
 The manifest is under `GPLM_HOME\m56`; run reports are under `GPLM_HOME\reports\m56\<run-id>`.

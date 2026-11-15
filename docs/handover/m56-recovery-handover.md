@@ -79,9 +79,9 @@ Evidence: `...\run3-pre-fix\evidence.json`; summarize with `summarize.py`.
 ```powershell
 $env:PYTHONPATH="src"; $env:PYTHONUTF8="1"
 .venv\Scripts\python.exe -m pytest tests\test_m56.py -q -p no:cacheprovider
-.\windows\gplm.cmd m56 --stocks RELIANCE --manifest-only --mode reference --device cpu
+.\windows\gplm.cmd m56 --stocks "RELIANCE" --manifest-only --mode reference --device cpu
 # first real development-period run (only after fix 1 is committed):
-.\windows\gplm.cmd m56 --stocks RELIANCE,HDFCBANK,ICICIBANK --timeframes 1d,1w --mode both --budget quick --device auto --end 2025-10-20
+.\windows\gplm.cmd m56 --stocks "RELIANCE,HDFCBANK,ICICIBANK" --timeframes "1d,1w" --mode both --budget quick --device auto --end 2025-10-20
 ```
 
 ## Status log
@@ -91,5 +91,5 @@ $env:PYTHONPATH="src"; $env:PYTHONUTF8="1"
   28 passed, 1 skipped. The negative control confirmed that the metamorphic test detects a leak.
 - `config/app/gplm.windows.json` (local, untracked) also received `m56.development_end = 2025-10-20`.
 - First real development run started:
-  `.\windows\gplm.cmd m56 --stocks RELIANCE,HDFCBANK,ICICIBANK --timeframes 1d,1w --mode both --budget quick --device auto --resume`
+  `.\windows\gplm.cmd m56 --stocks "RELIANCE,HDFCBANK,ICICIBANK" --timeframes "1d,1w" --mode both --budget quick --device auto --resume`
   The log is `H:\Guru\Learning\StockGLPM\reports\m56-acceptance-20261115\real-run1-dev.log`.
