@@ -129,7 +129,7 @@ LLM translation and proposals are approved for aggregate data only (2026-11-15).
 
 ## Correctness verification
 
-`.\windowserify.cmd` checks interpretation, indicators, fills, statistics and ML on synthetic fixtures (`docs/verification.md`). Engine v2 / DSL v2 / evolve v2 (2026-11-15) fixed the signal-exit baseline bias and adopted TA-Lib seeding, so results from earlier runs are recomputed automatically.
+`.\windows\verify.cmd` checks interpretation, indicators, fills, statistics and ML on synthetic fixtures (`docs/verification.md`). Engine v2 / DSL v2 / evolve v2 (2026-11-15) fixed the signal-exit baseline bias and adopted TA-Lib seeding, so results from earlier runs are recomputed automatically.
 
 ## Known limitations
 
