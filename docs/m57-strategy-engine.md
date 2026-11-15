@@ -78,6 +78,7 @@ Each run writes to `H:\Guru\Learning\StockGLPM\state\reports\research\<name>\`:
 | `catalogue_coverage.csv` | Per reference: EXECUTED, or the blocking reason |
 | `strategy_cross_stock.csv` | Pooled validation evidence per strategy across stocks, BH-adjusted |
 | `run-config.json`, `catalogue-report.json` | Run configuration and catalogue parse report |
+| `audit/trades/`, `audit/ml/`, `audit/index.jsonl` | Per-trade ledger and every ML candidate evaluated, per lane (see `docs/verification.md`) |
 
 New ML strategies are written to `state\strategy-library\discovered\ml\*.json` and are reloaded by
 every later run (`ML_DISCOVERED`, stock-specific applicability).
@@ -125,6 +126,10 @@ LLM translation and proposals are approved for aggregate data only (2026-11-15).
   `DISCOVERED` (promising, p < 0.10, but gates not met), `REJECTED`, `REPLAY` (re-execution on the
   same data it was discovered on; not new evidence).
 - The summary also reports a run-wide BH (`global_q_value`).
+
+## Correctness verification
+
+`.\windowserify.cmd` checks interpretation, indicators, fills, statistics and ML on synthetic fixtures (`docs/verification.md`). Engine v2 / DSL v2 / evolve v2 (2026-11-15) fixed the signal-exit baseline bias and adopted TA-Lib seeding, so results from earlier runs are recomputed automatically.
 
 ## Known limitations
 
