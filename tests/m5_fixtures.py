@@ -325,7 +325,7 @@ def install_trust_root(directory: Path, monkeypatch: pytest.MonkeyPatch, policy:
     (directory / authority.TRUST_ROOT_FILE).write_text(json.dumps(root))
     for name in (root["policy_file"], authority.TRUST_ROOT_FILE):
         os.chmod(directory / name, 0o644)
-    owner = os.geteuid()
+    owner = getattr(os, "geteuid", lambda: 0)()  # synthetic administrator on Windows
     monkeypatch.setattr(authority, "_ANCHOR", authority.TrustAnchor(directory, owner, directory))
     monkeypatch.setattr(authority, "_effective_uid", lambda: owner + 1 if research_uid is None else research_uid)
     return directory

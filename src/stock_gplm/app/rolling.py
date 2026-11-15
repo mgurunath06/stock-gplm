@@ -209,8 +209,21 @@ class LaneReplay:
         for h in self.horizons:
             for k in self.kinds:
                 p = self.model_files.get(f"{k}|{h}")
-                models[(k, h)] = DirectionModel.load(Path(p)) if (done_upto and p and Path(p).is_file()) \
-                    else DirectionModel(k, h)
+                path = Path(p) if p else None
+                if path is not None and not path.is_file():
+                    # Resolve copied Linux checkpoints against the current home,
+                    # without changing checkpoint history or refitting a model.
+                    parts = p.replace("\\", "/").split("/")
+                    if "models" in parts:
+                        candidate = self.models_dir.joinpath(*parts[parts.index("models") + 1:])
+                        if candidate.resolve().is_relative_to(self.models_dir.resolve()):
+                            path = candidate
+                    if not path.is_file():
+                        raise FileNotFoundError(f"checkpoint model unavailable: {p}")
+                    recorded = self.db.one("SELECT sha256 FROM models WHERE path=?", (p,))
+                    if recorded is None or hashlib.sha256(path.read_bytes()).hexdigest() != recorded["sha256"]:
+                        raise ValueError(f"relocated checkpoint model digest mismatch: {p}")
+                models[(k, h)] = DirectionModel.load(path) if done_upto and path else DirectionModel(k, h)
         rules = [Rule.from_dict(r) for r in ck.get("rules", [])] if done_upto else []
         rules_step = int(ck.get("rules_step", -10**9)) if done_upto else -10**9
         strategies = self._library_masks()

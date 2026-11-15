@@ -548,7 +548,7 @@ def test_C_writable_or_symlinked_governed_files_are_rejected(tmp_path: Path, mon
         load_trust_policy()
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="needs a non-root test user to prove ownership enforcement")
+@pytest.mark.skipif((not hasattr(os, "geteuid") or os.geteuid() == 0), reason="needs a non-root test user to prove ownership enforcement")
 def test_C_user_owned_trust_root_is_rejected_when_root_ownership_is_required(tmp_path: Path, monkeypatch) -> None:
     admin = install_trust_root(tmp_path / "admin", monkeypatch, trust_policy_value([]))
     monkeypatch.setattr(authority, "_ANCHOR", authority.TrustAnchor(admin, 0, admin))

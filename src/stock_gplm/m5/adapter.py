@@ -10,7 +10,7 @@ never proves that an instrument belonged to the universe on a date.
 """
 from __future__ import annotations
 
-import fcntl
+from stock_gplm import locking as fcntl
 import re
 from dataclasses import asdict
 from datetime import date, timedelta

@@ -8,7 +8,7 @@ assessed later and separately, so a poor candle file is preserved, not refused.
 """
 from __future__ import annotations
 
-import fcntl
+from stock_gplm import locking as fcntl
 import hashlib
 import json
 import os

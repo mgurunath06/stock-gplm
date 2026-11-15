@@ -218,11 +218,16 @@ class Library:
             if len(matches) == 1:
                 return self.get(matches[0]["strategy_id"], version)
             raise StrategyError(f"no strategy {sid}" + (f" v{version}" if version else ""))
-        text = Path(row["path"]).read_text(encoding="utf-8")
+        path = Path(row["path"])
+        if not path.is_file():
+            # A copied state directory retains its original absolute paths. Resolve
+            # by recorded identity; the existing digest check still binds content.
+            path = self._path(row["strategy_id"], row["version"], bool(row["immutable"]))
+        text = path.read_text(encoding="utf-8")
         if sha(text) != row["sha256"]:
             raise StrategyError(f"{row['path']} does not match its recorded SHA-256 (edited outside GPLM)")
         d = json.loads(text)
-        d["_path"], d["_active"], d["_sha256"] = row["path"], bool(row["active"]), row["sha256"]
+        d["_path"], d["_active"], d["_sha256"] = str(path), bool(row["active"]), row["sha256"]
         return d
 
     def list(self, symbol: str | None = None, timeframe: str | None = None, active_only: bool = False

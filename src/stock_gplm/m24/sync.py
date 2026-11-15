@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-import fcntl
+from stock_gplm import locking as fcntl
 import json
 import os
 import shutil

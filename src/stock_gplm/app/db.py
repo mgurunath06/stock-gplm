@@ -21,14 +21,15 @@ import json
 import os
 import socket
 import sqlite3
-import sys
 import time
 import urllib.parse
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence, TextIO
+
+from stock_gplm import locking
 
 SCHEMA_VERSION = 1
 
@@ -143,68 +144,74 @@ class LockBusy(RuntimeError):
     """Another GPLM process holds the writer lock."""
 
 
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    if sys.platform == "win32":
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        kernel32.CloseHandle(handle)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
 class ProcessLock:
-    """Exclusive writer lock: ``O_CREAT | O_EXCL`` lock file holding the owner's pid and host.
+    """Persistent kernel lock, released automatically on process death.
 
-    A lock whose owner process is gone (same host) is stale and is replaced, with the takeover
-    recorded by the caller. A live owner makes :meth:`acquire` raise :class:`LockBusy`.
+    Acquisition waits up to timeout_seconds (default: fail immediately). Metadata
+    left by an interrupted owner is reported only after exclusive acquisition.
+    Never unlink this file: all contenders must lock the same file identity.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, timeout_seconds: float = 0):
+        self.timeout_seconds = max(0, timeout_seconds)
         self.path = Path(path)
         self.held = False
+        self._stream: TextIO | None = None
         self.stale_takeover: dict[str, Any] | None = None
 
     def acquire(self, purpose: str) -> "ProcessLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         info = {"pid": os.getpid(), "host": socket.gethostname(), "purpose": purpose, "since_utc": utc_now()}
-        for _ in range(2):
+        if self.held:
+            raise LockBusy(f"lock already acquired: {self.path}")
+        if self.path.is_symlink():
+            raise LockBusy(f"writer lock must not be a symlink: {self.path}")
+        stream = self.path.open("a+", encoding="utf-8")
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
             try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                try:
-                    owner = json.loads(self.path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    owner = {}
-                same_host = owner.get("host") == socket.gethostname()
-                if same_host and not _pid_alive(int(owner.get("pid", -1))):
-                    self.stale_takeover = owner
-                    self.path.unlink(missing_ok=True)
-                    continue
-                raise LockBusy(f"another GPLM process holds {self.path}: {owner or 'unreadable lock file'}")
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(json.dumps(info))
-            self.held = True
-            return self
-        raise LockBusy(f"could not acquire {self.path}")
+                locking.flock(stream.fileno(), locking.LOCK_EX | locking.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    stream.close()
+                    raise LockBusy(f"another GPLM process holds {self.path}")
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            except BaseException:
+                stream.close()
+                raise
+        try:
+            stream.seek(0)
+            try:
+                owner = json.loads(stream.read())
+            except ValueError:
+                owner = {}
+            if owner:
+                self.stale_takeover = owner
+            stream.seek(0)
+            stream.truncate()
+            stream.write(json.dumps(info))
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            stream.close()
+            raise
+        self._stream = stream
+        self.held = True
+        return self
 
     def release(self) -> None:
         if self.held:
-            self.path.unlink(missing_ok=True)
-            self.held = False
+            assert self._stream is not None
+            try:
+                self._stream.seek(0)
+                self._stream.truncate()
+                self._stream.flush()
+                locking.flock(self._stream.fileno(), locking.LOCK_UN)
+            finally:
+                self._stream.close()
+                self.held = False
+                self._stream = None
 
     def __enter__(self) -> "ProcessLock":
         return self

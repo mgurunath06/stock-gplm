@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import gzip
-import fcntl
+from stock_gplm import locking as fcntl
 import hashlib
 import json
 import os

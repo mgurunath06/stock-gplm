@@ -22,7 +22,7 @@ def code_sha256() -> str:
         for p in sorted((root / d).rglob("*.py")):
             h.update(p.relative_to(root).as_posix().encode())
             h.update(p.read_bytes())
-    for extra in ("ingestion/daily.py", "m3/minute.py"):
+    for extra in ("ingestion/daily.py", "m3/minute.py", "locking.py"):
         p = root / extra
         if p.is_file():
             h.update(p.read_bytes())

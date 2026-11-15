@@ -11,7 +11,12 @@ if errorlevel 1 (
   exit /b 2
 )
 call "%G%" discover --stocks RELIANCE --data all-local --timeframes 1d,15m,5m --budget deep --device gpu --skip-engine
+if errorlevel 1 exit /b 1
 call "%G%" replay --stocks RELIANCE --device gpu --max-steps 5 --home "%TEMP%\gplm-gpu-verify"
-call "%G%" audit --run
+if errorlevel 1 exit /b 1
+call "%G%" audit --verify --home "%TEMP%\gplm-gpu-verify"
+if errorlevel 1 exit /b 1
+call "%G%" audit --verify
+if errorlevel 1 exit /b 1
 echo.
 echo GPU verification finished. Keep the gpu-test JSON and the audit output above as evidence.

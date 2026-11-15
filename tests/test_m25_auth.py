@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import fcntl
+from stock_gplm import locking as fcntl
 import json
 import os
 import stat
