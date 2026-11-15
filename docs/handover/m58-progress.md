@@ -55,7 +55,8 @@ $env:PYTHONUTF8="1"
 .\windows\gplm.cmd prediction-walk-forward --stock "ICICIBANK" --start 2025-08-01 --end 2025-08-29 --timeframe 15m --horizon 1 --name icicibank-15m-aug-2025
 ```
 
-Reports: `<home>eports\prediction-evaluation\<name>\walk-forward-summary.json`,
+Reports: `<home>\reports\prediction-evaluation\<name>\walk-forward-summary.json`,
+eports\prediction-evaluation\<name>\walk-forward-summary.json`,
 `walk-forward-steps.json`, `walk-forward-steps.csv`, `prediction-evaluation.json`.
 
 Known limitations: failed steps appear in `errors`, not as table rows; `--run-name` resolves only the
