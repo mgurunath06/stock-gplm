@@ -4,6 +4,7 @@ Everyday commands::
 
     gplm doctor
     gplm gpu-test [--require-gpu]
+    gplm gpu-evidence --stocks RELIANCE --start 2026-08-01 --end 2026-11-14 --timeframes 15m --device gpu --fresh
     gplm daily --stocks RELIANCE,HDFCBANK,ICICIBANK --device auto [--refresh]
     gplm dashboard [--port 8765] [--open]
     gplm discover --stocks RELIANCE,HDFCBANK --data all-local --timeframes auto --budget deep --device auto --resume
@@ -114,7 +115,8 @@ def _brief(result: Any) -> Any:
                                                          "model_fits", "symbols", "forecast_status", "report_files",
                                                          "device", "status", "lane_counts", "lane_failures",
                                                          "compute_attribution", "device_stats", "budget", "lanes_done",
-                                                         "accepted")}
+                                                         "accepted", "run_id", "evidence_file", "evidence_sha256",
+                                                         "workload", "telemetry", "isolation")}
     return None
 
 
@@ -158,6 +160,12 @@ def cmd_gpu_test(args: argparse.Namespace) -> int:
     except Exception as exc:  # the evidence file is the primary record
         _p(f"  (audit event not written: {exc})")
     return int(rep.get("exit_code", 0))
+
+
+def cmd_gpu_evidence(args: argparse.Namespace) -> int:
+    from .gpu_evidence import run
+
+    return run(argparse.Namespace(**{k: v for k, v in vars(args).items() if k not in {"func", "command"}}))
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -579,6 +587,9 @@ def build_parser() -> argparse.ArgumentParser:
     add("doctor", cmd_doctor, "check the environment, data, database and GPU")
     g = add("gpu-test", cmd_gpu_test, "run real GPU workloads and compare with the CPU")
     g.add_argument("--require-gpu", action="store_true", help="exit 2 unless CUDA executed and matched")
+    ge = add("gpu-evidence", cmd_gpu_evidence, "isolated real-candle discovery, training and walk-forward evaluation")
+    from .gpu_evidence import add_arguments
+    add_arguments(ge)
     i = add("ingest", cmd_ingest, "incrementally catalogue and validate local daily+minute files")
     stocks(i)
     i.add_argument("--daily-only", action="store_true")

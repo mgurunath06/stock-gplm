@@ -157,21 +157,38 @@ def search(backend: Backend, lane: Lane, last_label_idx: int, horizons: Sequence
     finite = np.argwhere(np.isfinite(all_t))
     ranked = sorted(((float(all_t[i, j]), int(i), int(j)) for i, j in finite), reverse=True)
     ex = cfg["exit"]
+    decisions: list[dict[str, Any]] = []
+    rejection_counts: dict[str, int] = {}
     chosen: list[Rule] = []
     seen: set[str] = set()
     for tval, ci, hj in ranked:
-        if len(chosen) >= int(cfg["max_selected"]):
+        if len(chosen) >= int(cfg["max_selected"]) and not cfg.get("audit_candidates"):
             break
         h = hs[hj]
         rule = Rule(conds(ci), h, {"max_hold_bars": h, "stop_atr": ex.get("stop_atr"), "target_atr": ex.get("target_atr"),
                                    "trail_atr": ex.get("trail_atr")},
                     "FDR_SELECTED" if q[ci, hj] <= float(cfg["fdr_q"]) else "EXPLORATORY_UNCORRECTED")
-        if rule.rule_id in seen:
+        if len(chosen) >= int(cfg["max_selected"]):
+            reason = "selection_budget_reached"
+        elif rule.rule_id in seen:
+            reason = "duplicate_rule"
+        else:
+            reason = "pending_exact_confirmation"
+        if reason != "pending_exact_confirmation":
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            if cfg.get("audit_candidates"):
+                decisions.append({"rule_id": rule.rule_id, "text": rule.text(), "reason": reason})
             continue
         mask = rule.mask(lane)
         trades = simulate(m, mask, (start_idx, train_end), ExitPolicy.from_dict(rule.exit), lane.costs)
         nets = [t["net_return"] for t in trades]
-        if len(trades) < max(3, int(cfg["min_trades"]) // 2) or np.mean(nets) <= 0:
+        reason = ("too_few_exact_trades" if len(trades) < max(3, int(cfg["min_trades"]) // 2)
+                  else "nonpositive_exact_net_return" if np.mean(nets) <= 0 else "retained")
+        rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+        if cfg.get("audit_candidates"):
+            decisions.append({"rule_id": rule.rule_id, "text": rule.text(), "reason": reason,
+                              "q_bh": float(q[ci, hj]), "exact_trades": len(trades)})
+        if reason != "retained":
             continue
         rule.in_sample = {"t_stat": tval, "p_value": float(pv[ci, hj]), "q_bh": float(q[ci, hj]),
                           "screen_n": float(all_neff[ci, hj] * h), "screen_mean_net": float(
@@ -186,6 +203,8 @@ def search(backend: Backend, lane: Lane, last_label_idx: int, horizons: Sequence
     fdr = [r for r in chosen if r.tier == "FDR_SELECTED"]
     return {"tests": tests, "singles": int(len(singles_f)), "pairs": int(len(P)), "horizons": hs,
             "fdr_survivors": int(np.nansum(q <= float(cfg["fdr_q"]))), "rules": [r.to_dict() for r in chosen],
+            "candidate_decisions": decisions, "rejection_counts": rejection_counts,
+            "insufficient_effective_samples": int((~np.isfinite(all_t)).sum()),
             "selected_fdr": len(fdr), "device": backend.name,
             "min_q": float(np.nanmin(q)) if np.isfinite(q).any() else None}
 
