@@ -31,3 +31,7 @@ may be called, and each one's per-1k-token prices drive the spending estimate.
 
 Cost figures are estimates from configured prices, not provider invoices. No test opens
 a network connection; all of them use a fake transport.
+
+## Research provider registry (M5.4)
+
+`config/research/providers.json` and `stock_gplm.llm.registry` add MWAPI and StartupAPI (Anthropic-compatible), OpenRouter, Ollama, OpenAI, Anthropic and a future Gemini adapter, all disabled and offline by default. Keys load from a 0600 `.env` via `stock_gplm.llm.envfile`. `gplm providers check` reports key presence only. See `m54-behaviour-discovery.md`.

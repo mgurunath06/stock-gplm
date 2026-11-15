@@ -1,85 +1,98 @@
-# CURRENT STATE — Claude five-stock MVP
+# CURRENT STATE — M5.4 local-first behaviour discovery
 
-Updated 2026-11-15.
+Updated 2026-11-15. Read this first after a context reset.
 
 ## Location
 
 | Item | Value |
 | --- | --- |
-| Worktree | `/home/mgurunath/projects/stock-gplm-claude` |
-| Branch | `feature/claude-five-stock-mvp` (local only; not pushed or merged) |
-| Base | `5c34813` (committed head of `feature/m52-data-training-readiness`) |
-| HEAD | see `git log -1`; MVP code commit `fee5744` |
-| Concurrent work (not touched) | `/home/mgurunath/projects/stock-gplm-m45` holds Codex's uncommitted M5.2 work (`src/stock_gplm/m52/`, `AGENTS.md`). The main checkout `/home/mgurunath/projects/stock-gplm` is read-only for data and M3.2 reports. |
+| Milestone | M5.4: M5.3 reconciliation, then universal stock-behaviour discovery and ML research readiness |
+| Worktree | `/home/mgurunath/projects/stock-gplm-m54` |
+| Branch | `feature/m54-discovery` (local only; not pushed or merged), created from `76ae301` |
+| HEAD | `git log -1` (code commit `180a682`, then a docs and ML-readiness commit) |
+| Untouched worktrees | `stock-gplm-claude` (Claude MVP, `76ae301`); `stock-gplm` main checkout (Codex's **uncommitted** M5.3 on `feature/m53-research-mvp` @ `38973e6`); `stock-gplm-m45` (Codex) |
+| Python | `/home/mgurunath/projects/stock-gplm/.venv/bin/python` (3.12; numpy, pandas, scipy, sklearn, lightgbm) |
+| Running processes | none |
 
 ## Completed and verified
 
-1. **Five-stock diagnostic backtest on genuine daily data.** RELIANCE, HDFCBANK,
-   ICICIBANK, INFY and SBIN (`-EQ`) were all accepted, with 527 bars each from
-   2022-10-31 to 2024-12-31. There are 5 strategies × 3 horizons = 15 runs, with
-   evaluation from 2023-11-01 to 2024-12-31. Results:
-   `reports/mvp5/five-stock-diagnostic-v1/` (gitignored). Code hash `a7b47399…`.
-2. **V1 indicators** `RSI`, `MACD`, `ATR` and `VOLATILITY` were added. Existing
-   strategy hashes are unchanged (tested).
-3. **Resumability.** A second run skipped all 15 runs. A fresh output root
-   reproduces byte-identical run directories (synthetic test).
-4. **Raw immutability.** SHA-256 of all five symbols' raw files is identical
-   before and after the run.
-5. **Research interfaces** (`mvp.research`): rolling windows, equal or exponential
-   half-life weights, a comparison grid and the causal intraday join protocol.
-   Nothing is fitted.
-6. **Tests.** The full suite on `7ecdcb0` gives 896 passed and 2 skipped (real-data
-   fixtures are absent in this worktree). Command:
-   `PYTHONPATH=src /home/mgurunath/projects/stock-gplm/.venv/bin/python -m pytest -q`
+1. **Reconciliation**: `docs/m54-reconciliation.md` contains the comparison, the reason for
+   HOLDOUT_BOUNDARY_UNVERIFIED (no governed trust root; T4, not done), the reuse matrix and the V1 RSI/MACD
+   dialect conflict (Claude vs Codex).
+2. **Engine** `stock_gplm.m54` (indicators, hypotheses, evaluate, engine, store, report, bulk, device, ml, ai, cli)
+   plus `bin/gplm`. Configs are in `config/m54/` (discovery-default, budgets, search-space, universes/five-stock,
+   hypotheses/example).
+3. **Providers**: `llm/envfile.py` (0600 `.env`, GPLM_* only, linked-worktree lookup), `llm/registry.py`
+   (offline by default, live-call gates, per-run caps, mock health) and an Anthropic-compatible adapter in
+   `llm/client.py`. Config is `config/research/providers.json`. `/home/mgurunath/projects/stock-gplm/.env` was
+   changed from mode 644 to **600**. It is git-ignored and absent from history.
+   `gplm providers check` shows the MWAPI, StartupAPI and OpenRouter keys present, and OpenAI, Anthropic and Gemini
+   empty. **No live API call was made.**
+4. **Real-data runs** (pre-cutoff daily only, 2022-10-31 to 2024-12-31, 527 bars per stock):
+   - RELIANCE quick (an earlier code hash, superseded) and **RELIANCE standard**:
+     `reports/m54/runs/RELIANCE-EQ/a123ad5b…/report.md`
+   - **Five-stock standard batch** `e2b09fa5…` (4 workers, 4 GB cap): `reports/m54/batches/e2b09fa5…/summary.csv`
 
-## Reproduce
+   | Stock | Discovery tests | Validation passers | TEST_CONSISTENT | Min BH q |
+   | --- | ---: | ---: | ---: | ---: |
+   | RELIANCE | 13,415 | 3 | 0 | 0.93 |
+   | HDFCBANK | 13,475 | 5 | 4 | 1.00 |
+   | ICICIBANK | 13,420 | 7 | 1 | 0.98 |
+   | INFY | 13,385 | 3 | 2 | 1.00 |
+   | SBIN | 13,490 | 1 | 0 | 0.96 |
+
+   **Interpretation:** no finding survives FDR. The seven test-consistent patterns are plausible chance and
+   not edge.
+5. **Resume**: re-running the batch reused all five runs in 0.7 s, with hashes verified.
+6. **Tests**: full suite **921 passed, 2 skipped**
+   (`PYTHONPATH=src /home/mgurunath/projects/stock-gplm/.venv/bin/python -m pytest -q`). The 25 M5.4 tests in
+   `tests/test_m54_discovery.py` are synthetic only.
+7. **CPU/GPU**: RTX 5070 visible via nvidia-smi (driver 610.88). No CUDA framework is installed, so `auto` resolves
+   to CPU and `cuda` is refused. The benchmark is about 1 ms per evaluation, so a GPU is not justified at this scale.
+
+## Governance confirmations
+
+No minute file was opened. The M3.2 locked holdout and the 2025/2026 files were not decoded. No trust root was
+changed, no model was fitted, no trial was reserved, no external API was called, and nothing was pushed, merged or
+deployed. Raw files were opened read-only.
+
+## Blockers and decisions for the user
+
+1. **Governed M5 path**: installing the M5 approval trust root (T4) is needed for STRICT research. Not done.
+2. **More history**: 2025–2026 daily data is at or after the M3.2 cutoff. Using it requires scoring or retiring M3.2
+   first.
+3. **Universes beyond explicit lists**: no point-in-time NIFTY membership exists locally. A current list must be
+   supplied and labelled `CURRENT_CONSTITUENT_DIAGNOSTIC`.
+4. **AGENTS.md scope** does not yet name M5.4. Consider adding a rule when accepting this milestone.
+5. **Live AI calls**: each provider needs `enabled`, `live_calls_authorized`, a real model id and verified pricing,
+   plus `offline: false`.
+6. **V1 MACD dialect conflict** with Codex's uncommitted M5.3 must be resolved when Codex commits.
+
+## Next commands
 
 ```bash
-cd /home/mgurunath/projects/stock-gplm-claude
-PYTHONPATH=src /home/mgurunath/projects/stock-gplm/.venv/bin/python -m stock_gplm.mvp.cli run \
-  --experiment config/mvp/five-stock-diagnostic.json --output-root reports/mvp5/five-stock-diagnostic-v1
+cd /home/mgurunath/projects/stock-gplm-m54
+bin/gplm status
+bin/gplm report --stock HDFCBANK --print
+bin/gplm discover --universe five-stock --budget deep --workers 4 --max-memory-gb 4 --dry-run
 ```
 
-## Data, manifests and decisions
+## Next engineering actions
 
-- Holdout pin: M3.2 run `26e41d00…`, split plan SHA-256 `5c0b0a9d…`, global cutoff
-  **2025-10-21**. Only segments whose window ends before the cutoff are opened.
-  Per-symbol bar hashes and opened/withheld segments are in `data-manifest.json`.
-- **The M5 runner is blocked.** `stock_gplm.m5.cli backtest` returns
-  `HOLDOUT_BOUNDARY_UNVERIFIED` for every symbol, in both modes, until a governed
-  trust root is installed. That is a T4 action, not done and not bypassed. The
-  MVP is a separate diagnostic path.
-- Costs are assumptions. The price basis is unverified (see
-  `docs/mvp-five-stock.md`).
-- No minute file was opened. No model fit, trial, holdout read, ranking, push or
-  merge took place.
-
-## Blockers and approvals needed
-
-1. **Recent daily data (2025–2026).** All of it is at or after the M3.2 cutoff.
-   Using it means consuming the M3.2 holdout, or scoring M3.2 first and then
-   declaring a new study. This needs an explicit decision.
-2. **2026 minute study** (`config/mvp/minute-2026-experiment.DRAFT.json`). Minimal
-   approval needed:
-   - (a) the copy-only reconciliation into a new versioned minute root has run, with
-     its hash manifest;
-   - (b) authorization to decode that root for this separate study;
-   - (c) acceptance that 2026 dates are consumed for this study, after M3.2 is
-     scored once (or M3.2 is formally retired);
-   - (d) partitions and the trial budget in the draft are approved.
-3. **Universe expansion.** There is no local point-in-time NIFTY constituent
-   record. Expansion with current membership must be labelled
-   `CURRENT_CONSTITUENT_DIAGNOSTIC`.
-
-## Next action
-
-Expand to a NIFTY 50 current-constituent diagnostic. Add a symbol-list file and an
-experiment config with the same runner. Symbols that fail integrity are
-quarantined automatically. Process the list in batches by splitting experiment
-files. Completed runs are skipped.
+1. Codex independent review of `feature/m54-discovery` (engine timing, purging, multiple-testing count).
+2. Add a cross-stock pooled view: the same hypothesis across the five stocks, with pooled BH. That is stronger evidence
+   than per-stock leads.
+3. Optional adoption of Codex `m53.recency` as a finding-level diagnostic, after it is committed.
+4. A universe file for a current NIFTY 50 list (labelled survivorship-biased), then a batch dry run before running it.
+5. ML: feed `m54.ml.build_dataset` into the M3.5/M3.7 pipelines only under their trial-ledger rules.
 
 ## Recovery
 
-When interrupted, re-run the same command. Completed `runs/<id>/run.json` are
-skipped, and any `*.partial` directory is rebuilt. If the code or inputs change,
-new run IDs are produced and old runs stay as stale evidence.
+Re-run the same `gplm discover` command. Completed runs are verified and reused, completed stages and screen chunks
+are reused, and a STOP file halts at a checkpoint (`gplm clear-stop` to continue). A code or config change produces
+a new run id, and old runs stay as evidence.
+
+## History: Claude five-stock MVP (superseded for discovery)
+
+`stock_gplm.mvp` remains the V1-strategy diagnostic runner (`config/mvp/five-stock-diagnostic.json`,
+results in `stock-gplm-claude/reports/mvp5/`). Its loader is reused by M5.4.

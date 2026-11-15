@@ -416,3 +416,20 @@ def test_ai_reply_parser_keeps_only_known_features() -> None:
     doc = ai.parse_reply(reply, {"A"}, "mock")
     assert len(doc["hypotheses"]) == 1 and len(doc["rejected"]) == 2 and doc["authority"] == "ADVISORY_ONLY"
     assert "AND" not in ai.build_prompt([{"key": "A", "family": "f", "kind": "signed"}], "X", 3).split("Grammar")[0]
+
+
+def test_ml_dataset_is_purged_and_refuses_holdout(tmp_path: Path) -> None:
+    from stock_gplm.m54.ml import build_dataset, feature_coverage
+    w = world(tmp_path)
+    run = _run(w)
+    run._load(create=False)
+    run._prepare()
+    data = build_dataset(run, 5, ["RSI(period=14).value", "ROC(period=1).value"])
+    for seg, mat in data.items():
+        a, b = run.segs[seg]
+        assert mat.X.shape == (len(mat.dates), 2) and len(mat.y_net_return) == len(mat.dates)
+        last_signal = run.dates.index(mat.dates[-1])
+        assert last_signal + 1 + 5 <= b - 1  # label exits inside its own segment
+    assert set(feature_coverage(data)) == {"discovery", "validation", "test"}
+    with pytest.raises(ValueError, match="holdout"):
+        build_dataset(run, 5, segments=("holdout",))

@@ -35,5 +35,7 @@
 - [M5 acceptance report — 2026-11-14](m5-acceptance-report.md)
 - [M5.1 integrity hardening and audit remediation — 2026-11-14](m51-integrity-hardening.md)
 - [M4/M5 agent handover — 2026-11-14](M4-M5-AGENT-HANDOVER.md)
+- [M5.4 local-first stock-behaviour discovery (`gplm`)](m54-behaviour-discovery.md)
+- [M5.3 reconciliation and M5.4 canonical architecture — 2026-11-15](m54-reconciliation.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)
