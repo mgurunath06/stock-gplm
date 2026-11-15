@@ -37,6 +37,13 @@ from . import (suite_catalogue, suite_engine, suite_indicators, suite_ml, suite_
 from .core import FAIL, PASS, WARN, Section, clean, worst
 
 REPO = Path(__file__).resolve().parents[3]
+TRACKED_GAPS = "PASS_WITH_TRACKED_GAPS"
+
+
+def exit_code(verdict: str) -> int:
+    return 1 if verdict == FAIL else (2 if verdict == TRACKED_GAPS else 0)
+
+
 QUESTIONS = [
     ("0. Verifier self-test", "Does the verifier itself catch planted defects?"),
     ("1. Strategy interpretation", "Did GPLM understand what each catalogue strategy says?"),
@@ -78,8 +85,13 @@ def run(out: Path, quiet: bool = False) -> dict[str, Any]:
             ev["pipeline"] = pl.run(work / "pipeline")
         except Exception as exc:  # the sections that need it report a FAIL
             ev["pipeline_error"] = f"{type(exc).__name__}: {exc}"
-    verdict = worst(*(s.verdict for s in secs.values()))
-    report = {"contract": VERIFY_CONTRACT, "verdict": verdict, "generated_utc": _now(),
+    correctness = worst(*(s.verdict for k, s in secs.items() if not k.startswith("6.")))
+    coverage = secs[QUESTIONS[-1][0]].verdict
+    # Correctness failures fail the run. Missing calculations of the owner's list are tracked gaps
+    # (config/verify/primitives.json): reported explicitly and with their own exit code, never hidden.
+    verdict = FAIL if correctness == FAIL else (TRACKED_GAPS if coverage == FAIL else worst(correctness, coverage))
+    report = {"contract": VERIFY_CONTRACT, "verdict": verdict, "correctness_verdict": correctness,
+              "coverage_verdict": coverage, "exit_code": exit_code(verdict), "generated_utc": _now(),
               "seconds": round(time.perf_counter() - t0, 2), "out": str(out),
               "sections": [{"section": s.name, "verdict": s.verdict, "checks": [c.to_dict() for c in s.checks]}
                            for s in secs.values()],
@@ -168,6 +180,9 @@ def _md(v: Any) -> str:
 def markdown(report: dict[str, Any], ev: dict[str, Any], secs: dict[str, Section]) -> str:
     m = report["manifest"]
     L = [f"# GPLM correctness verification: **{report['verdict']}**", "",
+         f"Correctness (sections 0-5): **{report['correctness_verdict']}**. Minimum calculation coverage (section 6): "
+         f"**{report['coverage_verdict']}**{' (tracked gaps listed below)' if report['coverage_verdict'] == FAIL else ''}."
+         f" Exit code {report['exit_code']} (0 pass, 1 correctness failure, 2 correct but tracked calculation gaps).", "",
          f"Generated {report['generated_utc']} in {report['seconds']} s. Git commit `{m['git_commit'][:12]}` "
          f"({m['git_dirty_files']} uncommitted file(s)). Python {m['python']}, NumPy {m['numpy']}, pandas "
          f"{m['pandas']}.", "",
@@ -310,7 +325,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     out = Path(a.out) if a.out else REPO.parent / "state" / "reports" / "verify" / \
         datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rep = run(out, a.quiet)
-    return 1 if rep["verdict"] == FAIL else 0
+    return int(rep["exit_code"])
 
 
 __all__ = ["main", "run"]

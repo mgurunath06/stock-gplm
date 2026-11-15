@@ -123,7 +123,7 @@ def _brief(result: Any) -> Any:
 
 # ----------------------------------------------------------------------------------------- commands
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Correctness-verification suite on synthetic fixtures; exit 1 when any check FAILs."""
+    """Correctness-verification suite on synthetic fixtures; exit 0 pass, 1 correctness failure, 2 tracked gaps."""
     from datetime import datetime, timezone
 
     from ..verify.runner import run
@@ -137,7 +137,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if args.json:
         _p(json.dumps({"verdict": rep["verdict"], "out": rep["out"],
                        "sections": {s["section"]: s["verdict"] for s in rep["sections"]}}, indent=2))
-    return 1 if rep["verdict"] == "FAIL" else 0
+    return int(rep["exit_code"])  # 0 pass, 1 correctness failure, 2 tracked calculation gaps only
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:

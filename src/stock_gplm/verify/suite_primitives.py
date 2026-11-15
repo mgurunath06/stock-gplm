@@ -91,7 +91,8 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
         for r in rows:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
             if r["verdict"] == FAIL:
-                c.fail(f"[{r['module']}] {r['name']}: {r['why']}")
+                c.fail(("TRACKED GAP " if r["status"] in ("NOT_IMPLEMENTED", "PARTIAL") else "")
+                       + f"[{r['module']}] {r['name']}: {r['why']}")
         for r in rows:
             if r["verdict"] == WARN:
                 c.warn(f"[{r['module']}] {r['name']}: {r['why']}")

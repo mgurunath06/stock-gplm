@@ -27,7 +27,8 @@ def test_writes_auditable_outputs(report: tuple[dict, Path]) -> None:
     for f in ("VERIFY_REPORT.md", "verify-report.json", "strategies.csv", "indicators.csv", "primitives.csv",
               "engine-trades.csv", "ml-evolve-log.jsonl", "audit-manifest.json"):
         assert (out / f).is_file(), f
-    assert rep["verdict"] in ("PASS", "WARN", "FAIL")
+    assert rep["verdict"] in ("PASS", "WARN", "FAIL", "PASS_WITH_TRACKED_GAPS")
+    assert rep["correctness_verdict"] != "FAIL" and rep["exit_code"] in (0, 2)
     man = json.loads((out / "audit-manifest.json").read_text(encoding="utf-8"))
     assert man["real_candles_read"] is False and man["inputs"]
     rows = list(csv.DictReader((out / "strategies.csv").open(encoding="utf-8")))
