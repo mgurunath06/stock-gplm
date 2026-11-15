@@ -157,8 +157,10 @@ class PlattCalibrator:
         self.status = "UNCALIBRATED"
         self.n = 0
 
+    BOUND = 0.01  # no forecast is ever presented as certain
+
     def fit(self, p_raw: Sequence[float], up: Sequence[int]) -> "PlattCalibrator":
-        p = np.clip(np.asarray(p_raw, dtype=float), 1e-6, 1 - 1e-6)
+        p = np.clip(np.asarray(p_raw, dtype=float), self.BOUND, 1 - self.BOUND)
         y = np.asarray(up, dtype=float)
         self.n = len(p)
         if self.n < self.min_outcomes or y.min(initial=1) == y.max(initial=0):
@@ -180,10 +182,11 @@ class PlattCalibrator:
         return self
 
     def apply(self, p_raw: np.ndarray) -> np.ndarray:
+        p = np.clip(np.asarray(p_raw, dtype=float), self.BOUND, 1 - self.BOUND)
         if not self.status.startswith("PLATT"):
-            return np.asarray(p_raw, dtype=float)
-        p = np.clip(np.asarray(p_raw, dtype=float), 1e-6, 1 - 1e-6)
-        return 1 / (1 + np.exp(-np.clip(self.a * np.log(p / (1 - p)) + self.b, -40, 40)))
+            return p
+        q = 1 / (1 + np.exp(-np.clip(self.a * np.log(p / (1 - p)) + self.b, -40, 40)))
+        return np.clip(q, self.BOUND, 1 - self.BOUND)
 
 
 def recency_weights(train_sessions: np.ndarray, current_session: int, half_life: float) -> np.ndarray:

@@ -465,3 +465,40 @@ def test_cli_strategies_and_audit_commands(world: dict, tmp_path: Path, capsys: 
     assert cli.main(["audit", *args]) == 0
     assert cli.main(["doctor", *args]) in (0, 1)
     shutil.rmtree(home / "events", ignore_errors=True)
+
+
+def test_daily_incremental_new_session_processes_only_new_work(world: dict, tmp_path: Path) -> None:
+    """A new published minute session is ingested alone and advances each lane by exactly one step."""
+    raw = tmp_path / "raw"
+    shutil.copytree(world["raw"], raw)
+    sess = sorted(p.name[:10] for p in (raw / "minute" / "NSE" / "AAA-EQ").glob("*.json.gz"))
+    held = sess[-1]
+    stash = tmp_path / "stash"
+    stash.mkdir()
+    for p in (raw / "minute" / "NSE" / "AAA-EQ").glob(f"{held}*"):
+        shutil.move(str(p), stash / p.name)
+    cfg = json.loads(Path(world["config"]).read_text())
+    cfg["data"].update(daily_root=str(raw / "daily" / "NSE"), minute_roots=[str(raw / "minute" / "NSE")],
+                       real_raw_tree=str(raw))
+    cp = tmp_path / "cfg.json"
+    cp.write_text(json.dumps(cfg))
+    home = tmp_path / "home"
+    args = ["--config", str(cp), "--home", str(home), "--quiet", "--no-intraday"]
+    assert cli.main(["daily", "--stocks", "AAA", "--device", "cpu", *args]) == 0
+    db = AuditDB(home / "gplm.sqlite", readonly=True)
+    before = {k: db.one(f"SELECT COUNT(*) n FROM {k}")["n"] for k in ("predictions", "evaluations", "data_files")}
+    live_before = db.one("SELECT MAX(decision_label) d FROM predictions WHERE mode='LIVE'")["d"]
+    db.close()
+    for p in stash.iterdir():  # the evening's new file is published
+        shutil.move(str(p), raw / "minute" / "NSE" / "AAA-EQ" / p.name)
+    assert cli.main(["daily", "--stocks", "AAA", "--device", "cpu", *args, "--json"]) == 0
+    db = AuditDB(home / "gplm.sqlite", readonly=True)
+    after = {k: db.one(f"SELECT COUNT(*) n FROM {k}")["n"] for k in ("predictions", "evaluations", "data_files")}
+    assert after["data_files"] == before["data_files"] + 1
+    assert after["predictions"] > before["predictions"] and after["evaluations"] > before["evaluations"]
+    assert db.one("SELECT MAX(decision_label) d FROM predictions WHERE mode='LIVE'")["d"] == held > live_before
+    changed = db.q("SELECT payload_json FROM events WHERE kind IN ('DATA_FILE_NEW','DATA_FILE_CHANGED') AND run_id="
+                   "(SELECT run_id FROM runs ORDER BY started_utc DESC LIMIT 1)")
+    assert len(changed) == 1 and held in changed[0]["payload_json"]
+    rp = db.one("SELECT payload_json FROM events WHERE kind='REPLAY_LANE_DONE' ORDER BY seq DESC LIMIT 1")
+    assert json.loads(rp["payload_json"])["steps_done"] == 1

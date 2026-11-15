@@ -85,7 +85,8 @@
     "calibration_min_outcomes": 30,
     "champion_window": 60,
     "champion_min_outcomes": 25,
-    "champion_margin_brier": 0.002
+    "champion_margin_brier": 0.002,
+    "champion_p": 0.05
   },
   "models": {
     "kinds": [

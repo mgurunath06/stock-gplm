@@ -41,3 +41,6 @@
 - [DRAFT: independent 2026 minute-research study authorization](m54-minute-2026-study-authorization-DRAFT.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)
+- [M5.5 GPLM research application — owner's guide](m55-gplm-application.md)
+- [M5.5 local data investigation — 2026-11-15](m55-data-investigation.md)
+- [M5.5 acceptance evidence — 2026-11-15](m55-acceptance.md)

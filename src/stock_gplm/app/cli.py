@@ -413,8 +413,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
             pid = args.prediction
             if args.sample:
                 row = app.db.one("SELECT p.prediction_id FROM predictions p JOIN evaluations e ON "
-                                 "e.prediction_id=p.prediction_id WHERE p.source_kind='MODEL' ORDER BY p.decision_ns DESC "
-                                 "LIMIT 1")
+                                 "e.prediction_id=p.prediction_id WHERE p.source_kind='MODEL' ORDER BY (p.source_id='logit') DESC, "
+                                 "p.decision_ns DESC LIMIT 1")
                 if not row:
                     _p("no evaluated prediction yet")
                     return 1

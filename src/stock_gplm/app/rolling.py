@@ -222,6 +222,7 @@ class LaneReplay:
                              horizon=None, epoch=None, epochs=None, train_loss=None, train_acc=None, oos_acc=None,
                              oos_n=None, trades=None, net_return=None)
         pending = self._load_pending()
+        self.in_sample_skipped = 0
         stats = {"steps_done": 0, "predictions_new": 0, "evaluations_new": 0, "rule_searches": 0, "fits": 0}
         t0 = time.monotonic()
         order = {s: i for i, (s, _) in enumerate(steps)}
@@ -271,6 +272,7 @@ class LaneReplay:
                 stats["evaluations_new"] += self._evaluate(pending, last_known)
                 self._champion_review(replay_id, int(m.end_ns[last_known]))
         stats["seconds"] = round(time.monotonic() - t0, 2)
+        stats["in_sample_strategy_signals_skipped"] = self.in_sample_skipped
         summary = {"lane": lane.key, "replay_id": replay_id, "horizons": self.horizons, "skipped_horizons": self.skipped,
                    "steps_total": len(steps), "first_session": steps[0][0] if steps else None,
                    "last_session": steps[-1][0] if steps else None, **stats, "oos": self._oos_summary(replay_id)}
@@ -314,6 +316,9 @@ class LaneReplay:
         for kind in self.kinds:
             model = models[(kind, h)]
             full = kind != "mlp" or model.steps_since_full + 1 >= int(self.r["mlp_retrain_every"]) or not model.params
+            planned = {"baseline": 0, "logit": int(self.models_cfg["logit"]["epochs"]),
+                       "mlp": int(self.r["mlp_epochs_full"] if full else self.r["mlp_epochs_update"])}[kind]
+            self.progress.update(model=kind, horizon=h, epoch=0, epochs=planned)
             t0 = time.monotonic()
             hist: list[tuple[int, float, float]] = []
 
@@ -323,8 +328,6 @@ class LaneReplay:
 
             info = model.fit(self.backend, X, y, w, self.models_cfg, int(self.cfg["models"]["seed"]) + h, full, on_epoch)
             info["rows"] = int(rows.size)
-            if kind == "mlp":
-                self.progress.update(epochs=info.get("epochs"))
             secs = time.monotonic() - t0
             model.trained_label = lane.label(cutoff_idx)
             out["fits"] += 1
@@ -374,8 +377,11 @@ class LaneReplay:
         cost_bps = (lane.costs.buy + lane.costs.sell) * 1e4
         edge = p_cal * tgt_mult - (1 - p_cal) * stop_mult
         reasons, blockers = [], []
-        if kind != champion:
-            blockers.append(f"not the accepted (champion) model; champion is {champion}")
+        if kind == "baseline":
+            blockers.append("the baseline is the base-rate benchmark, never a trading signal")
+        elif kind != champion:
+            blockers.append(f"not the accepted (champion) model; champion is {champion}"
+                            + (" (no model has beaten the base rate out of sample yet)" if champion == "baseline" else ""))
         if not cal_status.startswith("PLATT"):
             blockers.append("confidence not calibrated yet")
         if hist_acc.get("n", 0) < int(pc["min_rolling_outcomes"]):
@@ -468,10 +474,17 @@ class LaneReplay:
                                      "multiple_testing": "Benjamini-Hochberg over every test of the search"}))
         for doc, mask in strategies:
             sources.append(("STRATEGY", doc["strategy_id"], str(doc["version"]), mask, doc["exit"], None, "LIBRARY",
-                            {"name": doc["name"], "origin": doc.get("origin")}))
+                            {"name": doc["name"], "origin": doc.get("origin"),
+                             "discovered_through": (doc.get("provenance") or {}).get("discovered_through")}))
         for kind, sid, ver, mask, ex, p, tier, info in sources:
+            seen_through = info.get("discovered_through")
             for t in dec.tolist():
                 if not mask[t] or t + 1 > len(m):
+                    continue
+                if seen_through and str(m.sessions[t]) < str(seen_through):
+                    # The strategy was selected on data that includes this bar's outcome: scoring it here would be
+                    # in-sample evidence presented as out-of-sample, so it is skipped and counted.
+                    self.in_sample_skipped += 1
                     continue
                 live = t == len(m) - 1
                 close = float(m.close[t])
@@ -612,36 +625,63 @@ class LaneReplay:
         return f"{self.lane.key}|{self._replay_hint()}"
 
     def _champion_review(self, replay_id: str, cutoff_ns: int) -> None:
+        """Promote a challenger only on paired evidence over the same decision bars.
+
+        For the trailing ``champion_window`` outcomes known by the cutoff, the per-prediction Brier
+        difference (challenger - champion) must average below ``-champion_margin_brier`` and be
+        significant in a one-sided t-test (p < ``champion_p``) whose effective sample size is
+        ``n / h`` because h-bar outcomes overlap. This was tightened from a margin-only rule after
+        champions flip-flopped on noise in the 2026-08-13 replay; it can only make promotion rarer.
+        """
+        from scipy import stats as sps
+
         W = int(self.r["champion_window"])
         need = int(self.r["champion_min_outcomes"])
         margin = float(self.r["champion_margin_brier"])
+        alpha = float(self.r.get("champion_p", 0.05))
         for h in self.horizons:
             current = self._champion(h)
-            scores: dict[str, tuple[float, int]] = {}
+            if not self.db.one("SELECT 1 FROM champions WHERE lane_key=? AND horizon=?", (self._ck(), h)):
+                self.db.conn.execute("INSERT INTO champions VALUES (?,?,?,?,?,?,?,?)",
+                                     (self._ck(), h, "baseline", None, utc_now(), "initial: baseline until a challenger "
+                                      "shows significant out-of-sample improvement", "{}", self.db.run_id))
+                current = "baseline"
+            briers: dict[str, dict[int, float]] = {}
             for kind in self.kinds:
-                rows = self.db.q("SELECT e.brier FROM predictions p JOIN evaluations e ON e.prediction_id=p.prediction_id "
-                                 "WHERE p.replay_id=? AND p.lane_key=? AND p.source_kind='MODEL' AND p.source_id=? AND "
-                                 "p.horizon_bars=? AND e.brier IS NOT NULL AND e.outcome_ns <= ? "
-                                 "ORDER BY p.decision_ns DESC LIMIT ?", (replay_id, self.lane.key, kind, h, cutoff_ns, W))
-                if rows:
-                    scores[kind] = (float(np.mean([r["brier"] for r in rows])), len(rows))
-            if current not in scores:
-                if not self.db.one("SELECT 1 FROM champions WHERE lane_key=? AND horizon=?", (self._ck(), h)):
-                    self.db.conn.execute("INSERT INTO champions VALUES (?,?,?,?,?,?,?,?)",
-                                         (self._ck(), h, current, None, utc_now(), "initial: baseline until challengers "
-                                          "have out-of-sample evidence", "{}", self.db.run_id))
-                continue
-            best = min((k for k in scores if scores[k][1] >= need), key=lambda k: scores[k][0], default=None)
-            if best and best != current and scores[best][0] < scores[current][0] - margin:
+                rows = self.db.q("SELECT p.decision_ns, e.brier FROM predictions p JOIN evaluations e ON "
+                                 "e.prediction_id=p.prediction_id WHERE p.replay_id=? AND p.lane_key=? AND "
+                                 "p.source_kind='MODEL' AND p.source_id=? AND p.horizon_bars=? AND e.brier IS NOT NULL "
+                                 "AND e.outcome_ns <= ? ORDER BY p.decision_ns DESC LIMIT ?",
+                                 (replay_id, self.lane.key, kind, h, cutoff_ns, W))
+                briers[kind] = {int(r["decision_ns"]): float(r["brier"]) for r in rows}
+            base = briers.get(current, {})
+            best: tuple[float, str, dict[str, Any]] | None = None
+            for kind in self.kinds:
+                if kind == current:
+                    continue
+                common = sorted(set(base) & set(briers.get(kind, {})))
+                if len(common) < need:
+                    continue
+                d = np.array([briers[kind][k] - base[k] for k in common])
+                n_eff = max(2.0, len(d) / max(1, h))
+                sd = float(d.std(ddof=1)) if len(d) > 1 else 0.0
+                tstat = float(d.mean() / (sd / np.sqrt(n_eff))) if sd > 0 else (-np.inf if d.mean() < 0 else np.inf)
+                p = float(sps.t.cdf(tstat, df=max(1.0, n_eff - 1)))
+                ev = {"n": len(d), "n_eff": round(n_eff, 1), "mean_brier_diff": float(d.mean()), "t": tstat, "p": p}
+                if d.mean() < -margin and p < alpha and (best is None or d.mean() < best[0]):
+                    best = (float(d.mean()), kind, ev)
+            if best is not None:
+                _, kind, ev = best
                 self.db.conn.execute("INSERT INTO champions VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(lane_key, horizon) DO "
                                      "UPDATE SET model_kind=excluded.model_kind, since_utc=excluded.since_utc, "
                                      "reason=excluded.reason, metrics_json=excluded.metrics_json, run_id=excluded.run_id",
-                                     (self._ck(), h, best, None, utc_now(),
-                                      f"trailing OOS Brier {scores[best][0]:.4f} beats {current} {scores[current][0]:.4f} "
-                                      f"by > {margin}", json.dumps(scores), self.db.run_id))
+                                     (self._ck(), h, kind, None, utc_now(),
+                                      f"paired Brier diff {ev['mean_brier_diff']:.4f} vs {current} over {ev['n']} outcomes "
+                                      f"(n_eff {ev['n_eff']}), one-sided p={ev['p']:.4f}", json.dumps(ev), self.db.run_id))
                 self.db.event("MODEL_PROMOTED", {"lane": self.lane.key, "replay_id": replay_id, "horizon": h,
-                                                 "from": current, "to": best, "scores": scores,
-                                                 "rule": f"window {W}, min {need} outcomes, margin {margin}"},
+                                                 "from": current, "to": kind, "evidence": ev,
+                                                 "rule": f"window {W}, min {need} paired outcomes, margin {margin}, "
+                                                         f"one-sided p < {alpha} with n_eff = n/h"},
                               subject=self.lane.key)
 
     def _cutoff_for(self, t: int) -> int:

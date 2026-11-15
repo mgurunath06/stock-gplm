@@ -45,8 +45,9 @@ class Rule:
         return "rule-" + sha({"c": self.conditions, "h": self.horizon, "x": self.exit})[:16]
 
     def text(self) -> str:
-        sym = {"gt": ">", "lt": "<", "is": "=="}
-        return " AND ".join(f"{c['feature']} {sym[c['op']]} {c['threshold']:.6g}" for c in self.conditions)
+        sym = {"gt": ">", "lt": "<"}
+        return " AND ".join(f"{c['feature']} == 1" if c["op"] == "is" else f"{c['feature']} {sym[c['op']]} {c['threshold']:.6g}"
+                            for c in self.conditions)
 
     def mask(self, lane: Lane) -> np.ndarray:
         m = np.ones(len(lane.market), dtype=bool)
@@ -55,7 +56,10 @@ class Rule:
                 return np.zeros(len(lane.market), dtype=bool)
             x = lane.X[:, lane.names.index(c["feature"])]
             with np.errstate(invalid="ignore"):
-                m &= (x > c["threshold"]) if c["op"] in ("gt", "is") else (x < c["threshold"])
+                if c["op"] == "is":
+                    m &= x > 0.5
+                else:
+                    m &= (x > c["threshold"]) if c["op"] == "gt" else (x < c["threshold"])
             m &= np.isfinite(x)
         return m & ~lane.market.no_signal
 
@@ -146,7 +150,8 @@ def search(backend: Backend, lane: Lane, last_label_idx: int, horizons: Sequence
         for s in idx:
             name = lane.names[int(singles_f[s])]
             op = "is" if labels[s] == "is" else ("gt" if singles_gt[s] else "lt")
-            out.append({"feature": name, "op": op, "threshold": float(singles_t[s]), "label": labels[s]})
+            out.append({"feature": name, "op": op, "threshold": None if op == "is" else float(singles_t[s]),
+                        "label": labels[s]})
         return out
 
     finite = np.argwhere(np.isfinite(all_t))

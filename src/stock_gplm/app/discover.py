@@ -205,7 +205,7 @@ def discover(app: App, symbols: Sequence[str], *, data_mode: str, timeframes: st
                     v3["evidence"] = {**st.get("evidence", {}), "tier": tier, "engine_run": out["run_id"]}
                     res = lib.add(v3, immutable=True, origin=f"discovery:{out['run_id'][:16]}", active=tier in ACTIVE_TIERS,
                                   provenance={"engine": "m54-unified", "run_id": out["run_id"], "budget": budget,
-                                              "access_basis": ACCESS_BASIS})
+                                              "access_basis": ACCESS_BASIS, "discovered_through": end or data.last_session})
                     imported.append({**res, "tier": tier})
             record["engine"]["strategies"] = imported
             record["engine"]["lanes"] = {tf: p["decision"] for tf, p in run.lanes_plan.items()}
@@ -235,7 +235,8 @@ def discover(app: App, symbols: Sequence[str], *, data_mode: str, timeframes: st
                                     "tests_in_search": sc["tests"]}}
                 res = lib.add(doc, immutable=True, origin="gpu-screen" if backend.is_gpu else "cpu-screen",
                               active=r["screen_tier"] in ("SCREEN_ROBUST", "SCREEN_VALIDATED"),
-                              provenance={"engine": "app-broad-screen", "device": backend.name, "budget": budget})
+                              provenance={"engine": "app-broad-screen", "device": backend.name, "budget": budget,
+                                          "discovered_through": end or data.last_session})
                 r["library"] = res
             app.db.event("BROAD_SCREEN", {"symbol": data.symbol, **{k: v for k, v in sc.items() if k != "rules"},
                                           "rules": [{k: r[k] for k in ("rule_id", "text", "screen_tier", "validation",

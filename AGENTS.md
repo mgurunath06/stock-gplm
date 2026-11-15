@@ -34,6 +34,13 @@
   plan unless the user separately authorizes execution. No T1/T2 result authorizes
   data relocation, derived datasets, features, labels, splits, eligibility,
   training, scoring, rankings, trading, trust-root changes or holdout access.
+- M5.5 (`stock_gplm.app`, the `gplm` application; authorized by the owner on 2026-11-15) is an
+  independent research workflow under the `OWNER_AUTHORIZED_FULL_LOCAL` basis: it may read every
+  locally available daily and minute candle, including 2026. M3.2 records and its split plan stay
+  unchanged; its cutoff governs only M3.x experiments. The application issues research forecasts
+  (REPLAY and LIVE, clearly separated) but never places orders or contacts a broker, never handles
+  provider credentials, keeps predictions and evaluations append-only, never fills or repairs
+  candles, and documents every data interpretation (see `docs/m55-data-investigation.md`).
 - LLM assistance (`stock_gplm.llm`) is opt-in and advisory. Keys come only from
   environment variables or a secret store. Never send raw market datasets, private
   strategies or credentials to a remote provider without explicit approval. LLM

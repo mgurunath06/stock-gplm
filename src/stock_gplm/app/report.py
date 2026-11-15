@@ -55,8 +55,14 @@ def accuracy_table(db: AuditDB, symbols: Sequence[str] | None = None) -> list[di
             ch = db.one("SELECT model_kind FROM champions WHERE lane_key=? AND horizon=?",
                         (f"{r['lane_key']}|{r['replay_id']}", r["horizon_bars"]))
             r["champion"] = bool(ch and ch["model_kind"] == r["source_id"])
-        if r["base_rate_up"] is not None and r["oos_accuracy"] is not None:
+        h = int(r["horizon_bars"] or 1)
+        r["effective_n_approx"] = round((r["evaluated"] or 0) / h, 1) if r["timeframe"] in ("1d", "1w") else r["evaluated"]
+        if r["source_kind"] == "MODEL" and r["base_rate_up"] is not None and r["oos_accuracy"] is not None:
+            # hindsight benchmark: always predicting the class that turned out more common in the evaluated window
             r["accuracy_minus_majority"] = r["oos_accuracy"] - max(r["base_rate_up"], 1 - r["base_rate_up"])
+        if r["source_kind"] != "MODEL":
+            r["oos_win_rate"] = r.pop("oos_accuracy")
+            r["oos_accuracy"] = None
     return rows
 
 
@@ -126,8 +132,10 @@ def write_daily(out_dir: Path, summary: Mapping[str, Any], accuracy: Sequence[Ma
     for name, rows in (("accuracy.csv", accuracy), ("forecasts.csv", flat)):
         buf = io.StringIO()
         if rows:
-            cols = list(rows[0].keys())
-            w = csv.DictWriter(buf, fieldnames=cols)
+            cols: list[str] = []
+            for r in rows:
+                cols += [k for k in r.keys() if k not in cols]
+            w = csv.DictWriter(buf, fieldnames=cols, restval="")
             w.writeheader()
             for r in rows:
                 w.writerow({k: json.dumps(v, default=str) if isinstance(v, (list, dict)) else v for k, v in r.items()})
@@ -152,7 +160,8 @@ def write_daily(out_dir: Path, summary: Mapping[str, Any], accuracy: Sequence[Ma
         parts.append("</div>")
     parts.append("<h2>Sequential out-of-sample accuracy (stored before outcomes; evaluated after)</h2>")
     parts.append(_table(accuracy, ["lane_key", "source_kind", "source_id", "horizon_bars", "champion", "predictions",
-                                   "evaluated", "oos_accuracy", "rolling20_accuracy", "base_rate_up",
+                                   "evaluated", "effective_n_approx", "oos_accuracy", "oos_win_rate",
+                                   "rolling20_accuracy", "base_rate_up",
                                    "accuracy_minus_majority", "oos_brier", "training_accuracy_last_fit",
                                    "live_predictions", "live_accuracy", "actionable", "actionable_trades",
                                    "actionable_mean_net", "all_signals_mean_net"]))
