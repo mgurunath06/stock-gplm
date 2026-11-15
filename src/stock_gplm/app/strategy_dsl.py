@@ -613,6 +613,75 @@ def _linreg(x: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, 
     return val, slope, r2, se
 
 
+def _quadratic(x: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Rolling least-squares ``a*t^2 + b*t + c`` on t=0..n-1, plus fitted current value."""
+    N = len(x)
+    a, b, c, fitted = (np.full(N, np.nan) for _ in range(4))
+    if N < n or n < 3:
+        return a, b, c, fitted
+    t = np.arange(n, dtype=float)
+    design = np.column_stack((t * t, t, np.ones(n)))
+    pinv = np.linalg.inv(design.T @ design) @ design.T
+    windows = _windows(x, n)
+    ok = np.isfinite(windows).all(axis=1)
+    coef = np.full((len(windows), 3), np.nan)
+    coef[ok] = windows[ok] @ pinv.T
+    a[n - 1:], b[n - 1:], c[n - 1:] = coef.T
+    fitted[n - 1:] = coef @ np.array([(n - 1) ** 2, n - 1, 1.0])
+    return a, b, c, fitted
+
+
+def _weis(ctx: Context, threshold: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Causal percentage-ZigZag wave direction, cumulative volume and previous same-direction volume.
+
+    A reversal is confirmed only after close moves ``threshold`` from the running extreme. At that
+    confirmation bar the new wave starts at the prior extreme; no future pivot is read.
+    """
+    if not 0 < threshold < 1:
+        raise DSLError(f"Weis threshold must be in (0, 1), got {threshold}")
+    key = f"__weis{threshold:.12g}"
+    if key in ctx.cache:
+        return ctx.cache[key]
+    n = ctx.n
+    direction = np.zeros(n, dtype=float)
+    current = np.full(n, np.nan)
+    previous = np.full(n, np.nan)
+    if not n:
+        ctx.cache[key] = (direction, current, previous)
+        return ctx.cache[key]
+    d = 0
+    extreme_i = 0
+    extreme = ctx.close[0]
+    wave_start = 0
+    prev_up = prev_down = math.nan
+    for i in range(n):
+        price = ctx.close[i]
+        if not np.isfinite(price):
+            continue
+        if d == 0:
+            if price >= extreme * (1 + threshold):
+                d, extreme, extreme_i = 1, price, i
+            elif price <= extreme * (1 - threshold):
+                d, extreme, extreme_i = -1, price, i
+        elif d > 0:
+            if price >= extreme:
+                extreme, extreme_i = price, i
+            elif price <= extreme * (1 - threshold):
+                prev_up = float(np.nansum(ctx.volume[wave_start:extreme_i + 1]))
+                d, wave_start, extreme, extreme_i = -1, extreme_i + 1, price, i
+        else:
+            if price <= extreme:
+                extreme, extreme_i = price, i
+            elif price >= extreme * (1 + threshold):
+                prev_down = float(np.nansum(ctx.volume[wave_start:extreme_i + 1]))
+                d, wave_start, extreme, extreme_i = 1, extreme_i + 1, price, i
+        direction[i] = d
+        current[i] = float(np.nansum(ctx.volume[wave_start:i + 1]))
+        previous[i] = prev_up if d > 0 else prev_down if d < 0 else math.nan
+    ctx.cache[key] = (direction, current, previous)
+    return ctx.cache[key]
+
+
 def _swings(h: np.ndarray, k: int, high: bool) -> list[tuple[int, int, float]]:
     """Confirmed fractal pivots: (pivot index, confirmation index, price)."""
     N = len(h)
@@ -795,6 +864,26 @@ def _se(c: Context, x: Any, n: Any) -> np.ndarray:
     return _linreg(_arr(c, x), _n(n, lo=3))[3]
 
 
+@fn("quad_a", 2, 2, "rolling quadratic least-squares coefficient a for a*t^2+b*t+c")
+def _qa(c: Context, x: Any, n: Any) -> np.ndarray:
+    return _quadratic(_arr(c, x), _n(n, lo=3))[0]
+
+
+@fn("quad_b", 2, 2, "rolling quadratic least-squares coefficient b for a*t^2+b*t+c")
+def _qb(c: Context, x: Any, n: Any) -> np.ndarray:
+    return _quadratic(_arr(c, x), _n(n, lo=3))[1]
+
+
+@fn("quad_c", 2, 2, "rolling quadratic least-squares coefficient c for a*t^2+b*t+c")
+def _qc(c: Context, x: Any, n: Any) -> np.ndarray:
+    return _quadratic(_arr(c, x), _n(n, lo=3))[2]
+
+
+@fn("quad_fit", 2, 2, "rolling quadratic least-squares fitted value at the current bar")
+def _qfit(c: Context, x: Any, n: Any) -> np.ndarray:
+    return _quadratic(_arr(c, x), _n(n, lo=3))[3]
+
+
 fn("skew", 2, 2, "rolling skewness")(lambda c, x, n: _S(_arr(c, x)).rolling(_n(n, lo=3)).skew().to_numpy())
 fn("correl", 3, 3, "rolling correlation")(
     lambda c, a, b, n: _S(_arr(c, a)).rolling(_n(n, lo=3)).corr(_S(_arr(c, b))).to_numpy())
@@ -936,6 +1025,23 @@ fn("cmf", 1, 1, "Chaikin money flow cmf(n)")(
     lambda c, n: _div(rolling_sum(_mfm(c) * c.volume, _n(n)), rolling_sum(c.volume, _n(n))))
 fn("ad", 0, 0, "accumulation/distribution line")(lambda c: np.cumsum(_mfm(c) * c.volume))
 fn("obv", 0, 0, "on-balance volume")(lambda c: np.cumsum(np.sign(np.nan_to_num(np.diff(c.close, prepend=c.close[0]))) * c.volume))
+
+
+@fn("weis_wave_volume", 0, 1, "causal percentage-ZigZag current-wave cumulative volume [threshold=0.05]")
+def _weis_volume(c: Context, threshold: Any = 0.05) -> np.ndarray:
+    return _weis(c, _f(threshold))[1]
+
+
+@fn("weis_prev_wave_volume", 0, 1, "last completed wave volume in the current wave's direction")
+def _weis_previous(c: Context, threshold: Any = 0.05) -> np.ndarray:
+    return _weis(c, _f(threshold))[2]
+
+
+@fn("weis_wave_direction", 0, 1, "causal percentage-ZigZag direction: +1 up, -1 down, 0 unconfirmed")
+def _weis_direction(c: Context, threshold: Any = 0.05) -> np.ndarray:
+    return _weis(c, _f(threshold))[0]
+
+
 fn("pvt", 0, 0, "price-volume trend")(
     lambda c: np.cumsum(np.nan_to_num(_div(c.close - shift(c.close, 1), shift(c.close, 1))) * c.volume))
 

@@ -97,6 +97,75 @@ def rsum(x: Sequence[float], n: int) -> L:
             for i in range(len(x))]
 
 
+def _solve3(a: list[list[float]], b: list[float]) -> list[float]:
+    """Small independent Gaussian-elimination solver used by the polynomial reference."""
+    m = [row[:] + [rhs] for row, rhs in zip(a, b)]
+    for col in range(3):
+        pivot = max(range(col, 3), key=lambda r: abs(m[r][col]))
+        m[col], m[pivot] = m[pivot], m[col]
+        div_ = m[col][col]
+        for j in range(col, 4):
+            m[col][j] /= div_
+        for r in range(3):
+            if r == col:
+                continue
+            factor = m[r][col]
+            for j in range(col, 4):
+                m[r][j] -= factor * m[col][j]
+    return [m[i][3] for i in range(3)]
+
+
+def quadratic(x: Sequence[float], n: int) -> tuple[L, L, L, L]:
+    """Rolling OLS coefficients for a*t^2+b*t+c and the fitted value at t=n-1."""
+    out = [[NAN] * len(x) for _ in range(4)]
+    t = [float(i) for i in range(n)]
+    design = [[u * u, u, 1.0] for u in t]
+    normal = [[sum(row[i] * row[j] for row in design) for j in range(3)] for i in range(3)]
+    for end in range(n - 1, len(x)):
+        y = x[end - n + 1:end + 1]
+        if not all(fin(v) for v in y):
+            continue
+        rhs = [sum(row[k] * yy for row, yy in zip(design, y)) for k in range(3)]
+        aa, bb, cc = _solve3(normal, rhs)
+        out[0][end], out[1][end], out[2][end] = aa, bb, cc
+        out[3][end] = aa * (n - 1) ** 2 + bb * (n - 1) + cc
+    return out[0], out[1], out[2], out[3]
+
+
+def weis_wave(c: Sequence[float], v: Sequence[float], threshold: float) -> tuple[L, L, L]:
+    """Reference causal percentage-ZigZag direction/current/previous-same-direction volumes."""
+    direction = [0.0] * len(c)
+    current = [NAN] * len(c)
+    previous = [NAN] * len(c)
+    if not c:
+        return direction, current, previous
+    d, extreme_i, wave_start = 0, 0, 0
+    extreme = c[0]
+    prev_up = prev_down = NAN
+    for i, price in enumerate(c):
+        if d == 0:
+            if price >= extreme * (1 + threshold):
+                d, extreme, extreme_i = 1, price, i
+            elif price <= extreme * (1 - threshold):
+                d, extreme, extreme_i = -1, price, i
+        elif d > 0:
+            if price >= extreme:
+                extreme, extreme_i = price, i
+            elif price <= extreme * (1 - threshold):
+                prev_up = sum(x for x in v[wave_start:extreme_i + 1] if fin(x))
+                d, wave_start, extreme, extreme_i = -1, extreme_i + 1, price, i
+        else:
+            if price <= extreme:
+                extreme, extreme_i = price, i
+            elif price >= extreme * (1 + threshold):
+                prev_down = sum(x for x in v[wave_start:extreme_i + 1] if fin(x))
+                d, wave_start, extreme, extreme_i = 1, extreme_i + 1, price, i
+        direction[i] = float(d)
+        current[i] = sum(x for x in v[wave_start:i + 1] if fin(x))
+        previous[i] = prev_up if d > 0 else prev_down if d < 0 else NAN
+    return direction, current, previous
+
+
 def stdev(x: Sequence[float], n: int) -> L:
     """Population standard deviation (ddof = 0), the Bollinger convention."""
     out = []
