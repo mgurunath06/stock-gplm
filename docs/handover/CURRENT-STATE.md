@@ -41,7 +41,6 @@ no fork), NaN-volume propagation in `m54/timeframes.py`.
 3. Optional: an authoritative NSE session/closing-auction document would let the closing-phase rule move
    from `OBSERVED_NOT_AUTHORITATIVE` to authoritative; a holiday calendar would remove next-weekday estimates.
 4. Universe-wide daily runs are possible (`--universe all --max-symbols N`); ingestion of all 2,394 symbols takes about 4 minutes, and the first replay costs roughly 15-30 s per symbol on CPU.
-   symbol per run on CPU for the first replay.
 
 ## Recovery
 
