@@ -14,18 +14,23 @@ from .core import FAIL, PASS, WARN, Check, Section, worst
 
 REPO = Path(__file__).resolve().parents[3]
 MANIFEST = REPO / "config" / "verify" / "primitives.json"
-TIMEFRAMES = ("1d", "1w", "5m", "15m")
+TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "4h", "1d", "1w")
 
 
 def frames() -> dict[str, pd.DataFrame]:
     w = fx.ohlcv(520, fx.SEED + 21, vol=0.035)
     w["session"] = pd.date_range("2016-01-08", periods=len(w), freq="W-FRI").strftime("%Y-%m-%d")
     w["end_ns"] = pd.to_datetime(w["session"]).astype("int64").to_numpy() + 10 * 3600 * 10**9
-    return {"1d": fx.ohlcv(700), "1w": w, "5m": fx.intraday(24, 75, fx.SEED + 31, minutes=5), "15m": fx.intraday(40, 25)}
+    return {"1d": fx.ohlcv(700), "1w": w,
+            "1m": fx.intraday(24, 250, fx.SEED + 29, minutes=1),
+            "5m": fx.intraday(24, 75, fx.SEED + 31, minutes=5),
+            "15m": fx.intraday(40, 25), "30m": fx.intraday(54, 13, fx.SEED + 33, minutes=30),
+            "60m": fx.intraday(100, 7, fx.SEED + 35, minutes=60),
+            "4h": fx.intraday(350, 2, fx.SEED + 37, minutes=240)}
 
 
 def _ctx(frame: pd.DataFrame, tf: str, bench: dict[str, pd.DataFrame]) -> dsl.Context:
-    intr = tf.endswith("m")
+    intr = tf not in {"1d", "1w"}
 
     def loader(sym: str, t: str) -> dsl.Context | None:
         b = bench[t].copy()
@@ -102,12 +107,14 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
         c.note(f"{len(rows)} listed calculations (the owner's list says 118; its tables hold {len(rows)} rows); "
                f"{evals} expression x timeframe evaluations; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     sec.run("minimum_primitive_coverage", "Every calculation in the owner's minimum list is computed, finite and "
-            "causal on 1d, 1w, 5m and 15m lanes (intraday-only ones on 5m/15m), or its gap is named", coverage)
+            "causal on all eight governed timeframes (intraday-only rows on the six intraday lanes), or its gap "
+            "is named", coverage)
 
 
 def _row(row: dict[str, Any], fr: dict[str, pd.DataFrame], bench: dict[str, pd.DataFrame], verified: set[str]
          ) -> dict[str, Any]:
-    tfs = ("5m", "15m") if row.get("intraday") else TIMEFRAMES
+    tfs = tuple(row.get("timeframes") or
+                (tuple(tf for tf in TIMEFRAMES if tf not in {"1d", "1w"}) if row.get("intraday") else TIMEFRAMES))
     evals = []
     errors = []
     for expr in row.get("exprs", []):

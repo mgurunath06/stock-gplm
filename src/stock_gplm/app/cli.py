@@ -122,6 +122,29 @@ def _brief(result: Any) -> Any:
 
 
 # ----------------------------------------------------------------------------------------- commands
+def cmd_feature_coverage(args: argparse.Namespace) -> int:
+    """Precompute the M5.8 catalogue and write the calculation x timeframe coverage matrix."""
+    def work(app: Any) -> dict[str, Any]:
+        from .feature_engine import CATALOGUE, TIMEFRAMES, run
+        from .research import resolve_universe
+
+        syms, basis = resolve_universe(app, args.stocks or args.stock, args.universe, args.max_symbols)
+        tfs = list(TIMEFRAMES) if args.timeframes == "all" else [x.strip() for x in args.timeframes.split(",")]
+        bad = sorted(set(tfs) - set(TIMEFRAMES))
+        if bad:
+            raise ValueError(f"unsupported timeframes: {bad}")
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "feature-coverage" / args.name
+        _p(f"Feature coverage: {len(syms)} stock(s) [{basis}] x {len(tfs)} timeframe(s) -> {out}")
+        result = run(app, syms, tfs, out, Path(args.catalogue or CATALOGUE).resolve(), args.start, args.end)
+        if not args.json:
+            _p(f"  rows: {result['matrix_rows']}   status: {result['status_counts']}")
+            _p(f"  matrix: {result['coverage_csv']}")
+            _p(f"  cache: {result['cache_root']}")
+        return result
+
+    return _run(args, "feature-coverage", work)
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Correctness-verification suite on synthetic fixtures; exit 0 pass, 1 correctness failure, 2 tracked gaps."""
     from datetime import datetime, timezone
@@ -863,6 +886,16 @@ def build_parser() -> argparse.ArgumentParser:
                                                "reference-300-strategies.txt"))
     rs.add_argument("--start")
     rs.add_argument("--end", help="defaults to m56.development_end; later dates are refused")
+    fc = add("feature-coverage", cmd_feature_coverage,
+             "precompute the 11-module M5.8 calculation catalogue and write its coverage matrix")
+    stocks(fc)
+    fc.add_argument("--name", required=True, help="output <home>/reports/feature-coverage/<name>")
+    fc.add_argument("--out", help="explicit output directory")
+    fc.add_argument("--timeframes", default="all", help="all, or comma list from 1m,5m,15m,30m,60m,4h,1d,1w")
+    fc.add_argument("--catalogue", default=str(Path(__file__).resolve().parents[3] / "config" / "verify" /
+                                                "primitives.json"))
+    fc.add_argument("--start")
+    fc.add_argument("--end")
     mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
     stocks(mld)
     device(mld)

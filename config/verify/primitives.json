@@ -2,7 +2,7 @@
   "contract": "stock-gplm.verify-primitives.v1",
   "source": "Owner requirement 2026-11-15: the 340-strategy library decomposes into the '118 unique primitives' list in 11 engine modules (the tables list 124 rows; every row is kept). Each row maps to DSL expressions evaluated on every timeframe, or names what is missing.",
   "status_rules": {
-    "expr": "each expression must evaluate, be finite somewhere and be causal on every applicable timeframe (1d, 1w, 5m, 15m); intraday-only expressions run on 5m and 15m",
+    "expr": "each expression must evaluate, be finite somewhere and be causal on every applicable timeframe (1m, 5m, 15m, 30m, 60m, 4h, 1d, 1w); intraday-only expressions run on every intraday timeframe",
     "verified_by": "name of the indicator check in the indicator section that compares it with an independent reference",
     "composed": "true when no named primitive exists and the calculation is expressed from other primitives",
     "approximation": "documented difference from the named method",
@@ -116,7 +116,8 @@
      "exprs": ["(prev_day_high + prev_day_low) / 2", "2 * (prev_day_high + prev_day_low + prev_day_close) / 3 - (prev_day_high + prev_day_low) / 2"],
      "missing": [{"what": "Virgin-CPR tracking (untested CPR of prior sessions)", "kind": "NOT_IMPLEMENTED", "reason": "no state primitive for untouched zones"}]},
     {"module": "6 Pivots & session", "name": "Camarilla_Pivots H1..H5 / L1..L5", "composed": true, "exprs": ["prev_day_close + 1.1 * (prev_day_high - prev_day_low) / 2", "prev_day_close - 1.1 * (prev_day_high - prev_day_low) / 4"]},
-    {"module": "6 Pivots & session", "name": "Opening_Range(mins) & midday window", "exprs": ["or_high(15)", "or_low(30)", "window_high(135, 240)"], "intraday": true},
+    {"module": "6 Pivots & session", "name": "Opening_Range(mins) & midday window", "exprs": ["or_high(15)", "or_low(30)", "window_high(135, 240)"], "intraday": true,
+     "timeframes": ["1m", "5m", "15m"], "timeframe_reason": "15/30-minute opening ranges require source bars no coarser than 15m; larger aggregate bars cannot be decomposed"},
     {"module": "6 Pivots & session", "name": "SMI & Overnight/Intraday returns", "composed": true, "exprs": ["gap", "close / open - 1"],
      "missing": [{"what": "Smart Money Index (cumulative -first-30-min + last-hour return)", "kind": "NOT_IMPLEMENTED", "reason": "needs a cumulative-sum primitive; catalogue C6-044 is blocked"}]},
 
