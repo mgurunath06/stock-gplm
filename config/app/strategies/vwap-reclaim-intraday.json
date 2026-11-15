@@ -1,0 +1,14 @@
+{
+  "name": "Session VWAP reclaim with daily uptrend (15-minute)",
+  "description": "Manually authored intraday template: a 15-minute close back above session VWAP while the prior daily close is above its 20-day EMA. Flat by the session close.",
+  "timeframe": "15m",
+  "direction": "long",
+  "scope": {"symbols": "*", "timeframes": ["15m"]},
+  "entry": {"logic": "AND", "conditions": [
+    {"feature": "VWAP().reclaim", "op": "is", "threshold": null},
+    {"feature": "1d:EMA(period=20).distance", "op": "gt", "threshold": 0}
+  ]},
+  "exit": {"max_hold_bars": 8, "stop_atr": 1.0, "target_atr": 1.5, "trail_atr": null},
+  "position_sizing": {"method": "fixed_fraction", "risk_per_trade_pct": 0.25},
+  "costs_profile": "intraday"
+}

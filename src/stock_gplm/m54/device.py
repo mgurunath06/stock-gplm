@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import resource
 import shutil
 import subprocess
 from typing import Any
+
+from .portable import limit_address_space
 
 GPU_IMPLEMENTED_WORKLOADS: tuple[str, ...] = ()
 
@@ -55,9 +56,4 @@ def limit_process(max_memory_gb: float | None, threads: int = 1) -> None:
     """Bound address space and BLAS threads for the current (worker) process."""
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(var, str(threads))
-    if max_memory_gb:
-        limit = int(max_memory_gb * (1 << 30))
-        _, hard = resource.getrlimit(resource.RLIMIT_AS)
-        if hard != resource.RLIM_INFINITY:
-            limit = min(limit, hard)
-        resource.setrlimit(resource.RLIMIT_AS, (limit, hard))  # soft limit only; hard limit unchanged
+    limit_address_space(max_memory_gb)  # no-op where the platform has no RLIMIT_AS (Windows)

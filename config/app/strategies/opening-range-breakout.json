@@ -1,0 +1,14 @@
+{
+  "name": "30-minute opening-range breakout with volume (15-minute)",
+  "description": "Manually authored intraday template: breakout above the first 30 minutes' high with relative volume above 1.5.",
+  "timeframe": "15m",
+  "direction": "long",
+  "scope": {"symbols": "*", "timeframes": ["15m"]},
+  "entry": {"logic": "AND", "conditions": [
+    {"feature": "ORB(minutes=30).breakout_up", "op": "is", "threshold": null},
+    {"feature": "RVOL(period=20,spike=2.0).value", "op": "gt", "threshold": 1.5}
+  ]},
+  "exit": {"max_hold_bars": 6, "stop_atr": 1.0, "target_atr": 2.0, "trail_atr": null},
+  "position_sizing": {"method": "fixed_fraction", "risk_per_trade_pct": 0.25},
+  "costs_profile": "intraday"
+}

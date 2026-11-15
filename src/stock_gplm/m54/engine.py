@@ -20,7 +20,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
-import resource
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +28,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from .portable import usage as _usage
 from ..mvp.data import load_symbol, pin_holdout
 from ..v1.portfolio import CostModel
 from . import CLASSIFICATION
@@ -150,12 +150,12 @@ class Run:
         path = self.dir / "status.json"
         prior = read_json(path) if path.exists() else {"started_utc": utc_now()}
         done = [s for s in STAGES if (self.dir / "stages" / f"{s}.json").exists()]
-        usage = resource.getrusage(resource.RUSAGE_SELF)
+        u = _usage()
         write_json_atomic(path, {"run_id": self.run_id, "symbol": self.symbol, "state": state, "stage": stage,
                                  "completed_stages": done, "pending_stages": [s for s in STAGES if s not in done],
                                  "pid": os.getpid(), "started_utc": prior.get("started_utc", utc_now()),
-                                 "updated_utc": utc_now(), "max_rss_mb": round(usage.ru_maxrss / 1024, 1),
-                                 "cpu_seconds": round(usage.ru_utime + usage.ru_stime, 1),
+                                 "updated_utc": utc_now(), "max_rss_mb": u["max_rss_mb"],
+                                 "cpu_seconds": u["cpu_seconds"],
                                  "budget": self.s["budget_name"], "device": self.device, **extra})
 
     def _check_stop(self) -> None:

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPLM Research Dashboard</title>
+<style>
+:root{--bg:#f7f6f3;--panel:#fff;--fg:#1c1c1a;--mut:#6a6964;--line:#e4e2dc;--acc:#2f5d8a;--ok:#2e7d4f;--warn:#9a5b00;--bad:#b3261e;--chip:#eef2f6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121211;--panel:#1b1b1a;--fg:#ebeae5;--mut:#a09f99;--line:#302f2c;--acc:#86b4e3;--ok:#6cc08b;--warn:#f0a64a;--bad:#ff8a80;--chip:#24292f}}
+:root[data-theme="dark"]{--bg:#121211;--panel:#1b1b1a;--fg:#ebeae5;--mut:#a09f99;--line:#302f2c;--acc:#86b4e3;--ok:#6cc08b;--warn:#f0a64a;--bad:#ff8a80;--chip:#24292f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;margin:0}header .mut{font-size:12px}
+nav{display:flex;flex-wrap:wrap;gap:4px;padding:8px 16px;border-bottom:1px solid var(--line)}
+nav button{border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;padding:5px 10px;cursor:pointer;font:inherit}
+nav button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+main{padding:14px 16px;max-width:1400px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:0}
+.card h3{margin:0 0 6px;font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.big{font-size:22px;font-weight:650}.mut{color:var(--mut)}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.chip{display:inline-block;background:var(--chip);border-radius:999px;padding:1px 8px;font-size:12px;margin:1px 2px 1px 0}
+table{border-collapse:collapse;width:100%;font-size:12.5px}th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left;white-space:nowrap}
+th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--panel)}.scroll{overflow:auto;max-height:520px}
+tr.click{cursor:pointer}tr.click:hover td{background:var(--chip)}
+pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:var(--chip);padding:8px;border-radius:6px;max-height:600px;overflow:auto}
+input,select{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
+svg text{fill:var(--mut);font-size:10px}.section{margin-top:14px}
+@media (max-width:600px){main{padding:10px}.big{font-size:18px}}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>GPLM Research Dashboard</h1><div class="mut" id="cls">loading…</div></div>
+  <div class="row"><span class="mut" id="updated"></span>
+    <select id="theme" aria-label="theme"><option value="">auto</option><option value="light">light</option><option value="dark">dark</option></select></div>
+</header>
+<nav id="tabs"></nav>
+<main id="view"></main>
+<script>
+const $=s=>document.querySelector(s);
+const esc=v=>v==null?'':String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num=(v,d=3)=>v==null||v===''?'–':(typeof v==='number'?v.toFixed(d):esc(v));
+const pct=v=>v==null?'–':(100*v).toFixed(1)+'%';
+async function J(u){const r=await fetch(u);const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
+try{const t=localStorage.getItem('gplm-theme');if(t){document.documentElement.dataset.theme=t;$('#theme').value=t}}catch(e){}
+$('#theme').onchange=e=>{const v=e.target.value;if(v)document.documentElement.dataset.theme=v;else delete document.documentElement.dataset.theme;try{localStorage.setItem('gplm-theme',v)}catch(_){}};
+function table(rows,cols,onclick){if(!rows||!rows.length)return '<p class="mut">No rows.</p>';
+ return `<div class="scroll"><table><thead><tr>${cols.map(c=>`<th>${esc(c[1]||c[0])}</th>`).join('')}</tr></thead><tbody>${rows.map((r,i)=>`<tr ${onclick?`class="click" data-i="${i}"`:''}>${cols.map(c=>`<td>${c[2]?c[2](r[c[0]],r):(typeof r[c[0]]==='number'?num(r[c[0]],4):esc(typeof r[c[0]]==='object'&&r[c[0]]!==null?JSON.stringify(r[c[0]]):r[c[0]]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}
+function bind(el,rows,fn){el.querySelectorAll('tr.click').forEach(tr=>tr.onclick=()=>fn(rows[+tr.dataset.i]))}
+function line(series,{w=640,h=160,key='v',min=null,max=null,ref=null}={}){if(!series.length)return '<p class="mut">No data yet.</p>';
+ const ys=series.map(p=>p[key]).filter(v=>v!=null);let lo=min??Math.min(...ys),hi=max??Math.max(...ys);if(hi===lo){hi+=1;lo-=1}
+ const X=i=>8+i*(w-16)/Math.max(1,series.length-1),Y=v=>h-14-(v-lo)*(h-28)/(hi-lo);
+ const d=series.map((p,i)=>p[key]==null?'':`${i?'L':'M'}${X(i).toFixed(1)},${Y(p[key]).toFixed(1)}`).join('');
+ const r=ref!=null?`<line x1="8" x2="${w-8}" y1="${Y(ref)}" y2="${Y(ref)}" stroke="currentColor" stroke-dasharray="3 3" opacity=".35"/>`:'';
+ return `<svg viewBox="0 0 ${w} ${h}" width="100%" style="color:var(--mut);max-width:${w}px" role="img"><path d="${d}" fill="none" stroke="var(--acc)" stroke-width="1.6"/>${r}<text x="8" y="10">${num(hi,3)}</text><text x="8" y="${h-2}">${num(lo,3)}</text><text x="${w-8}" y="${h-2}" text-anchor="end">${esc(series[series.length-1].t||'')}</text></svg>`}
+const TABS={overview:'Overview',stocks:'Stocks',predictions:'Predictions',strategies:'Strategies',training:'Training',data:'Data quality',api:'API usage',audit:'Audit trail'};
+let current='overview';
+function tabs(){ $('#tabs').innerHTML=Object.entries(TABS).map(([k,v])=>`<button data-k="${k}" class="${k===current?'on':''}">${v}</button>`).join('');
+ document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{current=b.dataset.k;tabs();render()})}
+async function overview(){const s=await J('/api/summary');$('#cls').textContent=`${s.classification} · v${s.app_version}`;
+ const run=s.latest_daily||s.latest_run||{};const fc=s.forecasts||[];const p=s.progress||{};
+ const signals=fc.flatMap(f=>f.actionable||[]);const bm=s.best_models[0];
+ let h=`<div class="grid">
+ <div class="card"><h3>Latest run</h3><div class="big ${run.status==='COMPLETED'?'ok':run.status==='RUNNING'?'warn':'bad'}">${esc(run.status||'none')}</div><div class="mut">${esc(run.kind||'')} · ${esc(run.started_utc||'')}</div><div class="mut">${esc(run.device||'')}</div></div>
+ <div class="card"><h3>Data freshness</h3><div class="big">${esc(s.freshness.map(f=>f.last).sort().pop()||'–')}</div><div class="mut">${s.freshness.length} stocks ingested · minute data to ${esc(s.freshness.map(f=>f.minute_last).filter(Boolean).sort().pop()||'–')}</div></div>
+ <div class="card"><h3>Stocks analysed</h3><div class="big">${s.symbols.length}</div><div>${s.symbols.map(x=>`<span class="chip">${esc(x)}</span>`).join('')}</div></div>
+ <div class="card"><h3>Training progress</h3><div class="big">${p.units_total?`${p.units_done}/${p.units_total}`:'idle'}</div><div class="mut">${esc(p.task||'')} ${esc(p.stock||'')} ${esc(p.timeframe||'')} ${esc(p.session||'')}</div><div class="mut">loss ${num(p.train_loss,4)} · OOS acc ${num(p.oos_acc)} · ${esc(p.device||'')} ${esc(p.gpu_mem||'')}</div></div>
+ <div class="card"><h3>Best rolling accuracy (OOS)</h3><div class="big">${bm?pct(bm.oos_accuracy):'–'}</div><div class="mut">${bm?`${esc(bm.lane_key)} ${esc(bm.source_id)} h${bm.horizon_bars} · n=${bm.evaluated} · vs majority ${num(bm.accuracy_minus_majority)}`:'needs ≥10 evaluated predictions'}</div></div>
+ <div class="card"><h3>New trading signals</h3><div class="big ${signals.length?'ok':''}">${signals.length}</div><div class="mut">${fc.map(f=>`${esc(f.symbol)}: ${esc(f.status)}`).join(' · ')||'no live forecast yet'}</div></div>
+ <div class="card"><h3>Warnings / errors</h3><div class="big"><span class="warn">${s.warnings?.w||0}</span> / <span class="bad">${s.warnings?.e||0}</span></div><div class="mut">latest run · ${s.totals.data_warnings} data-quality warnings in total</div></div>
+ <div class="card"><h3>Compute</h3><div class="big">${esc(s.training_device?.device||'–')}</div><div class="mut">${esc(run.device||'')}</div></div>
+ <div class="card"><h3>API usage</h3><div class="big">${s.api?.n||0} calls</div><div class="mut">cost ${s.api?.usd!=null?'$'+num(s.api.usd,4):'$0'} · unknown-cost calls ${s.api?.unknown||0} · failed ${s.api?.failed||0}</div></div>
+ </div>`;
+ h+=`<div class="section card"><h3>Next-session forecasts</h3>${fc.map(f=>`<div class="section"><b>${esc(f.symbol)}</b> <span class="${f.status==='CANDIDATES'?'ok':'warn'}">${esc(f.status)}</span> <span class="mut">${esc(f.decision_label||'')}</span>${f.no_trade_reason?`<div class="mut">${esc(f.no_trade_reason)}</div>`:''}
+  ${table((f.actionable.length?f.actionable:f.candidates.filter(c=>c.source_kind==='MODEL').slice(0,5)),[['source_kind','kind'],['source_id','source'],['horizon_label','horizon'],['direction'],['prob_calibrated','P(up) cal.'],['entry_ref','ref close'],['stop'],['target'],['expected_rr','R:R'],['actionable'],['not_actionable_because','why not',v=>esc((v||[]).join('; '))]])}</div>`).join('')||'<p class="mut">Run <code>gplm daily --stocks …</code> to create forecasts.</p>'}</div>`;
+ h+=`<div class="section grid"><div class="card"><h3>Best-ranked models (sequential OOS)</h3>${table(s.best_models,[['lane_key','lane'],['source_id','model'],['horizon_bars','h'],['evaluated','n'],['oos_accuracy','acc',pct],['accuracy_minus_majority','vs majority'],['oos_brier','Brier'],['champion']])}</div>
+ <div class="card"><h3>Best strategies / rules (OOS outcomes)</h3>${table(s.best_strategies,[['lane_key','lane'],['source_kind','kind'],['source_id','id'],['horizon_bars','h'],['evaluated','n'],['all_signals_mean_net','mean net'],['oos_accuracy','win',pct]])}</div></div>`;
+ h+=`<p class="mut">Downloads: <a href="/export/predictions.csv">predictions.csv</a> · <a href="/export/evaluations.csv">evaluations.csv</a> · <a href="/export/strategies.json">strategies.json</a> · <a href="/reports/latest/report.html">latest HTML report</a></p>`;
+ return h}
+async function stocks(){const s=await J('/api/summary');const sym=new URLSearchParams(location.hash.slice(1)).get('s')||s.symbols[0]||'';
+ if(!sym)return '<p class="mut">No stocks yet.</p>';const d=await J('/api/stock?symbol='+encodeURIComponent(sym));
+ const c=d.candles.map(x=>({t:x.date,v:x.close}));
+ let h=`<div class="row"><select id="sym">${s.symbols.map(x=>`<option ${x===sym?'selected':''}>${esc(x)}</option>`).join('')}</select><span class="mut">${esc(d.cache?.first||'')} → ${esc(d.cache?.last||'')}, ${d.cache?.rows||0} daily rows</span></div>
+ <div class="card"><h3>Close (last 160 sessions; minute-derived days marked in table)</h3>${line(c)}</div>
+ <div class="section card"><h3>Accuracy by model / rule</h3>${table(d.accuracy,[['lane_key','lane'],['source_kind','kind'],['source_id','source'],['horizon_bars','h'],['evaluated','n'],['oos_accuracy','OOS acc',pct],['rolling20_accuracy','last 20',pct],['base_rate_up','up rate',pct],['training_accuracy_last_fit','train acc',pct],['live_predictions','live'],['actionable_trades','act. trades'],['actionable_mean_net','act. mean net']],r=>{location.hash='lane='+encodeURIComponent(r.lane_key)+'&src='+r.source_id+'&h='+r.horizon_bars;current='training';tabs();render()})}</div>
+ <div class="section card"><h3>Predictions and outcomes</h3>${table(d.predictions,[['mode'],['timeframe','tf'],['source_kind','kind'],['source_id','source'],['horizon_bars','h'],['decision_label','decided at'],['direction'],['prob_calibrated','P cal.'],['actionable'],['realized_return','realized'],['correct'],['trade_net_return','trade net'],['exit_reason','exit']],true)}</div>
+ <div class="section card"><h3>Data-quality issues</h3>${table(d.issues,[['timeframe','tf'],['period'],['code'],['severity'],['detail_json','detail']])}</div>`;
+ setTimeout(()=>{$('#sym').onchange=e=>{location.hash='s='+e.target.value;render()};bind($('#view'),d.predictions,trace)});return h}
+async function trace(r){const t=await J('/api/trace?id='+r.prediction_id);$('#view').insertAdjacentHTML('afterbegin',`<div class="card"><h3>Audit trace ${esc(r.prediction_id)} <button onclick="this.closest('.card').remove()">close</button></h3><pre>${esc(JSON.stringify(t,null,1))}</pre></div>`);window.scrollTo(0,0)}
+async function predictions(){const rows=await J('/api/predictions?limit=500');const h=`<p class="mut">Most recent 500 predictions. LIVE = issued after the latest completed session; REPLAY = historical walk-forward (stored before its outcome existed at the replay clock). Click a row for its audit trace.</p>${table(rows,[['mode'],['symbol'],['timeframe','tf'],['source_kind','kind'],['source_id','source'],['horizon_bars','h'],['decision_label','decided at'],['target_session','for'],['direction'],['prob_calibrated','P cal.'],['actionable'],['entry_ref','ref'],['stop'],['target'],['realized_return','realized'],['correct'],['trade_net_return','trade net']],true)}`;setTimeout(()=>bind($('#view'),rows,trace));return h}
+async function strategies(){const rows=await J('/api/strategies');const h=`<p class="mut">Immutable defaults are hash-bound; edits create new versions (<code>gplm strategies edit</code>). Click for definition, versions and outcomes.</p>${table(rows,[['strategy_id','id'],['version','v'],['name'],['timeframe','tf'],['origin'],['immutable'],['active'],['signals'],['created_utc','created']],true)}<div id="sdetail"></div>`;
+ setTimeout(()=>bind($('#view'),rows,async r=>{const d=await J('/api/strategy?id='+r.strategy_id);$('#sdetail').innerHTML=`<div class="card section"><h3>${esc(r.name)}</h3><pre>${esc(JSON.stringify(d.document,null,1))}</pre>${table(d.versions,[['version'],['origin'],['active'],['sha256'],['created_utc']])}${table(d.outcomes,[['decision_label'],['symbol'],['mode'],['actionable'],['trade_net_return'],['exit_reason']])}</div>`;$('#sdetail').scrollIntoView()}));return h}
+async function training(){const p=new URLSearchParams(location.hash.slice(1));const s=await J('/api/summary');
+ const lanes=[...new Set((s.best_models||[]).map(m=>m.lane_key))];const lane=p.get('lane')||lanes[0]||'';const src=p.get('src')||'mlp';const hh=p.get('h')||'1';
+ const tr=lane?await J(`/api/training?lane=${encodeURIComponent(lane)}&kind=${src}&h=${hh}`):[];const ro=lane?await J(`/api/rolling?lane=${encodeURIComponent(lane)}&source=${src}&h=${hh}`):[];
+ const lastEp={};tr.slice().reverse().forEach(r=>{lastEp[r.step_label]=r});const steps=Object.values(lastEp);
+ return `<div class="row"><input id="lane" value="${esc(lane)}" size="22" aria-label="lane"><select id="src">${['baseline','logit','mlp'].map(k=>`<option ${k===src?'selected':''}>${k}</option>`).join('')}</select><input id="hh" value="${esc(hh)}" size="3" aria-label="horizon"><button onclick="location.hash='lane='+encodeURIComponent($('#lane').value)+'&src='+$('#src').value+'&h='+$('#hh').value;render()">show</button></div>
+ <div class="grid"><div class="card"><h3>Sequential OOS accuracy — rolling 20</h3>${line(ro,{key:'rolling20',min:0,max:1,ref:.5})}</div><div class="card"><h3>Cumulative OOS accuracy</h3>${line(ro,{key:'cumulative',min:0,max:1,ref:.5})}</div>
+ <div class="card"><h3>Training loss (last epoch of each step)</h3>${line(steps.map(r=>({t:r.step_label,v:r.loss})))}</div><div class="card"><h3>Training accuracy (in-sample)</h3>${line(steps.map(r=>({t:r.step_label,v:r.train_acc})),{min:0,max:1,ref:.5})}</div></div>
+ <div class="section card"><h3>Training history (latest first)</h3>${table(tr.slice(0,400),[['step_label','step'],['epoch'],['loss'],['train_acc','train acc'],['rows'],['device'],['seconds']])}</div>`}
+async function data(){const c=await J('/api/issue_counts');const r=await J('/api/issues');return `<div class="card"><h3>Issue counts</h3>${table(c,[['code'],['severity'],['n']])}</div><div class="section card"><h3>Latest issues</h3>${table(r,[['symbol'],['timeframe','tf'],['period'],['code'],['severity'],['detail_json','detail'],['file']])}</div>`}
+async function api(){const r=await J('/api/api_calls');return `<p class="mut">Every external or local-command call. Unknown token counts or prices are shown as empty, never estimated.</p>${table(r,[['ts_utc','time'],['provider'],['model'],['endpoint'],['purpose'],['request_id'],['input_tokens','in'],['output_tokens','out'],['cost_usd','USD'],['cost_basis','basis'],['latency_ms','ms'],['success'],['error'],['run_id','run']])}`}
+async function audit(){const runs=await J('/api/runs');const ev=await J('/api/events?limit=300');const h=`<div class="card"><h3>Runs (click for reconstruction)</h3>${table(runs,[['run_id'],['kind'],['status'],['started_utc','started'],['finished_utc','finished'],['device']],true)}</div><div id="rdetail"></div><div class="section card"><h3>Latest events (hash-chained)</h3>${table(ev,[['seq'],['ts_utc','time'],['kind'],['level'],['subject'],['payload']])}</div><p class="mut">Downloads: <a href="/export/events.json">events.json</a> · <a href="/export/runs.csv">runs.csv</a> · <a href="/export/models.csv">models.csv</a> · <a href="/export/training_history.csv">training_history.csv</a></p>`;
+ setTimeout(()=>bind($('#view'),runs,async r=>{const d=await J('/api/run?id='+r.run_id);$('#rdetail').innerHTML=`<div class="card section"><h3>${esc(r.run_id)}</h3><pre>${esc(JSON.stringify(d,null,1))}</pre></div>`}));return h}
+const VIEWS={overview,stocks,predictions,strategies,training,data,api,audit};
+async function render(){try{$('#view').innerHTML=await VIEWS[current]();$('#updated').textContent='updated '+new Date().toLocaleTimeString()}catch(e){$('#view').innerHTML=`<div class="card"><h3>Not available</h3><p>${esc(e.message)}</p><p class="mut">Run <code>gplm daily --stocks RELIANCE,HDFCBANK</code> first.</p></div>`}}
+tabs();render();setInterval(()=>{if(current==='overview')render()},15000);
+</script>
+</body>
+</html>

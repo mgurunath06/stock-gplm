@@ -1,0 +1,15 @@
+{
+  "name": "RSI pullback in a long-term uptrend (daily, weekly confirmation)",
+  "description": "Manually authored template: daily RSI(14) below 35 while price is above its 200-day EMA and the weekly RSI(14) is above 50. A hypothesis to test, not a recommendation.",
+  "timeframe": "1d",
+  "direction": "long",
+  "scope": {"symbols": "*", "timeframes": ["1d"]},
+  "entry": {"logic": "AND", "conditions": [
+    {"feature": "RSI(period=14).value", "op": "lt", "threshold": 35},
+    {"feature": "EMA(period=200).distance", "op": "gt", "threshold": 0},
+    {"feature": "1w:RSI(period=14).value", "op": "gt", "threshold": 50}
+  ]},
+  "exit": {"max_hold_bars": 10, "stop_atr": 2.0, "target_atr": 3.0, "trail_atr": null},
+  "position_sizing": {"method": "fixed_fraction", "risk_per_trade_pct": 0.5},
+  "costs_profile": "delivery"
+}

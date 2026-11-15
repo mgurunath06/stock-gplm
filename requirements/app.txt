@@ -1,0 +1,6 @@
+# Stock GPLM research application - core (CPU) dependencies. Python 3.12.
+# Versions verified in the project venv on 2026-11-15: numpy 2.5.4, pandas 2.3.3, scipy 1.18.1.
+numpy>=2.0,<3
+pandas>=2.2,<3
+scipy>=1.11,<2
+pytest>=8,<9

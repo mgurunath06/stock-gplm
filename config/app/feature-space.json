@@ -1,0 +1,52 @@
+{
+  "contract": "stock-gplm.m54-search-space.v1",
+  "note": "Compact causal feature set for the GPLM application's ML models and rolling rule search. Edit freely; the feature-config hash recorded with every model and prediction changes with it.",
+  "levels": {"RSI.value": [30, 50, 70], "ADX.adx": [20, 25], "STOCH.k": [20, 80], "MFI.value": [20, 80], "DONCHIAN.position": [10, 90]},
+  "indicators": {
+    "EMA": {"params": {"period": [10, 20, 50, 200]}},
+    "SMA": {"params": {"period": [20, 100]}},
+    "MA_CROSS": {"params": {"fast": [10, 20], "slow": [50], "ma_type": ["EMA"]}},
+    "MA_ALIGNMENT": {"params": {"short": [10], "medium": [20], "long": [50]}},
+    "RSI": {"params": {"period": [7, 14, 21]}},
+    "MACD": {"params": {"fast": [12], "slow": [26], "signal": [9]}},
+    "ROC": {"params": {"period": [1, 3, 5, 10, 20, 60]}},
+    "CCI": {"params": {"period": [20]}},
+    "STOCH": {"params": {"period": [14], "smooth": [3]}},
+    "WILLIAMS_R": {"params": {"period": [14]}},
+    "TSI": {"params": {"long": [25], "short": [13]}},
+    "RVOL": {"params": {"period": [20], "spike": [2.0]}},
+    "OBV": {"params": {"period": [20]}},
+    "CMF": {"params": {"period": [20]}},
+    "MFI": {"params": {"period": [14]}},
+    "ADX": {"params": {"period": [14]}},
+    "AROON": {"params": {"period": [25]}},
+    "SUPERTREND": {"params": {"period": [10], "multiplier": [3.0]}},
+    "ATR": {"params": {"period": [14]}},
+    "BOLLINGER": {"params": {"period": [20], "width": [2.0]}},
+    "KELTNER": {"params": {"period": [20], "multiplier": [2.0]}},
+    "DONCHIAN": {"params": {"period": [20, 55]}},
+    "HIST_VOL": {"params": {"short": [10, 20], "long": [60]}},
+    "BREAKOUT": {"params": {"period": [20]}},
+    "GAP": {"params": {"period": [1]}},
+    "RANGE": {"params": {"period": [10]}},
+    "STRUCTURE": {"params": {"period": [10]}},
+    "CANDLE": {"params": {"period": [1]}},
+    "SUPPORT_RESISTANCE": {"params": {"period": [20]}},
+    "STATS": {"params": {"period": [20]}}
+  },
+  "htf": {
+    "contract": "stock-gplm.m54-search-space.v1",
+    "levels": {"RSI.value": [30, 50, 70], "ADX.adx": [20, 25]},
+    "indicators": {
+      "EMA": {"params": {"period": [10, 20]}},
+      "RSI": {"params": {"period": [14]}},
+      "ADX": {"params": {"period": [14]}},
+      "ROC": {"params": {"period": [4, 12]}},
+      "BOLLINGER": {"params": {"period": [20], "width": [2.0]}},
+      "ATR": {"params": {"period": [14]}},
+      "SUPERTREND": {"params": {"period": [10], "multiplier": [3.0]}}
+    }
+  },
+  "quality": {"max_abs_gap": 0.20, "max_abs_bar_return": 0.20, "intraday_max_abs_bar_return": 0.05, "quarantine_bars": 20},
+  "lane_htf": {"1d": ["1w"], "1w": [], "60m": ["1d"], "30m": ["1d"], "15m": ["60m", "1d"], "5m": ["60m", "1d"], "1m": ["15m", "1d"]}
+}

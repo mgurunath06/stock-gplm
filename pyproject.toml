@@ -16,6 +16,9 @@ oracle-auth = ["selenium==4.52.0"]
 m35 = ["numpy>=2,<3", "pandas>=2.2,<3", "scikit-learn>=1.5,<2", "lightgbm>=4.5,<5"]
 # Local-first behaviour discovery (M5.4); no network or LLM dependency.
 m54 = ["numpy>=2,<3", "pandas>=2.2,<3", "scipy>=1.11,<2"]
+# GPLM research application (M5.5); GPU acceleration additionally needs a CUDA build of torch (see windows/install.ps1).
+app = ["numpy>=2,<3", "pandas>=2.2,<3", "scipy>=1.11,<2"]
+gpu = ["torch>=2.7"]
 
 [project.scripts]
 stock-gplm = "stock_gplm.cli:main"
@@ -37,7 +40,8 @@ stock-gplm-nse-mcp = "stock_gplm.m39.cli:main"
 stock-gplm-strategy-studio = "stock_gplm.v1.studio:main"
 stock-gplm-strategy-demo = "stock_gplm.v1.demo:main"
 stock-gplm-m5 = "stock_gplm.m5.cli:main"
-gplm = "stock_gplm.m54.cli:main"
+gplm = "stock_gplm.app.cli:main"
+gplm-research = "stock_gplm.m54.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

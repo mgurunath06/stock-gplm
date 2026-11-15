@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run the GPLM research CLI from this checkout using the shared project venv.
-# No network or LLM access is needed for discovery.
+# Stock GPLM research application (Linux/WSL launcher). Windows: windows\gplm.cmd
+# Uses $GPLM_PYTHON, else this checkout's .venv, else the shared project venv.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${GPLM_PYTHON:-}"
@@ -11,4 +11,4 @@ if [[ -z "$PY" ]]; then
 fi
 [[ -n "$PY" ]] || { echo "set GPLM_PYTHON to a Python 3.12 with numpy, pandas and scipy" >&2; exit 1; }
 export PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}"
-exec "$PY" -m stock_gplm.m54.cli "$@"
+exec "$PY" -m stock_gplm.app.cli "$@"

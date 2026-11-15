@@ -1,0 +1,14 @@
+{
+  "name": "Bollinger lower-band mean reversion (daily)",
+  "description": "Manually authored template: %B below 0 (close under the lower 20/2 band) while MACD histogram is rising.",
+  "timeframe": "1d",
+  "direction": "long",
+  "scope": {"symbols": "*", "timeframes": ["1d"]},
+  "entry": {"logic": "AND", "conditions": [
+    {"feature": "BOLLINGER(period=20,width=2.0).percent_b", "op": "lt", "threshold": 0},
+    {"feature": "MACD(fast=12,signal=9,slow=26).hist_slope", "op": "gt", "threshold": 0}
+  ]},
+  "exit": {"max_hold_bars": 5, "stop_atr": 1.5, "target_atr": 2.0, "trail_atr": null},
+  "position_sizing": {"method": "fixed_fraction", "risk_per_trade_pct": 0.5},
+  "costs_profile": "delivery"
+}

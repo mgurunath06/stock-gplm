@@ -34,7 +34,6 @@ import hashlib
 import math
 import multiprocessing as mp
 import os
-import resource
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -52,6 +51,7 @@ from .hypotheses import (Hypothesis, budget_sample, interactions, load_hypothesi
 from .indicators import FeatureDef, _atr, build_features
 from .recency import Scheme, schemes, select, weights
 from .store import canonical_hash, read_checkpoint, read_json, utc_now, write_checkpoint, write_json_atomic
+from .portable import fork_pool, usage as _usage
 from .timeframes import ALL_TIMEFRAMES, Bars, align, bars_per_year, build_all, session_ids
 
 CONFIG_CONTRACT = "stock-gplm.m54-unified.v1"
@@ -356,7 +356,7 @@ class Lane:
             for p in {pp.key(): pp for i in todo for _, pp in jobs[i * chunk:(i + 1) * chunk]}.values():
                 baseline(self.market, self.segs["discovery"], p, self.costs, self.base_cache)  # warm before fork
             _CTX = self.ctx()
-            pool = mp.get_context("fork").Pool(workers) if workers > 1 else None
+            pool = fork_pool(workers)  # serial where fork is unavailable (Windows)
             try:
                 for i in todo:
                     self.run.check_stop()
@@ -816,13 +816,11 @@ class UnifiedRun:
     def status(self, stage: str, state: str, **extra: Any) -> None:
         path = self.dir / "status.json"
         prior = read_json(path) if path.exists() else {"started_utc": utc_now()}
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        children = resource.getrusage(resource.RUSAGE_CHILDREN)
+        u = _usage(include_children=True)
         write_json_atomic(path, {"run_id": self.run_id, "symbol": self.symbol, "state": state, "stage": stage,
                                  "pid": os.getpid(), "started_utc": prior.get("started_utc", utc_now()),
-                                 "updated_utc": utc_now(), "max_rss_mb": round(usage.ru_maxrss / 1024, 1),
-                                 "cpu_seconds": round(usage.ru_utime + usage.ru_stime + children.ru_utime
-                                                      + children.ru_stime, 1),
+                                 "updated_utc": utc_now(), "max_rss_mb": u["max_rss_mb"],
+                                 "cpu_seconds": u["cpu_seconds"],
                                  "budget": self.s["budget_name"], "device": self.device, "workers": self.workers,
                                  "kind": "unified", **extra})
 

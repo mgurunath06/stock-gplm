@@ -122,6 +122,10 @@ def resample_intraday(one: Bars, timeframe: str) -> Bars:
                         "close": g["close"].last(), "volume": g["volume"].sum(), "vwap_pv": g["vwap_pv"].sum(),
                         "count": g["open"].count(), "first_mos": g["minute_of_session"].min()}).reset_index()
     out.columns = ["session", "bucket", *out.columns[2:]]
+    # A withheld (NaN) source volume makes the bucket's volume unknown rather than a partial sum.
+    vol_nan = f["volume"].isna().groupby(key, sort=True).any().to_numpy()
+    if vol_nan.any():
+        out.loc[vol_nan, ["volume", "vwap_pv"]] = np.nan
     expected = np.minimum(n, SESSION_MINUTES - out["bucket"] * n)
     out["incomplete"] = out["count"] < expected
     out["minute_of_session"] = out["bucket"] * n
