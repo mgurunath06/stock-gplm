@@ -93,3 +93,34 @@ $env:PYTHONPATH="src"; $env:PYTHONUTF8="1"
 - First real development run started:
   `.\windows\gplm.cmd m56 --stocks "RELIANCE,HDFCBANK,ICICIBANK" --timeframes "1d,1w" --mode both --budget quick --device auto --resume`
   The log is `H:\Guru\Learning\StockGLPM\reports\m56-acceptance-20261115\real-run1-dev.log`.
+
+## First real-data development-period run (2026-11-15)
+
+Run `20261115T111312Z-m56-61b7b590`; report `H:\Guru\Learning\StockGLPM\state\reports\m56\20261115T111312Z-m56-61b7b590\summary.json`;
+log `H:\Guru\Learning\StockGLPM\reports\m56-acceptance-20261115\real-run2-dev.log`. Exit 0, audit chain OK.
+- Window: end 2025-10-20 (development_end). Daily data 2022-10-31..2025-10-20 (727 rows per stock). 0 final-segment reads by the reference path.
+- Reference: 1800 combinations (300 × 3 × 2): 129 evaluated, 1158 BLOCKED_IMPLEMENTATION, 339 BLOCKED_TIMEFRAME,
+  174 BLOCKED_MISSING_DATA; 645 validation rows, all REJECTED.
+- Discovery: M5.4 engine plus GPU broad screen (6 real CUDA calls, 0.11 s, RTX 5070), 49 candidates, 0 cross-stock EXPERIMENTAL.
+  Tree ML: real fits, 0 qualifying paths on 1d; 1w BLOCKED_INSUFFICIENT_HISTORY (<180 weekly bars).
+- Fixed after the run (`f7b222e`): the windowed summary previously echoed unwindowed minute coverage. No minute rows were used.
+
+## Open findings (not fixed; next work)
+
+1. **Classification inconsistency:** `run_m56` maps the M5.5 broad-screen tier `SCREEN_VALIDATED` to M5.6 `VALIDATED`
+   without applying M5.6 gates (min trades, family-wide BH, drawdown, folds), and stores the metrics nested, so the
+   leaderboard shows blanks. Both "VALIDATED" rows in the real run (RELIANCE `st-a9b9fff00bd2d143`, ICICIBANK
+   `st-660cf4a6c2de9a38`) are of this kind and must not be treated as validated. Fix: map to EXPERIMENTAL unless
+   M5.6 gates pass on flattened metrics.
+2. Only 26/300 references have reviewed translations. Coverage is explicit, but most of the library cannot run yet.
+3. Minute data (2026 only) lies entirely inside the locked holdout, so development runs are daily-only. Intraday discovery
+   needs a governance decision (see `docs/m54-minute-2026-study-authorization-DRAFT.md`).
+4. The tree-path lane lock is code-reviewed but not exercised: synthetic and real lanes produced 0 paths.
+5. 212 native-Windows test failures are all POSIX-only (class A) and identical to `0cca2a2`. Linux/WSL run not done.
+
+## Decisions
+
+- M5.6 code completeness: **CONDITIONAL GO**. This depends on fixing finding 1; finding 2 is a known, explicit limitation.
+- M5.6 integration readiness: **CONDITIONAL GO**. Local commits only, on `feature/m55-gplm-app`, nothing pushed; the WSL repo lacks the 3 Windows commits.
+- Real-data strategy discovery: **DIAGNOSTIC ONLY**. The pipeline runs end to end inside the development window, but
+  "VALIDATED" labels are unreliable until finding 1 is fixed.
