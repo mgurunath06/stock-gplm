@@ -20,7 +20,7 @@ def test_authoritative_catalogue_has_eleven_modules_and_preserves_tracked_gaps()
     missing = [row for row in doc["rows"] if any(m["kind"] == "NOT_IMPLEMENTED"
                                                    for m in row.get("missing", []))]
     # The original 11 missing rows remain in the completion contract; two are now implemented.
-    assert len([row for row in missing if not row.get("exprs")]) == 9
+    assert len([row for row in missing if not row.get("exprs")]) == 8
     assert len([row for row in missing if row.get("exprs")]) == 2
     assert TIMEFRAMES == ("1m", "5m", "15m", "30m", "60m", "4h", "1d", "1w")
 

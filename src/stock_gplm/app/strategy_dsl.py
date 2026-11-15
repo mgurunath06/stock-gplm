@@ -631,6 +631,30 @@ def _quadratic(x: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarra
     return a, b, c, fitted
 
 
+def _dtw_template(x: np.ndarray, n: int, template: str, band: int) -> np.ndarray:
+    """Rolling normalized DTW distance to a registered deterministic template."""
+    if template != "vcp":
+        raise DSLError(f"unknown DTW template {template!r}; available: vcp")
+    u = np.linspace(0.0, 1.0, n)
+    target = 0.5 * u + (1 - u) * np.sin(4 * np.pi * u)
+    target = (target - target.mean()) / target.std()
+    out = np.full(len(x), np.nan)
+    for end in range(n - 1, len(x)):
+        w = x[end - n + 1:end + 1]
+        if not np.isfinite(w).all() or np.std(w) <= 0:
+            continue
+        w = (w - np.mean(w)) / np.std(w)
+        prev = np.full(n + 1, np.inf); prev[0] = 0.0
+        for i in range(1, n + 1):
+            cur = np.full(n + 1, np.inf)
+            lo, hi = max(1, i - band), min(n, i + band)
+            for j in range(lo, hi + 1):
+                cur[j] = (w[i - 1] - target[j - 1]) ** 2 + min(prev[j], cur[j - 1], prev[j - 1])
+            prev = cur
+        out[end] = math.sqrt(prev[n] / n)
+    return out
+
+
 def _weis(ctx: Context, threshold: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Causal percentage-ZigZag wave direction, cumulative volume and previous same-direction volume.
 
@@ -882,6 +906,14 @@ def _qc(c: Context, x: Any, n: Any) -> np.ndarray:
 @fn("quad_fit", 2, 2, "rolling quadratic least-squares fitted value at the current bar")
 def _qfit(c: Context, x: Any, n: Any) -> np.ndarray:
     return _quadratic(_arr(c, x), _n(n, lo=3))[3]
+
+
+@fn("dtw_distance", 3, 4, 'rolling normalized DTW distance dtw_distance(x,n,"vcp"[,band=4])')
+def _dtw(c: Context, x: Any, n: Any, template: Any, band: Any = 4) -> np.ndarray:
+    if not isinstance(template, str):
+        raise DSLError("dtw_distance template must be a quoted registered name")
+    nn = _n(n, lo=5, hi=500)
+    return _dtw_template(_arr(c, x), nn, template, _n(band, lo=1, hi=nn))
 
 
 fn("skew", 2, 2, "rolling skewness")(lambda c, x, n: _S(_arr(c, x)).rolling(_n(n, lo=3)).skew().to_numpy())

@@ -132,6 +132,33 @@ def quadratic(x: Sequence[float], n: int) -> tuple[L, L, L, L]:
     return out[0], out[1], out[2], out[3]
 
 
+def dtw_vcp(x: Sequence[float], n: int, band: int) -> L:
+    """Independent list-loop DTW to the registered contracting-oscillation VCP template."""
+    target = [0.5 * i / (n - 1) + (1 - i / (n - 1)) * math.sin(4 * math.pi * i / (n - 1))
+              for i in range(n)]
+    tm = sum(target) / n
+    ts = math.sqrt(sum((v - tm) ** 2 for v in target) / n)
+    target = [(v - tm) / ts for v in target]
+    out = [NAN] * len(x)
+    for end in range(n - 1, len(x)):
+        w = list(x[end - n + 1:end + 1])
+        if not all(fin(v) for v in w):
+            continue
+        mean = sum(w) / n
+        std = math.sqrt(sum((v - mean) ** 2 for v in w) / n)
+        if std == 0:
+            continue
+        w = [(v - mean) / std for v in w]
+        table = [[float("inf")] * (n + 1) for _ in range(n + 1)]
+        table[0][0] = 0.0
+        for i in range(1, n + 1):
+            for j in range(max(1, i - band), min(n, i + band) + 1):
+                table[i][j] = (w[i - 1] - target[j - 1]) ** 2 + min(
+                    table[i - 1][j], table[i][j - 1], table[i - 1][j - 1])
+        out[end] = math.sqrt(table[n][n] / n)
+    return out
+
+
 def weis_wave(c: Sequence[float], v: Sequence[float], threshold: float) -> tuple[L, L, L]:
     """Reference causal percentage-ZigZag direction/current/previous-same-direction volumes."""
     direction = [0.0] * len(c)

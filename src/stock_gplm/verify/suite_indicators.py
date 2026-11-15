@@ -51,6 +51,7 @@ INDICATORS: list[tuple[str, str, Ref, bool, int]] = [
     ("Sum(volume,5)", "sum(volume, 5)", lambda d, s: R.rsum(d["v"], 5), False, 5),
     ("LinReg slope(20)", "slope(close, 20)", lambda d, s: R.ols_slope(d["c"], 20), False, 20),
     ("Quadratic fit(60)", "quad_fit(close, 60)", lambda d, s: R.quadratic(d["c"], 60)[3], False, 60),
+    ("DTW VCP(20,4)", 'dtw_distance(close, 20, "vcp", 4)', lambda d, s: R.dtw_vcp(d["c"], 20, 4), False, 20),
     ("Weis wave volume(2%)", "weis_wave_volume(0.02)", lambda d, s: R.weis_wave(d["c"], d["v"], 0.02)[1],
      False, 1),
     ("PercentRank(20)", "percentrank(close, 20)", lambda d, s: R.percentrank(d["c"], 20), False, 20),

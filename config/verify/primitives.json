@@ -141,8 +141,8 @@
      "missing": [{"what": "diagonal line through swing points; Andrews pitchfork", "kind": "NOT_IMPLEMENTED", "reason": "no DSL primitive"}]},
     {"module": "7 Structure", "name": "Point_And_Figure_Matrix", "exprs": [],
      "missing": [{"what": "box/reversal X-O column generator", "kind": "NOT_IMPLEMENTED", "reason": "no DSL primitive"}]},
-    {"module": "7 Structure", "name": "DTW_Distance(s1, s2)", "exprs": [],
-     "missing": [{"what": "dynamic time warping distance", "kind": "NOT_IMPLEMENTED", "reason": "no DSL primitive"}]},
+    {"module": "7 Structure", "name": "DTW_Distance(s1, s2)",
+     "exprs": ["dtw_distance(close, 20, \"vcp\", 4)"], "verified_by": "DTW VCP(20,4)"},
 
     {"module": "8 Statistics", "name": "Z_Score(series, n)", "exprs": ["zscore(close, 20)"], "verified_by": "ZScore(20)"},
     {"module": "8 Statistics", "name": "StdErr(n) & R_Squared(n)", "exprs": ["stderr(close, 20)", "r2(close, 20)"]},
