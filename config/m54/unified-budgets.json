@@ -1,0 +1,26 @@
+{
+  "contract": "stock-gplm.m54-unified-budgets.v1",
+  "budgets": {
+    "quick": {
+      "auto_timeframes": ["15m", "60m", "1d"],
+      "max_single_candidates": 300, "max_period": 60, "refine_top_k": 10, "interaction_pool": 6, "max_interactions": 15,
+      "cross_tf_base_pool": 5, "cross_tf_htf_conditions": 12, "cross_tf_max": 60,
+      "max_finalists": 6, "min_finalists": 3, "max_test": 5, "wf_folds": 3, "checkpoint_every": 200,
+      "exit_grid": {"hold_multipliers": [1, 2], "stop_atr": [null, 1.5], "target_atr": [null, 2.0], "trail_atr": [null]}
+    },
+    "standard": {
+      "auto_timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"],
+      "max_single_candidates": 1500, "max_period": 120, "refine_top_k": 25, "interaction_pool": 12, "max_interactions": 60,
+      "cross_tf_base_pool": 12, "cross_tf_htf_conditions": 25, "cross_tf_max": 300,
+      "max_finalists": 12, "min_finalists": 4, "max_test": 8, "wf_folds": 4, "checkpoint_every": 500,
+      "exit_grid": {"hold_multipliers": [1, 2], "stop_atr": [null, 1.0, 2.0, 3.0], "target_atr": [null, 1.5, 3.0], "trail_atr": [null, 2.0]}
+    },
+    "deep": {
+      "auto_timeframes": ["1m", "5m", "15m", "30m", "60m", "1d", "1w"],
+      "max_single_candidates": 6000, "max_period": 200, "refine_top_k": 60, "interaction_pool": 20, "max_interactions": 200,
+      "cross_tf_base_pool": 25, "cross_tf_htf_conditions": 40, "cross_tf_max": 1000,
+      "max_finalists": 25, "min_finalists": 5, "max_test": 15, "wf_folds": 5, "checkpoint_every": 1000,
+      "exit_grid": {"hold_multipliers": [0.5, 1, 2], "stop_atr": [null, 0.75, 1.0, 1.5, 2.0, 3.0], "target_atr": [null, 1.0, 1.5, 2.0, 3.0, 4.0], "trail_atr": [null, 1.5, 2.5]}
+    }
+  }
+}

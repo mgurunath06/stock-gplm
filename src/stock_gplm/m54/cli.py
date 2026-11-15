@@ -19,6 +19,8 @@ from .store import read_json, utc_now, write_json_atomic
 REPO = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = REPO / "config" / "m54" / "discovery-default.json"
 DEFAULT_PROVIDERS = REPO / "config" / "research" / "providers.json"
+DEFAULT_UNIFIED = REPO / "config" / "m54" / "unified-default.json"
+ETF_HEURISTIC = REPO / "config" / "m37" / "etf-symbol-heuristic.json"
 
 
 def _print(value: Any) -> None:
@@ -66,9 +68,65 @@ def _detach(argv: Sequence[str], output_root: Path) -> int:
     return 0
 
 
+def _unified(args: argparse.Namespace) -> bool:
+    return args.data is not None or args.timeframes is not None
+
+
+def cmd_discover_unified(args: argparse.Namespace, argv: Sequence[str]) -> int:
+    """Daily + minute, multi-timeframe strategy discovery (one command, resumable)."""
+    from .device import limit_process, resolve
+    from .unified import UnifiedRun, load_settings
+    output_root = Path(args.output_root).resolve()
+    if args.detach:
+        return _detach(argv, output_root)
+    device, reason = resolve(args.device)
+    overrides: dict[str, Any] = {"daily_root": args.daily_root, "minute_roots": args.minute_root or None,
+                                 "m32_run": args.m32_run}
+    settings = load_settings(Path(args.unified_config), args.budget, overrides)
+    if args.recency == "uniform":
+        settings["recency"].update({"half_lives_sessions": [], "regime_conditional": False})
+    if args.universe == "all-eligible":
+        from .unified_bulk import eligible_symbols
+        universe: dict[str, Any] | None = eligible_symbols(Path(settings["data"]["daily_root"]), ETF_HEURISTIC)
+        symbols = list(universe["symbols"])
+    else:
+        symbols, universe = _symbols(args)
+    kw = {"timeframes": args.timeframes or "auto", "data": args.data or "all-available", "start": args.start,
+          "end": args.end, "device": device}
+    if args.dry_run:
+        rows = []
+        for sym in symbols[:50]:
+            run = UnifiedRun(settings, sym, output_root, **kw)
+            run.load(create=False)
+            done = sorted(str(p.relative_to(run.dir / "stages")) for p in (run.dir / "stages").rglob("*.json")
+                          if "-chunks" not in str(p)) if run.dir.exists() else []
+            rows.append({"symbol": run.symbol, "run_id": run.run_id, "policy": run.policy.to_dict(),
+                         "daily_status": run.daily.status, "lanes": run.lanes_plan, "completed_stages": done})
+        _print({"dry_run": True, "budget": args.budget, "device": device, "device_reason": reason,
+                "symbols_total": len(symbols), "symbols": rows})
+        return 0
+    if len(symbols) == 1:
+        limit_process(args.max_memory_gb, threads=1)
+        run = UnifiedRun(settings, symbols[0], output_root, workers=args.workers,
+                         hypotheses_file=Path(args.hypotheses).resolve() if args.hypotheses else None, **kw)
+        result = run.execute()
+        result.update({"device": device, "device_reason": reason})
+        _print(result)
+        return 0 if result["state"] in {"COMPLETED", "STOPPED"} else 2
+    from .unified_bulk import run_unified_batch
+    result = run_unified_batch(settings, symbols, output_root, workers=args.workers, max_memory_gb=args.max_memory_gb,
+                               universe=universe, **kw)
+    _print(result)
+    return 0
+
+
 def cmd_discover(args: argparse.Namespace, argv: Sequence[str]) -> int:
     from .device import limit_process, resolve
     from .engine import Run, Settings
+    if _unified(args):
+        return cmd_discover_unified(args, argv)
+    if args.universe == "all-eligible":
+        raise SystemExit("--universe all-eligible needs the unified engine: add --data all-available")
     if args.timeframe != "1d":
         raise SystemExit("only --timeframe 1d is supported (minute data needs separate authorization)")
     output_root = Path(args.output_root).resolve()
@@ -123,7 +181,7 @@ def _dry_run(settings: Any, symbols: list[str], output_root: Path, hyp: Path | N
 
 
 def _find_run(output_root: Path, run_id: str) -> Path:
-    matches = sorted((output_root / "runs").glob(f"*/{run_id}*"))
+    matches = sorted((output_root / "runs").glob(f"*/{run_id}*")) + sorted((output_root / "unified").glob(f"*/{run_id}*"))
     if len(matches) != 1:
         raise SystemExit(f"run id prefix {run_id!r} matched {len(matches)} runs under {output_root}")
     return matches[0]
@@ -143,9 +201,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         _print({k: m.get(k) for k in ("batch_id", "state", "progress", "updated_utc", "workers", "membership_basis")})
         return 0
     rows = []
-    for st in sorted((root / "runs").glob("*/*/status.json"), key=lambda p: p.stat().st_mtime, reverse=True)[: args.limit]:
+    found = list((root / "runs").glob("*/*/status.json")) + list((root / "unified").glob("*/*/status.json"))
+    for st in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)[: args.limit]:
         s = read_json(st)
-        rows.append({k: s.get(k) for k in ("symbol", "run_id", "state", "stage", "updated_utc", "progress")})
+        rows.append({k: s.get(k) for k in ("symbol", "run_id", "kind", "state", "stage", "updated_utc", "progress")})
     _print(rows)
     return 0
 
@@ -180,11 +239,29 @@ def cmd_resume_clear(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unified_report(d: Path, show: bool) -> int:
+    ranked = read_json(d / "stages" / "rank.json")["payload"]
+    _print({"run_dir": str(d), "report": str(d / "report.md"), "strategies_json": str(d / "strategies.json"),
+            "verdict": ranked["verdict"], "tier_counts": ranked["tier_counts"],
+            "total_discovery_tests": ranked["total_discovery_tests"],
+            "top": [{"rank": x["rank"], "id": x["strategy_id"], "tf": x["timeframe"], "tier": x["tier"],
+                     "entry": x["entry_text"], "exit": x["exit_text"]} for x in ranked["strategies"][:10]]})
+    if show:
+        print((d / "report.md").read_text(encoding="utf-8"))
+    return 0
+
+
 def cmd_report(args: argparse.Namespace) -> int:
     from .engine import normalize_symbol
     root = Path(args.output_root).resolve()
     if args.run_id:
         d = _find_run(root, args.run_id)
+        if (d / "stages" / "rank.json").exists():
+            return _unified_report(d, args.print)
+    elif args.legacy is False and list((root / "unified" / normalize_symbol(args.stock)).glob("*/run-manifest.json")):
+        ms = sorted((root / "unified" / normalize_symbol(args.stock)).glob("*/run-manifest.json"),
+                    key=lambda p: read_json(p).get("completed_utc", ""), reverse=True)
+        return _unified_report(ms[0].parent, args.print)
     else:
         manifests = sorted((root / "runs" / normalize_symbol(args.stock)).glob("*/run-manifest.json"),
                            key=lambda p: read_json(p).get("completed_utc", ""), reverse=True)
@@ -309,6 +386,28 @@ def cmd_hypothesize(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_library(args: argparse.Namespace) -> int:
+    from .unified_bulk import library_export, library_list
+    root = Path(args.output_root).resolve()
+    if args.action == "list":
+        _print(library_list(root, args.stock))
+        return 0
+    if not (args.strategy_id and args.name):
+        raise SystemExit("library export needs --strategy-id and --name")
+    _print(library_export(root, args.strategy_id, args.name, Path(args.dest)))
+    return 0
+
+
+def cmd_fixture(args: argparse.Namespace) -> int:
+    from .fixture import make_fixture
+    out = Path(args.out).resolve()
+    if any(p.name == "raw" for p in [out, *out.parents]):
+        raise SystemExit("fixtures must not be written into a raw-data tree")
+    _print(make_fixture(out, [s for s in args.symbols.split(",") if s], start=args.start, end=args.end,
+                        minute_from=args.minute_from, cutoff=args.cutoff, seed=args.seed))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="gplm", description=__doc__)
     common = argparse.ArgumentParser(add_help=False)
@@ -333,6 +432,17 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--hypotheses", help="stock-gplm.m54-hypotheses.v1 file with extra (user/AI) hypotheses")
     d.add_argument("--raw-root")
     d.add_argument("--m32-run")
+    u = d.add_argument_group("unified multi-timeframe engine (selected by --data or --timeframes)")
+    u.add_argument("--data", choices=["all-available", "daily", "minute"],
+                   help="which permitted sources to use; selects the unified daily+minute engine")
+    u.add_argument("--timeframes", help="auto, or a comma list of 1m,5m,15m,30m,60m,1d,1w")
+    u.add_argument("--start", help="earliest session to use (YYYY-MM-DD); can only narrow the permitted range")
+    u.add_argument("--end", help="latest session to use (YYYY-MM-DD); can only narrow the permitted range")
+    u.add_argument("--recency", choices=["validated", "uniform"], default="validated",
+                   help="validated: choose among uniform/exponential/regime weights on validation; uniform: no weighting")
+    u.add_argument("--daily-root", help="override the daily raw root (read-only)")
+    u.add_argument("--minute-root", action="append", help="override minute raw roots (repeatable; read-only)")
+    u.add_argument("--unified-config", default=str(DEFAULT_UNIFIED))
 
     s = sub.add_parser("status")
     s.add_argument("--run-id")
@@ -351,6 +461,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--stock")
     r.add_argument("--run-id")
     r.add_argument("--print", action="store_true")
+    r.add_argument("--legacy", action="store_true", help="show the legacy daily-only report even if a unified run exists")
 
     e = sub.add_parser("export", help="copy a discovered default into an editable user strategy")
     e.add_argument("--run-id", required=True)
@@ -358,6 +469,22 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--horizon", type=int, required=True)
     e.add_argument("--name")
     e.add_argument("--dest", default=str(REPO / "config" / "m54" / "strategies" / "user"))
+
+    lb = sub.add_parser("library", help="list discovered strategy defaults or export an editable copy")
+    lb.add_argument("action", choices=["list", "export"])
+    lb.add_argument("--stock")
+    lb.add_argument("--strategy-id")
+    lb.add_argument("--name")
+    lb.add_argument("--dest", default=str(REPO / "config" / "m54" / "strategies" / "user"))
+
+    fx = sub.add_parser("fixture", help="write a SYNTHETIC daily+minute fixture for integration tests")
+    fx.add_argument("--out", required=True)
+    fx.add_argument("--symbols", default="RELIANCE")
+    fx.add_argument("--start", default="2019-01-01")
+    fx.add_argument("--end", default="2021-12-31")
+    fx.add_argument("--minute-from", default="2021-04-01")
+    fx.add_argument("--cutoff", default="2021-11-01")
+    fx.add_argument("--seed", type=int, default=7)
 
     sub.add_parser("devices")
     b = sub.add_parser("benchmark")
@@ -387,7 +514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handlers = {"status": cmd_status, "stop": cmd_stop, "clear-stop": cmd_resume_clear, "report": cmd_report,
                 "export": cmd_export, "devices": cmd_devices, "benchmark": cmd_benchmark, "providers": cmd_providers,
-                "hypothesize": cmd_hypothesize}
+                "hypothesize": cmd_hypothesize, "library": cmd_library, "fixture": cmd_fixture}
     if args.command == "discover":
         return cmd_discover(args, argv)
     return handlers[args.command](args)
