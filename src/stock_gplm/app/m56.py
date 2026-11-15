@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -24,106 +24,25 @@ from .db import jdump, sha, utc_now
 from .ingest import SymbolData, ingest_many, window_data
 from .lanes import all_bars, build_lane
 from .library import Library, strategy_features, strategy_mask, validate
+from .m56_catalogue import (TIMEFRAMES, CataloguePolicy, Reference, load_catalogue, parse_catalogue,
+                            requirements, timeframes_v1)
+from .m56_status import GatePolicy, final_gates, validation_evidence, validation_gates
+from .m56_status import leaderboard as status_leaderboard
 
-CONTRACT = "stock-gplm.m56-reference-catalogue.v1"
-TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "1d", "1w")
+CONTRACT = "stock-gplm.m56-reference-catalogue.v2"
 CLASSIFICATIONS = ("REFERENCE", "DISCOVERED", "EXPERIMENTAL", "VALIDATED", "REJECTED")
-_CATEGORY = re.compile(r"^### Category (\d+): (.+?) \(50 Strategies\)\s*$")
-_ITEM = re.compile(r"^(\d+)\. \*\*(.+?):\*\*\s*(.*?)\s*`([^`]+)`(?:\s*(.*))?$")
+# Backward-compatible aliases: the original 300 keep identical definitions and digests.
+_requirements = requirements
+_timeframes = timeframes_v1
 
 
-@dataclass(frozen=True)
-class Reference:
-    reference_id: str
-    ordinal: int
-    category_number: int
-    category: str
-    name: str
-    explanation: str
-    rule_text: str
-    trailing_text: str
-    direction: str
-    supported_timeframes: tuple[str, ...]
-    required_inputs: tuple[str, ...]
-    implementation_status: str
-    implementation_reason: str
-    parameter_ranges: Mapping[str, Any]
-    version: int = 1
+def parse_reference_catalogue(path: Path, policy: CataloguePolicy | None = None,
+                              supplements: Sequence[Path] = ()) -> list[Reference]:
+    """Parse the catalogue (6x50 base plus 301+ extensions); refuse omissions, duplicates and malformed entries.
 
-    @property
-    def digest(self) -> str:
-        return sha(asdict(self))
-
-
-def _requirements(text: str) -> tuple[str, ...]:
-    s = text.lower()
-    req = {"OHLCV"}
-    checks = {
-        "DELIVERY": ("delivery",),
-        "DERIVATIVES_OI": ("open interest", " oi", "oi_", "futures"),
-        "OPTIONS_CHAIN": ("pcr", "max pain", "iv ", "implied volatility"),
-        "INDEX_BENCHMARK": ("nifty", "banknifty", "sector", "relative strength", "benchmark"),
-        "CORPORATE_EVENT": ("earnings", "quarterly result", "corporate action", "dividend"),
-        "INSTITUTIONAL_FLOW": ("fii", "dii", "institutional cash"),
-        "FREE_FLOAT": ("free-float", "free float"),
-        "MARKET_CALENDAR": ("expiry", "month-end", "day-of-week", "seasonal", "holiday"),
-        "ORDER_BOOK_OR_DEALS": ("block deal", "bulk deal", "order book"),
-    }
-    for key, words in checks.items():
-        if any(w in s for w in words):
-            req.add(key)
-    if re.search(r"\boptions?\b", s):
-        req.add("OPTIONS_CHAIN")
-    return tuple(sorted(req))
-
-
-def _timeframes(text: str) -> tuple[str, ...]:
-    s = text.lower()
-    if any(x in s for x in ("9:15", "9:30", "15:30", "intraday", "opening range", "first-hour", "last-hour")):
-        return ("1m", "5m", "15m", "30m", "60m")
-    if any(x in s for x in ("52-week", "252", "day", "session")):
-        return ("1d",)
-    if any(x in s for x in ("quarter", "month", "weekly", "week")):
-        return ("1d", "1w")
-    return TIMEFRAMES
-
-
-def parse_reference_catalogue(path: Path) -> list[Reference]:
-    """Parse exactly six categories of fifty; refuse omissions, duplicates and renumbering."""
-    text = Path(path).read_text(encoding="utf-8-sig")
-    category_no = 0
-    category = ""
-    found: list[Reference] = []
-    seen: set[str] = set()
-    within = False
-    for raw in text.splitlines():
-        cm = _CATEGORY.match(raw.strip())
-        if cm:
-            category_no, category, within = int(cm.group(1)), cm.group(2), True
-            continue
-        if not within:
-            continue
-        im = _ITEM.match(raw.strip())
-        if not im:
-            continue
-        local, name, explanation, rule, trailing = int(im.group(1)), *im.groups()[1:]
-        if not 1 <= local <= 50:
-            raise ValueError(f"category {category_no} has item {local}, expected 1..50")
-        rid = f"REF-C{category_no}-{local:03d}"
-        if rid in seen:
-            raise ValueError(f"duplicate reference id {rid}")
-        seen.add(rid)
-        combined = " ".join((name, explanation, rule, trailing or ""))
-        req = _requirements(combined)
-        direction = "short" if any(x in combined.lower() for x in (" short", "bearish", "death cross")) else "long"
-        found.append(Reference(rid, len(found) + 1, category_no, category, name, explanation, rule,
-                               trailing or "", direction, _timeframes(combined), req,
-                               "PENDING_COMPILATION", "safe declarative translation not yet selected", {}, 1))
-    expected = {f"REF-C{c}-{i:03d}" for c in range(1, 7) for i in range(1, 51)}
-    if len(found) != 300 or seen != expected:
-        missing = sorted(expected - seen)
-        raise ValueError(f"reference catalogue must contain 300 strategies; found {len(found)}, missing={missing[:10]}")
-    return found
+    Use :func:`stock_gplm.app.m56_catalogue.parse_catalogue` for a non-raising report.
+    """
+    return load_catalogue(Path(path), policy, supplements).references
 
 
 def _condition(feature: str, op: str, threshold: float | None) -> dict[str, Any]:
@@ -180,6 +99,22 @@ def _compiled_conditions(ref: Reference, timeframe: str) -> tuple[list[dict[str,
 def compile_reference(ref: Reference, timeframe: str) -> tuple[dict[str, Any] | None, str]:
     if timeframe not in ref.supported_timeframes:
         return None, f"semantic timeframe scope is {','.join(ref.supported_timeframes)}"
+    if ref.definition is not None:
+        # A reviewed, structured strategy.v3 definition supplied with the entry; only its scope is set here.
+        doc = json.loads(json.dumps(ref.definition))
+        doc.update(timeframe=timeframe, scope={**doc.get("scope", {}), "timeframes": [timeframe]})
+        doc["provenance"] = {**doc.get("provenance", {}), "reference_id": ref.reference_id,
+                             "reference_version": ref.version, "reference_sha256": ref.digest}
+        try:
+            return validate(doc), "structured definition supplied with the catalogue entry"
+        except Exception as exc:
+            return None, f"structured definition invalid for {timeframe}: {exc}"
+    if ref.implementation_status in ("METHOD_SPECIFICATION", "DESCRIPTION_ONLY"):
+        return None, ref.implementation_reason
+    if ref.source_format != "markdown-v1" or ref.origin != "REFERENCE":
+        # Reviewed translations were checked against the original v1 rule text only; a newer entry
+        # sharing a name must not inherit a translation reviewed for different prose.
+        return None, "no reviewed translation or structured definition; descriptive text was not coerced"
     conditions, reason = _compiled_conditions(ref, timeframe)
     if conditions is None:
         return None, reason
@@ -196,8 +131,45 @@ def compile_reference(ref: Reference, timeframe: str) -> tuple[dict[str, Any] | 
         return None, f"reviewed translation unavailable in current indicator registry: {exc}"
 
 
-def build_manifest(source: Path, output: Path) -> dict[str, Any]:
-    refs = parse_reference_catalogue(source)
+def _bundle_sha(source: Path, supplements: Sequence[Path]) -> str:
+    h = hashlib.sha256()
+    for p in (Path(source), *map(Path, supplements)):
+        h.update(hashlib.sha256(p.read_bytes()).digest())
+    return h.hexdigest()
+
+
+def coverage_summary(refs: Sequence[Reference], registered_inputs: Sequence[str] = ("OHLCV",)) -> dict[str, Any]:
+    """Executable versus blocked counts per entry, independent of any candle data."""
+    executable_by_tf = {tf: 0 for tf in TIMEFRAMES}
+    classes: dict[str, list[str]] = {}
+    data_blocked: list[str] = []
+    for ref in refs:
+        ok = False
+        for tf in ref.supported_timeframes:
+            doc, _ = compile_reference(ref, tf)
+            if doc is not None:
+                executable_by_tf[tf] += 1
+                ok = True
+        if ok:
+            cls = "EXECUTABLE"
+        elif ref.implementation_status in ("METHOD_SPECIFICATION", "DESCRIPTION_ONLY"):
+            cls = ref.implementation_status
+        else:
+            cls = "NO_REVIEWED_TRANSLATION"
+        classes.setdefault(cls, []).append(ref.reference_id)
+        if set(ref.required_inputs) - set(registered_inputs):
+            data_blocked.append(ref.reference_id)
+    return {"strategies": len(refs), "executable_strategies": len(classes.get("EXECUTABLE", [])),
+            "by_class": {k: len(v) for k, v in sorted(classes.items())},
+            "ids_by_class": {k: v for k, v in sorted(classes.items())},
+            "executable_by_timeframe": executable_by_tf, "registered_inputs": list(registered_inputs),
+            "needs_unregistered_inputs": len(data_blocked)}
+
+
+def build_manifest(source: Path, output: Path, policy: CataloguePolicy | None = None,
+                   supplements: Sequence[Path] = ()) -> dict[str, Any]:
+    parsed = load_catalogue(Path(source), policy, supplements)
+    refs = parsed.references
     raw_sha = hashlib.sha256(Path(source).read_bytes()).hexdigest()
     rows = []
     executable = {tf: 0 for tf in TIMEFRAMES}
@@ -212,8 +184,12 @@ def build_manifest(source: Path, output: Path) -> dict[str, Any]:
         row["sha256"] = ref.digest
         row["implementations"] = supported
         rows.append(row)
-    manifest = {"contract": CONTRACT, "catalogue_version": 1, "source_path": str(Path(source).resolve()),
-                "source_sha256": raw_sha, "strategy_count": len(refs), "reference_is_minimum_not_ceiling": True,
+    report = parsed.report()
+    manifest = {"contract": CONTRACT, "catalogue_version": 2, "source_path": str(Path(source).resolve()),
+                "source_sha256": raw_sha, "bundle_sha256": _bundle_sha(source, supplements),
+                "strategy_count": len(refs), "reference_is_minimum_not_ceiling": True,
+                "catalogue_policy": parsed.policy.to_dict(), "catalogue_report": report,
+                "coverage_summary": {k: v for k, v in coverage_summary(refs).items() if k != "ids_by_class"},
                 "classifications": list(CLASSIFICATIONS), "implementation_count_by_timeframe": executable,
                 "strategies": rows}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -276,10 +252,8 @@ def evaluate_references(app: App, refs: Sequence[Reference], datas: Mapping[str,
     """Attempt every requested combination and gate the final test behind validation evidence."""
     pending: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
-    min_trades = int(cfg.get("min_oos_trades", 20))
-    min_folds = int(cfg.get("walk_forward_folds", 4))
-    q_limit = float(cfg.get("fdr_q", 0.05))
-    max_dd = float(cfg.get("max_drawdown", 0.30))
+    gates = GatePolicy.from_cfg(cfg)
+    min_folds = gates.walk_forward_folds
     total = len(refs) * len(datas) * len(timeframes)
     app.progress.set_total(total)
     eligible_references = evaluated_rules = completed_folds = 0
@@ -356,15 +330,16 @@ def evaluate_references(app: App, refs: Sequence[Reference], datas: Mapping[str,
                 app.progress.advance()
                 app.progress.update(eligible_references=eligible_references, evaluated_rules=evaluated_rules,
                                     completed_folds=completed_folds)
-    qvals = bh_adjust([p["metrics"].get("p_value") for p in pending], max(1, len(pending)))
+    family = max(1, len(pending))
+    qvals = bh_adjust([p["metrics"].get("p_value") for p in pending], family)
     validated = rejected = holdout_scores = 0
     for item, qv in zip(pending, qvals):
         met = item["metrics"]
         met["q_value"] = qv
-        folds_ok = sum(1 for f in met["folds"] if f["mean_excess"] is not None and f["mean_excess"] > 0) \
-            >= max(2, min_folds - 1)
-        promote = (met.get("effective_n", 0) >= min_trades and qv is not None and qv <= q_limit
-                   and (met.get("mean_net") or 0) > 0 and (met.get("max_drawdown") or -1) >= -max_dd and folds_ok)
+        met["bh_family_size"] = family
+        verdict = validation_gates(met, gates)
+        met["validation_gates_failed"] = verdict["failed"]
+        promote = verdict["passed"]
         classification = "EXPERIMENTAL" if promote else "REJECTED"
         _insert_result(app, strategy_id=item["ref"].reference_id, classification=classification, origin="REFERENCE",
                        symbol=item["symbol"], timeframe=item["tf"], regime=item["regime"], stage="VALIDATION",
@@ -394,9 +369,9 @@ def evaluate_references(app: App, refs: Sequence[Reference], datas: Mapping[str,
         tr = simulate(item["lane"].market, item["mask"], item["segments"]["test"], item["policy"], item["lane"].costs)
         base = baseline(item["lane"].market, item["segments"]["test"], item["policy"], item["lane"].costs)
         test_met = metrics(tr, item["lane"].market, item["segments"]["test"], base)
-        test_met.update(stage="test_once", regime=item["regime"], validation_q=qv)
-        passed = (test_met.get("effective_n", 0) >= min_trades and (test_met.get("mean_net") or 0) > 0
-                  and (test_met.get("max_drawdown") or -1) >= -max_dd)
+        test_met.update(stage="test_once", regime=item["regime"], validation_q=qv,
+                        validation_evidence=validation_evidence(met))
+        passed = final_gates(test_met, gates)["passed"]
         final = "VALIDATED" if passed else "REJECTED"
         validated += int(passed)
         rejected += int(not passed)
@@ -413,20 +388,10 @@ def evaluate_references(app: App, refs: Sequence[Reference], datas: Mapping[str,
 
 
 def leaderboard(app: App, run_id: str | None = None) -> list[dict[str, Any]]:
+    """Leaderboard from the authoritative derived status; the stored label is never trusted."""
     where, args = ("WHERE run_id=?", (run_id,)) if run_id else ("", ())
     rows = app.db.q(f"SELECT * FROM m56_results {where} ORDER BY created_utc", args)
-    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        row["metrics"] = json.loads(row.pop("metrics_json"))
-        groups.setdefault((row["symbol"], row["timeframe"], row["regime"]), []).append(row)
-    out = []
-    for (symbol, tf, regime), values in sorted(groups.items()):
-        valid = [x for x in values if x["classification"] == "VALIDATED"]
-        valid.sort(key=lambda x: (x["metrics"].get("mean_net") or -1e9, x["metrics"].get("effective_n") or 0), reverse=True)
-        out.append({"symbol": symbol, "timeframe": tf, "regime": regime,
-                    "status": "VALIDATED" if valid else "NO VALIDATED STRATEGY",
-                    "best": valid[0] if valid else None, "tested_results": len(values)})
-    return out
+    return status_leaderboard(rows, GatePolicy.from_cfg(app.s.section("m56")))
 
 
 def cross_stock_evidence(app: App, datas: Mapping[str, SymbolData], cfg: Mapping[str, Any],
@@ -497,17 +462,23 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
             mode: str = "both", budget: str = "standard", manifest_only: bool = False,
             start: str | None = None, end: str | None = None) -> dict[str, Any]:
     cfg = app.s.section("m56")
-    manifest_path = app.s.home / "m56" / f"reference-manifest-{hashlib.sha256(catalogue.read_bytes()).hexdigest()[:16]}.json"
-    manifest = build_manifest(catalogue, manifest_path)
+    policy = CataloguePolicy.from_cfg(cfg)
+    supplements = [Path(x) for x in ((cfg.get("catalogue") or {}).get("supplements") or [])]
+    bundle = _bundle_sha(catalogue, supplements)
+    manifest_path = app.s.home / "m56" / f"reference-manifest-v2-{bundle[:16]}.json"
+    manifest = build_manifest(catalogue, manifest_path, policy, supplements)
+    count = int(manifest["strategy_count"])
     with app.db.tx() as c:
         c.execute("INSERT OR IGNORE INTO m56_catalogues VALUES (?,?,?,?,?,?,?)",
-                  (manifest["source_sha256"], str(catalogue.resolve()), CONTRACT, 300, str(manifest_path),
+                  (manifest["source_sha256"], str(catalogue.resolve()), CONTRACT, count, str(manifest_path),
                    utc_now(), app.run_id))
     app.db.event("M56_REFERENCE_CATALOGUE_REGISTERED", {"source_sha256": manifest["source_sha256"],
-                                                        "strategies": 300, "manifest": str(manifest_path),
-                                                        "minimum_not_ceiling": True})
+                                                        "bundle_sha256": bundle, "strategies": count,
+                                                        "manifest": str(manifest_path), "minimum_not_ceiling": True,
+                                                        "catalogue_status": manifest["catalogue_report"]["status"]})
     result: dict[str, Any] = {"manifest": str(manifest_path), "source_sha256": manifest["source_sha256"],
-                              "reference_count": 300, "mode": mode}
+                              "reference_count": count, "mode": mode,
+                              "coverage_summary": manifest["coverage_summary"]}
     if manifest_only:
         return result
     # Development-period boundary: rows after it never reach a lane, feature, label or score.
@@ -521,7 +492,8 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
     datas = {k: window_data(v, start, end) for k, v in
              ingest_many(app.s, app.db, symbols, use_minute=any(tf.endswith("m") for tf in timeframes)).items()}
     if mode in ("reference", "both"):
-        result["reference"] = evaluate_references(app, parse_reference_catalogue(catalogue), datas, timeframes,
+        result["reference"] = evaluate_references(app, parse_reference_catalogue(catalogue, policy, supplements),
+                                                   datas, timeframes,
                                                    backend, cfg)
     if mode in ("discovery", "both"):
         from .discover import discover
@@ -538,7 +510,8 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
                 doc = app.db.one("SELECT timeframe, provenance_json FROM strategies WHERE strategy_id=? AND version=?",
                                  (imported["strategy_id"], imported["version"]))
                 tf = (doc or {}).get("timeframe") or "1d"
-                classification = "VALIDATED" if tier in ("VALIDATED", "PROMOTABLE") else "DISCOVERED"
+                # M5.4 engine tiers carry no M5.6 gate metrics: a candidate, never VALIDATED (M5.6.1 fix).
+                classification = "DISCOVERED"
                 _insert_result(app, strategy_id=imported["strategy_id"], classification=classification,
                                origin="DISCOVERED", symbol=symbol, timeframe=tf, regime="ALL", stage="DISCOVERY_ENGINE",
                                result_metrics={"tier": tier},
@@ -552,7 +525,8 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
                     if not lib.get("strategy_id"):
                         continue
                     tier = str(rule.get("screen_tier") or "DISCOVERED")
-                    classification = "VALIDATED" if tier == "SCREEN_VALIDATED" else "DISCOVERED"
+                    # M5.5 screen tiers have no BH q, drawdown or fold gates: never VALIDATED (M5.6.1 fix).
+                    classification = "REJECTED" if tier == "SCREEN_REJECTED_VALIDATION" else "DISCOVERED"
                     evidence = {"tier": tier, "in_sample": rule.get("in_sample"),
                                 "validation": rule.get("validation"), "test": rule.get("test"),
                                 "tests_in_search": screen.get("tests")}

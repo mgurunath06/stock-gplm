@@ -15,6 +15,7 @@ from ..m54.backtest import ExitPolicy, baseline, bh_adjust, fold_metrics, metric
 from .compute import forward_matrix
 from .lanes import Lane
 from .library import validate
+from .m56_status import GatePolicy, final_gates, validation_evidence, validation_gates
 
 
 def _tree_paths(model: Any, names: list[str], max_conditions: int = 6) -> list[dict[str, Any]]:
@@ -110,18 +111,17 @@ def discover_tree_strategies(lane: Lane, cfg: Mapping[str, Any], *, seed: int = 
         met = metrics(trades, lane.market, segments["validation"], base)
         met["folds"] = fold_metrics(trades, segments["validation"], int(cfg.get("walk_forward_folds", 4)), base)
         evaluated.append({**path, "rank": rank_no, "mask": mask, "validation": met})
-    qvals = bh_adjust([x["validation"].get("p_value") for x in evaluated], max(1, len(evaluated)))
-    min_trades = int(cfg.get("min_oos_trades", 20))
-    q_limit = float(cfg.get("fdr_q", 0.05))
-    max_dd = float(cfg.get("max_drawdown", 0.30))
+    family = max(1, len(evaluated))
+    qvals = bh_adjust([x["validation"].get("p_value") for x in evaluated], family)
+    gates = GatePolicy.from_cfg(cfg)
     candidates = []
     for item, qv in zip(evaluated, qvals):
         vm = item["validation"]
         vm["q_value"] = qv
-        folds = vm["folds"]
-        stable = sum(1 for f in folds if f["mean_excess"] is not None and f["mean_excess"] > 0) >= max(2, len(folds) - 1)
-        promoted = (vm.get("effective_n", 0) >= min_trades and qv is not None and qv <= q_limit
-                    and (vm.get("mean_net") or 0) > 0 and (vm.get("max_drawdown") or -1) >= -max_dd and stable)
+        vm["bh_family_size"] = family
+        verdict = validation_gates(vm, gates)  # authoritative M5.6 gates (m56_status)
+        vm["validation_gates_failed"] = verdict["failed"]
+        promoted = verdict["passed"]
         test_met = None
         classification = "REJECTED"
         if promoted and not allow_test:
@@ -130,8 +130,8 @@ def discover_tree_strategies(lane: Lane, cfg: Mapping[str, Any], *, seed: int = 
             trades = simulate(lane.market, item["mask"], segments["test"], policy, lane.costs)
             base = baseline(lane.market, segments["test"], policy, lane.costs)
             test_met = metrics(trades, lane.market, segments["test"], base)
-            passed = (test_met.get("effective_n", 0) >= min_trades and (test_met.get("mean_net") or 0) > 0
-                      and (test_met.get("max_drawdown") or -1) >= -max_dd)
+            test_met["validation_evidence"] = validation_evidence(vm)
+            passed = final_gates(test_met, gates)["passed"]
             classification = "VALIDATED" if passed else "REJECTED"
         doc = validate({"name": f"{lane.symbol} {lane.timeframe} learned tree path {item['rank']}",
                         "description": "Locally learned gradient-boosting-selected decision-tree interaction",

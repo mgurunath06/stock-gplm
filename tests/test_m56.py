@@ -22,15 +22,15 @@ CATALOGUE = REPO / "config" / "strategies" / "reference-300-strategies.txt"
 
 def test_reference_catalogue_accounts_for_exactly_six_by_fifty(tmp_path: Path) -> None:
     refs = parse_reference_catalogue(CATALOGUE)
-    assert len(refs) == 300
+    assert len(refs) >= 300  # 300 is a floor; the 301+ addendum is imported, not ignored
     assert [sum(r.category_number == c for r in refs) for c in range(1, 7)] == [50] * 6
-    assert len({r.reference_id for r in refs}) == 300
+    assert len({r.reference_id for r in refs}) == len(refs)
     assert refs[0].reference_id == "REF-C1-001"
-    assert refs[-1].reference_id == "REF-C6-050"
+    assert refs[299].reference_id == "REF-C6-050"
     manifest = build_manifest(CATALOGUE, tmp_path / "manifest.json")
-    assert manifest["strategy_count"] == 300
+    assert manifest["strategy_count"] == len(refs)
     assert manifest["reference_is_minimum_not_ceiling"] is True
-    assert len(manifest["strategies"]) == 300
+    assert len(manifest["strategies"]) == len(refs)
     assert all(x["sha256"] and x["required_inputs"] and x["implementations"] for x in manifest["strategies"])
 
 
@@ -69,7 +69,7 @@ def test_manifest_only_cli_registers_300_without_reading_candles(tmp_path: Path)
     assert rc == 0
     db = AuditDB(home / "gplm.sqlite", readonly=True)
     row = db.one("SELECT strategy_count, catalogue_sha256 FROM m56_catalogues")
-    assert row and row["strategy_count"] == 300 and len(row["catalogue_sha256"]) == 64
+    assert row and row["strategy_count"] >= 300 and len(row["catalogue_sha256"]) == 64
     assert db.one("SELECT COUNT(*) n FROM data_files")["n"] == 0
     assert db.verify_chain()["ok"]
     db.close()
@@ -91,7 +91,7 @@ def test_reference_run_attempts_every_strategy_and_persists_explicit_coverage(
                      "--budget", "quick", "--device", "cpu", "--catalogue", str(CATALOGUE),
                      "--config", str(cp), "--home", str(home), "--quiet"]) == 0
     db = AuditDB(home / "gplm.sqlite", readonly=True)
-    assert db.one("SELECT COUNT(*) n FROM m56_coverage")["n"] == 300
+    assert db.one("SELECT COUNT(*) n FROM m56_coverage")["n"] == len(parse_reference_catalogue(CATALOGUE))
     statuses = {r["status"]: r["n"] for r in db.q("SELECT status, COUNT(*) n FROM m56_coverage GROUP BY status")}
     assert statuses["EVALUATED_VALIDATION"] > 0
     assert statuses["BLOCKED_IMPLEMENTATION"] > 0

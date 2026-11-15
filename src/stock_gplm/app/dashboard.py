@@ -206,21 +206,13 @@ def rolling_series(s: Settings, lane: str, source: str, horizon: int) -> list[di
 
 
 def m56_leaderboard(s: Settings) -> list[dict[str, Any]]:
-    rows = _rows(s, "SELECT strategy_id, classification, origin, symbol, timeframe, regime, evidence_stage, "
-                    "metrics_json, data_fingerprint, device, created_utc FROM m56_results ORDER BY created_utc")
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        row["metrics"] = json.loads(row.pop("metrics_json"))
-        grouped.setdefault((row["symbol"], row["timeframe"], row["regime"]), []).append(row)
-    out = []
-    for (symbol, timeframe, regime), values in sorted(grouped.items()):
-        valid = [v for v in values if v["classification"] == "VALIDATED"]
-        valid.sort(key=lambda v: ((v["metrics"].get("mean_net") or -1e9),
-                                  (v["metrics"].get("effective_n") or 0)), reverse=True)
-        out.append({"symbol": symbol, "timeframe": timeframe, "regime": regime,
-                    "status": "VALIDATED" if valid else "NO VALIDATED STRATEGY",
-                    "best": valid[0] if valid else None, "result_count": len(values)})
-    return out
+    """Authoritative derived status (M5.6.1); the stored classification column is never trusted."""
+    from .m56_status import GatePolicy, leaderboard
+
+    rows = _rows(s, "SELECT result_id, strategy_id, classification, origin, symbol, timeframe, regime, "
+                    "evidence_stage, metrics_json, lineage_json, data_fingerprint, device, created_utc "
+                    "FROM m56_results ORDER BY created_utc")
+    return leaderboard(rows, GatePolicy.from_cfg(s.section("m56")))
 
 
 class Handler(BaseHTTPRequestHandler):
