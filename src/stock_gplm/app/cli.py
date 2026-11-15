@@ -122,6 +122,24 @@ def _brief(result: Any) -> Any:
 
 
 # ----------------------------------------------------------------------------------------- commands
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Correctness-verification suite on synthetic fixtures; exit 1 when any check FAILs."""
+    from datetime import datetime, timezone
+
+    from ..verify.runner import run
+    from .settings import load
+
+    if args.out:
+        out = Path(args.out).resolve()
+    else:
+        out = load(args.config, args.home).reports_dir / "verify" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    rep = run(out, quiet=args.quiet and not args.json)
+    if args.json:
+        _p(json.dumps({"verdict": rep["verdict"], "out": rep["out"],
+                       "sections": {s["section"]: s["verdict"] for s in rep["sections"]}}, indent=2))
+    return 1 if rep["verdict"] == "FAIL" else 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from .doctor import doctor
     from .settings import load
@@ -934,6 +952,9 @@ def build_parser() -> argparse.ArgumentParser:
     lb.add_argument("--n", type=int, default=10)
     lb.add_argument("--allow-remote", action="store_true")
     lb.add_argument("--allow-unknown-cost", action="store_true")
+    vf = add("verify", cmd_verify, "correctness-verification suite (synthetic fixtures): PASS/FAIL report with "
+                                   "strategy-, indicator- and ML-level evidence")
+    vf.add_argument("--out", help="report directory (default <home>/reports/verify/<UTC timestamp>)")
     add("status", cmd_status, "lock, live progress and latest runs")
     sy = add("symbols", cmd_symbols, "list the local universe")
     sy.add_argument("--all", action="store_true")
