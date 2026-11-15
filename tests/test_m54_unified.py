@@ -132,6 +132,20 @@ def test_resample_aggregates_and_flags_incomplete() -> None:
     assert not bool(b60.iloc[-1]["incomplete"])  # the 15-minute final bucket is complete by definition
 
 
+def test_four_hour_and_configurable_session_anchored_bars() -> None:
+    one = tfm.minute_frame(_minutes("2021-01-04"))
+    b4h = tfm.resample_intraday(one, "4h").frame
+    assert len(b4h) == 2
+    assert list(b4h["end_ns"]) == [ist_ns("2021-01-04", "13:15"), ist_ns("2021-01-04", "15:30")]
+    assert list(b4h["volume"]) == [2400.0, 1350.0]
+    assert not b4h["incomplete"].any()
+    b2h = tfm.resample_intraday(one, "2h").frame
+    assert len(b2h) == 4 and b2h.iloc[-1]["end_ns"] == ist_ns("2021-01-04", "15:30")
+    assert tfm.timeframe_minutes("4h") == 240 and tfm.timeframe_minutes("90m") == 90
+    with pytest.raises(ValueError):
+        tfm.timeframe_minutes("8h")
+
+
 def test_htf_alignment_is_causal() -> None:
     daily = pd.DataFrame({"date": ["2021-01-04", "2021-01-05"], "open": [1.0, 2], "high": [1.0, 2], "low": [1.0, 2],
                           "close": [1.0, 2], "volume": [1.0, 1]})

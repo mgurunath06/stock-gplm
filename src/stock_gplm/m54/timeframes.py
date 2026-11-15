@@ -28,8 +28,8 @@ import pandas as pd
 
 from .candles import ist_ns
 
-INTRADAY_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60}
-ALL_TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "1d", "1w")
+INTRADAY_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "4h": 240}
+ALL_TIMEFRAMES = (*INTRADAY_MINUTES, "1d", "1w")
 SESSION_OPEN = "09:15"
 SESSION_MINUTES = 375  # 09:15 .. 15:29 labels, from the observed (non-authoritative) session policy
 
@@ -111,7 +111,7 @@ def minute_frame(minute: pd.DataFrame) -> Bars:
 
 
 def resample_intraday(one: Bars, timeframe: str) -> Bars:
-    n = INTRADAY_MINUTES[timeframe]
+    n = timeframe_minutes(timeframe)
     if timeframe == "1m" or not len(one):
         return one if timeframe == "1m" else Bars(timeframe, pd.DataFrame(), f"resampled from 1m")
     f = one.frame
@@ -138,13 +138,36 @@ def resample_intraday(one: Bars, timeframe: str) -> Bars:
     return Bars(timeframe, out[cols].reset_index(drop=True), "resampled from 1m (session-anchored at 09:15; no fill)")
 
 
-def build_all(daily: pd.DataFrame, minute: pd.DataFrame) -> dict[str, Bars]:
+def build_all(daily: pd.DataFrame, minute: pd.DataFrame,
+              timeframes: Sequence[str] | None = None) -> dict[str, Bars]:
+    """Build configured lanes without filling absent source minutes.
+
+    Any positive ``Nm`` or ``Nh`` duration can be requested. Durations are anchored at the 09:15
+    session open. A final short bucket is a legitimate session remainder (4h is 240 + 135 minutes),
+    while missing source minutes still mark the affected bucket incomplete.
+    """
     d = daily_bars(daily)
     one = minute_frame(minute)
     lanes = {"1d": d, "1w": weekly_bars(d)}
-    for tf in INTRADAY_MINUTES:
+    for tf in tuple(timeframes or INTRADAY_MINUTES):
+        if tf in ("1d", "1w"):
+            continue
         lanes[tf] = resample_intraday(one, tf)
     return lanes
+
+
+def timeframe_minutes(timeframe: str) -> int:
+    """Parse a bounded intraday ``Nm`` or ``Nh`` duration."""
+    if timeframe in INTRADAY_MINUTES:
+        return INTRADAY_MINUTES[timeframe]
+    unit = timeframe[-1:] if timeframe else ""
+    raw = timeframe[:-1]
+    if unit not in {"m", "h"} or not raw.isdigit() or int(raw) <= 0:
+        raise ValueError(f"unsupported intraday timeframe: {timeframe!r}")
+    minutes = int(raw) * (60 if unit == "h" else 1)
+    if minutes > SESSION_MINUTES:
+        raise ValueError(f"intraday timeframe exceeds the {SESSION_MINUTES}-minute NSE session: {timeframe!r}")
+    return minutes
 
 
 def align(base_end_ns: np.ndarray, htf_avail_ns: np.ndarray, htf_values: np.ndarray) -> np.ndarray:
@@ -165,7 +188,7 @@ def bars_per_year(timeframe: str) -> float:
         return 248.0
     if timeframe == "1w":
         return 52.0
-    return 248.0 * SESSION_MINUTES / INTRADAY_MINUTES[timeframe]
+    return 248.0 * SESSION_MINUTES / timeframe_minutes(timeframe)
 
 
 def session_ids(sessions: Sequence[str]) -> np.ndarray:

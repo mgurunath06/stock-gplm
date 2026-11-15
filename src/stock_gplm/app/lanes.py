@@ -22,14 +22,14 @@ import pandas as pd
 
 from ..m54.backtest import Costs, LaneMarket
 from ..m54.indicators import FeatureDef, _atr, build_features
-from ..m54.timeframes import Bars, align, bars_per_year, build_all, session_ids
+from ..m54.timeframes import Bars, align, bars_per_year, build_all, session_ids, timeframe_minutes
 from ..m54.unified import _blocked, _intraday_extras, _quarantine
 from .db import sha
 from .ingest import SymbolData
 from .settings import REPO
 
 FEATURE_SPACE = REPO / "config" / "app" / "feature-space.json"
-INTRADAY = ("1m", "5m", "15m", "30m", "60m")
+INTRADAY = ("1m", "5m", "15m", "30m", "60m", "4h")
 
 
 def load_space(path: Path | None = None) -> dict[str, Any]:
@@ -119,7 +119,7 @@ def _features_for(bars: Bars, htf_bars: Mapping[str, Bars], space: Mapping[str, 
     df = f[["open", "high", "low", "close", "volume"]]
     arrays, defs, _ = build_features(df, space)
     if bars.intraday:
-        ea, ed = _intraday_extras(f, int(bars.timeframe.rstrip("m")))
+        ea, ed = _intraday_extras(f, timeframe_minutes(bars.timeframe))
         arrays.update(ea)
         defs.update(ed)
     _quarantine(arrays, blocked, int(q.get("quarantine_bars", 20)))

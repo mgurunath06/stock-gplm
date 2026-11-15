@@ -3,7 +3,7 @@
   "note": "Compact causal feature set for the GPLM application's ML models and rolling rule search. Edit freely; the feature-config hash recorded with every model and prediction changes with it.",
   "levels": {"RSI.value": [30, 50, 70], "ADX.adx": [20, 25], "STOCH.k": [20, 80], "MFI.value": [20, 80], "DONCHIAN.position": [10, 90]},
   "indicators": {
-    "EMA": {"params": {"period": [10, 20, 50, 200]}},
+    "EMA": {"params": {"period": [10, 20, 34, 50, 100, 200]}},
     "SMA": {"params": {"period": [20, 100]}},
     "MA_CROSS": {"params": {"fast": [10, 20], "slow": [50], "ma_type": ["EMA"]}},
     "MA_ALIGNMENT": {"params": {"short": [10], "medium": [20], "long": [50]}},
@@ -48,5 +48,5 @@
     }
   },
   "quality": {"max_abs_gap": 0.20, "max_abs_bar_return": 0.20, "intraday_max_abs_bar_return": 0.05, "quarantine_bars": 20},
-  "lane_htf": {"1d": ["1w"], "1w": [], "60m": ["1d"], "30m": ["1d"], "15m": ["60m", "1d"], "5m": ["60m", "1d"], "1m": ["15m", "1d"]}
+  "lane_htf": {"1d": ["1w"], "1w": [], "4h": ["1d"], "60m": ["4h", "1d"], "30m": ["4h", "1d"], "15m": ["60m", "4h", "1d"], "5m": ["60m", "4h", "1d"], "1m": ["15m", "60m", "1d"]}
 }
