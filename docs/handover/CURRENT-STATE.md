@@ -28,9 +28,8 @@ Updated 2026-11-15.
 5. **Research interfaces** (`mvp.research`): rolling windows, equal or exponential
    half-life weights, a comparison grid and the causal intraday join protocol.
    Nothing is fitted.
-6. **Tests.** The full suite gives 894 passed and 2 skipped (real-data fixtures
-   absent in this worktree) before the research module. After it was added, the
-   MVP file gives 18/18. Command:
+6. **Tests.** The full suite on `7ecdcb0` gives 896 passed and 2 skipped (real-data
+   fixtures are absent in this worktree). Command:
    `PYTHONPATH=src /home/mgurunath/projects/stock-gplm/.venv/bin/python -m pytest -q`
 
 ## Reproduce
