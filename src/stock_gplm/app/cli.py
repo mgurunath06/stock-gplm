@@ -145,6 +145,31 @@ def cmd_feature_coverage(args: argparse.Namespace) -> int:
     return _run(args, "feature-coverage", work)
 
 
+def cmd_stock_dna(args: argparse.Namespace) -> int:
+    """Discover point-in-time stock-specific feature behaviours."""
+    def work(app: Any) -> dict[str, Any]:
+        from .stock_dna import DEFAULT_TIMEFRAMES, run
+
+        syms = _symbols(args, app)
+        if len(syms) != 1:
+            raise ValueError("stock-dna accepts exactly one --stock")
+        tfs = list(DEFAULT_TIMEFRAMES) if args.timeframes == "all" else [x.strip() for x in args.timeframes.split(",")]
+        bad = sorted(set(tfs) - set(DEFAULT_TIMEFRAMES))
+        if bad:
+            raise ValueError(f"unsupported timeframes: {bad}")
+        horizons = [int(x) for x in args.horizons.split(",")]
+        name = args.name or f"{syms[0]}-{args.as_of or 'latest'}"
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "stock-dna" / name
+        result = run(app, syms[0], tfs, args.as_of, out, horizons)
+        if not args.json:
+            _p(f"Stock DNA {result['symbol']} as of {result['as_of']}: {result['patterns']} patterns; "
+               f"{result['validated']} validated, {result['experimental']} experimental")
+            _p(f"  report: {result['report']}")
+        return result
+
+    return _run(args, "stock-dna", work)
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Correctness-verification suite on synthetic fixtures; exit 0 pass, 1 correctness failure, 2 tracked gaps."""
     from datetime import datetime, timezone
@@ -896,6 +921,14 @@ def build_parser() -> argparse.ArgumentParser:
                                                 "primitives.json"))
     fc.add_argument("--start")
     fc.add_argument("--end")
+    sd = add("stock-dna", cmd_stock_dna,
+             "discover and quantify point-in-time stock-specific behaviours on cached lane features")
+    sd.add_argument("--stock", required=True)
+    sd.add_argument("--timeframes", default="all", help="all, or 1m,5m,15m,30m,60m,4h,1d,1w")
+    sd.add_argument("--horizons", default="1", help="forward bars, comma-separated")
+    sd.add_argument("--as-of", help="inclusive data cutoff YYYY-MM-DD (default latest accepted session)")
+    sd.add_argument("--name")
+    sd.add_argument("--out")
     mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
     stocks(mld)
     device(mld)

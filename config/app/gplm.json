@@ -191,6 +191,19 @@
     "classification_policy": ["REFERENCE", "DISCOVERED", "EXPERIMENTAL", "VALIDATED", "REJECTED"],
     "locked_test_policy": "score once only after validation promotion gates pass"
   },
+  "m58": {
+    "stock_dna": {
+      "discovery_fraction": 0.65,
+      "quantiles": [0.1, 0.2, 0.8, 0.9],
+      "max_features": 160,
+      "min_validation_observations": 20,
+      "fdr_q": 0.10
+    },
+    "prediction": {
+      "calibration_sessions": 80,
+      "minimum_calibration_outcomes": 30
+    }
+  },
   "ai": {
     "enabled": false,
     "allow_remote": false,
