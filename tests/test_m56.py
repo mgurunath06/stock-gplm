@@ -143,6 +143,7 @@ def test_window_data_bounds_rows_and_changes_fingerprint() -> None:
     assert list(w.daily["date"]) == ["2025-10-17", "2025-10-20"]
     assert list(w.minute["session"]) == ["2025-10-20"]
     assert w.fingerprint != d.fingerprint and w.summary["window"]["end"] == "2025-10-20"
+    assert w.summary["minute_last"] == "2025-10-20" and w.summary["minute_sessions_used"] == 1
 
 
 def _windowed_run(tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch, distort: bool,

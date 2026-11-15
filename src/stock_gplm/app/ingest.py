@@ -117,7 +117,10 @@ def window_data(data: SymbolData, start: str | None = None, end: str | None = No
     minute = data.minute[keep(data.minute["session"])].reset_index(drop=True) if len(data.minute) else data.minute
     summary = {**data.summary, "window": {"start": start, "end": end},
                "first": str(daily["date"].iloc[0]) if len(daily) else None,
-               "last": str(daily["date"].iloc[-1]) if len(daily) else None, "daily_rows": len(daily)}
+               "last": str(daily["date"].iloc[-1]) if len(daily) else None, "daily_rows": len(daily),
+               "minute_first": str(minute["session"].iloc[0]) if len(minute) else None,
+               "minute_last": str(minute["session"].iloc[-1]) if len(minute) else None,
+               "minute_sessions_used": int(minute["session"].nunique()) if len(minute) else 0}
     return SymbolData(data.symbol, daily, minute, sha({"fp": data.fingerprint, "start": start, "end": end})[:32],
                       summary, data.changed_files)
 
