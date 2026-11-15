@@ -43,6 +43,8 @@ Updated 2026-11-15. Read this first after a context reset.
 
    **Interpretation:** no finding survives FDR. The seven test-consistent patterns are plausible chance and
    not edge.
+   These runs were produced by code commit `180a682`. Any later change under `src/stock_gplm/m54/` changes the code
+   hash, so re-running creates new run ids. The old runs stay as evidence.
 5. **Resume**: re-running the batch reused all five runs in 0.7 s, with hashes verified.
 6. **Tests**: full suite **921 passed, 2 skipped**
    (`PYTHONPATH=src /home/mgurunath/projects/stock-gplm/.venv/bin/python -m pytest -q`). The 25 M5.4 tests in
