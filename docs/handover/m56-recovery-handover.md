@@ -124,3 +124,53 @@ log `H:\Guru\Learning\StockGLPM\reports\m56-acceptance-20261115\real-run2-dev.lo
 - M5.6 integration readiness: **CONDITIONAL GO**. Local commits only, on `feature/m55-gplm-app`, nothing pushed; the WSL repo lacks the 3 Windows commits.
 - Real-data strategy discovery: **DIAGNOSTIC ONLY**. The pipeline runs end to end inside the development window, but
   "VALIDATED" labels are unreliable until finding 1 is fixed.
+
+## M5.6.1 (2026-11-15): correctness fix and the `ml-discover` program
+
+Commits (local only): `8475daa` status fix + catalogue parser, `2522a93` owner addendum 301-340,
+`5413009` `gplm ml-discover` + tree fix.
+
+- **False VALIDATED fixed.** `m56_status.py` is the single gate computation used by `run_m56`, tree
+  discovery, `leaderboard` and `/api/m56/leaderboard`. M5.5 screen and M5.4 engine tiers are recorded as
+  DISCOVERED/REJECTED and can never derive VALIDATED. Stored rows are untouched. Derived views correct
+  RELIANCE `st-a9b9fff00bd2d143` and ICICIBANK `st-660cf4a6c2de9a38` to DISCOVERED (q_bh 1.0; 6 and 3 validation trades).
+- **Catalogue.** `m56_catalogue.py` reads markdown v1 (original 300, digests unchanged), markdown v2
+  (301+) and structured JSON v2 (supplements and `USR-` user copies). The 6x50 base and the floor of 300 are
+  configurable under `m56.catalogue`. Current file: 340 imported, CLEAN report. 301-340 have no executable
+  translation (descriptive, method specification or unregistered inputs), so they stay non-executable. Executable: 26.
+- **Tree bug.** scikit-learn 1.9 stores fractions in `tree_.value`, so every learned path was discarded
+  (the cause of the earlier "0 qualifying paths"). Fixed with `n_node_samples`.
+- Tests run: `tests/test_m56.py`, `tests/test_m561_status.py`, `tests/test_ml_discovery.py`: 21 passed. Full suite not rerun.
+
+### Run it (PowerShell, from the app root)
+
+```powershell
+# selected stocks, daily + weekly, both methods, GPU when available
+.\windows\gplm.cmd ml-discover --stocks "RELIANCE,HDFCBANK,ICICIBANK" --timeframes "1d,1w" --name my-run
+# whole local -EQ universe (ETF-like names excluded; survivorship-biased: current directories)
+.\windows\gplm.cmd ml-discover --universe all --timeframes "1d" --name universe-1d
+# resume after an interruption: rerun the identical command (completed lanes are skipped)
+```
+Outputs: `H:\Guru\Learning\StockGLPM\state\reports\ml-discovery\<name>\` contains `summary.md`, `results.csv`
+(every stock x strategy x timeframe, including rejected), `lanes.csv`, `results.sqlite`, `run-config.json`,
+`strategies\original\` (read-only) and `strategies\editable\`.
+Gate settings: `m56` section of `config/app/gplm.windows.json` (`min_oos_trades`, `fdr_q`, `max_drawdown`,
+`walk_forward_folds`, `tree_*`, `boosting_*`). Costs: `costs` section.
+
+Real example: `...\ml-discovery\real-smoke-3stocks\summary.md` covers 3 stocks, 1d and 1w, data to 2025-10-20, and ran in 4 s on an RTX 5070.
+It produced 24 strategies: 9 tree, all REJECTED, and 15 screen (4 DISCOVERED, 11 REJECTED). No strategy was VALIDATED.
+
+### Known limitations
+- Development data ends 2025-10-20. Minute files start 2026-01-01, so minute timeframes report `BLOCKED_MISSING_DATA`.
+- About 727 daily bars (2022-10-31 to 2025-10-20) per stock. 1w has 156 bars, below the 180 the tree needs, and the screen needs 200.
+- Tree models are not pickled. Provenance is the selected features, hyperparameters, seed and the learned
+  path, which is stored as an editable `strategy.v3` document.
+- Group/sector-level discovery is not implemented, because no group membership provenance exists. Point-in-time Nifty 500
+  membership is absent, so `--universe all` is survivorship-biased.
+- Whole-universe run: the program loads one symbol at a time. At about 1-2 s per stock-lane observed, roughly 2,700 symbols
+  x 1d needs about 1-2 h (estimate, not measured).
+
+### Decision
+Next real-data discovery run: **CONDITIONAL GO**. It is OK for daily development-period research runs on selected stocks or
+`--universe all` (survivorship-biased). Results are diagnostic until a strategy derives VALIDATED. Minute and intraday
+discovery is blocked by the holdout boundary.
