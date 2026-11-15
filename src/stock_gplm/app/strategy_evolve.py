@@ -30,7 +30,9 @@ import numpy as np
 from . import strategy_dsl as dsl
 from .strategy_engine import Exit, LaneInputs, baseline, simulate
 
-EVOLVE_CONTRACT = "stock-gplm.evolve.v1"
+# v2 (2026-11-15): like-for-like baseline (signal exits included), selection also requires a positive
+# absolute cost-adjusted mean on the discovery segment, and every evaluated genome is logged.
+EVOLVE_CONTRACT = "stock-gplm.evolve.v2"
 BUDGETS = {"quick": (40, 8, 5), "standard": (80, 15, 8), "deep": (160, 30, 12)}  # population, generations, keep
 
 # (template, parameter choices). {n} {m} are lookbacks; thresholds come from data quantiles.
@@ -148,6 +150,8 @@ class Evolver:
         self.fit_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.thresholds: dict[str, list[float]] = {}
         self.evaluated = 0
+        self.generation = 0
+        self.log: list[dict[str, Any]] = []  # every distinct genome evaluated, in order (audit trail)
         a, b = seg
         self.mid = a + (b - a) // 2
 
@@ -234,7 +238,7 @@ class Evolver:
             xm = self._mask(ex_d["when"])
         short = g.direction == "short"
         tr = simulate(li.market, m, self.seg, ex, li.buy, li.sell, short, xm)
-        base = baseline(li.market, self.seg, ex, li.buy, li.sell, short, self.base_cache) or 0.0
+        base = baseline(li.market, self.seg, ex, li.buy, li.sell, short, self.base_cache, xmask=xm) or 0.0
         n = len(tr)
         if n < self.min_trades:
             res = (-math.inf, {"trades": n})
@@ -250,6 +254,11 @@ class Evolver:
                            "excess_mean": float(x.mean()), "t_stat": tstat, "halves_positive": bool(stable)})
         self.fit_cache[key] = res
         g.fitness, g.stats = res
+        self.log.append({"seq": self.evaluated, "generation": self.generation, "direction": g.direction,
+                         "entry": g.entry(), "exit": g.exit(), "atoms": len(g.atoms),
+                         "fitness": round(g.fitness, 6) if math.isfinite(g.fitness) else None,
+                         "baseline_mean_net": round(base, 8), **{k: (round(v, 8) if isinstance(v, float) else v)
+                                                                 for k, v in g.stats.items()}})
         return g.fitness
 
     # ---- variation
@@ -293,6 +302,7 @@ class Evolver:
             self.fitness(g)
         history = []
         for gen in range(self.gens):
+            self.generation = gen + 1
             pop.sort(key=lambda g: g.fitness, reverse=True)
             history.append(round(pop[0].fitness, 3) if math.isfinite(pop[0].fitness) else None)
             elite = pop[: max(2, self.pop_n // 8)]
@@ -313,6 +323,8 @@ class Evolver:
         for g in pop:
             if not math.isfinite(g.fitness) or g.fitness <= 0 or not g.stats.get("halves_positive"):
                 continue
+            if (g.stats.get("mean_net") or 0.0) <= 0:  # beating the baseline while losing money is no discovery
+                continue
             m = self.mask(g)[a:b]
             if any(_jaccard(m, f) > 0.7 for f in fired) or any(g.key() == c.key() for c in chosen):
                 continue
@@ -322,7 +334,7 @@ class Evolver:
                 break
         return {"contract": EVOLVE_CONTRACT, "population": self.pop_n, "generations": self.gens,
                 "evaluated": self.evaluated, "best_by_generation": history, "selected": chosen,
-                "atoms_cached": len(self.mask_cache)}
+                "atoms_cached": len(self.mask_cache), "log": self.log}
 
 
 def _jaccard(a: np.ndarray, b: np.ndarray) -> float:

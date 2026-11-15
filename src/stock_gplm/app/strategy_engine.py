@@ -22,6 +22,7 @@ futures-like short with the same cost model).
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import time
 from dataclasses import dataclass
@@ -33,7 +34,9 @@ from ..m54.backtest import ExitPolicy, LaneMarket, fold_metrics, metrics
 from . import strategy_dsl as dsl
 from .strategy_library import StrategyDef
 
-ENGINE_CONTRACT = "stock-gplm.strategy-engine.v1"
+# v2 (2026-11-15): the unconditional baseline applies the strategy's signal exit (exit.when) too, so the
+# excess-return test compares like with like; trade ledgers are returned for the audit trail.
+ENGINE_CONTRACT = "stock-gplm.strategy-engine.v2"
 
 
 @dataclass(frozen=True)
@@ -165,16 +168,28 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
     return trades
 
 
+def _mask_key(x: np.ndarray | None) -> str | None:
+    if x is None:
+        return None
+    return hashlib.sha256(np.packbits(np.asarray(x, bool)).tobytes()).hexdigest()[:20]
+
+
 def baseline(m: LaneMarket, seg: tuple[int, int], p: Exit, buy: float, sell: float, short: bool,
-             cache: dict[Any, Any], max_starts: int = 1500) -> float | None:
-    key = (seg, p.key(), short)
+             cache: dict[Any, Any], max_starts: int = 1500, xmask: np.ndarray | None = None) -> float | None:
+    """Mean net return of the *same* exit policy entered on every eligible bar of the segment.
+
+    The exit policy includes the signal exit ``xmask`` (``exit.when``): a rule that leaves early on a
+    signal is compared with a baseline that leaves on the same signal, never with a baseline held to
+    the time/stop exit (that mismatch inflated or deflated excess returns before engine v2).
+    """
+    key = (seg, p.key(), short, _mask_key(xmask))
     if key in cache:
         return cache[key]
     a, b = seg
     stride = max(1, (b - a) // max_starts)
     fired = np.arange(a, b, stride)
     fired = fired[~m.no_signal[fired]]
-    tr = simulate(m, np.ones(len(m), bool), seg, p, buy, sell, short, None, independent=False, fired=fired)
+    tr = simulate(m, np.ones(len(m), bool), seg, p, buy, sell, short, xmask, independent=False, fired=fired)
     cache[key] = float(np.mean([x["net_return"] for x in tr])) if tr else None
     return cache[key]
 
@@ -185,6 +200,17 @@ def _score(trades: Sequence[Mapping[str, Any]], base: float | None, min_trades: 
     x = np.array([t["net_return"] for t in trades]) - (base or 0.0)
     sd = float(x.std(ddof=1)) if x.size > 1 else 0.0
     return float(x.mean() / (sd / math.sqrt(x.size))) if sd > 0 else -math.inf
+
+
+TRADE_FIELDS = ("t", "exit_index", "entry_price", "exit_price", "exit_reason", "gross_return", "net_return",
+                "bars_held", "mfe", "mae")
+
+
+def _compact(t: Mapping[str, Any]) -> list[Any]:
+    """One trade as a short list in :data:`TRADE_FIELDS` order (cached as JSON, written to the audit ledger)."""
+    return [int(t["t"]), int(t["exit_index"]), round(float(t["entry_price"]), 6), round(float(t["exit_price"]), 6),
+            t["exit_reason"], round(float(t["gross_return"]), 8), round(float(t["net_return"]), 8),
+            int(t["bars_held"]), round(float(t["mfe"]), 8), round(float(t["mae"]), 8)]
 
 
 def regime_breakdown(trades: Sequence[Mapping[str, Any]], regimes: Mapping[str, np.ndarray]) -> dict[str, Any]:
@@ -228,6 +254,7 @@ class LaneInputs:
     timeframe: str
     folds: int
     min_trades_opt: int = 8
+    audit_discovery: bool = False  # also keep discovery-segment trades of the chosen configuration
 
 
 def evaluate_strategy(s: StrategyDef, li: LaneInputs, base_cache: dict[Any, Any],
@@ -268,7 +295,7 @@ def evaluate_strategy(s: StrategyDef, li: LaneInputs, base_cache: dict[Any, Any]
             best = (0.0, params, -1, None)
             break
         tr = simulate(m, mask, segs["discovery"], ex, li.buy, li.sell, short, xm)
-        bmean = baseline(m, segs["discovery"], ex, li.buy, li.sell, short, base_cache)
+        bmean = baseline(m, segs["discovery"], ex, li.buy, li.sell, short, base_cache, xmask=xm)
         sc = _score(tr, bmean, li.min_trades_opt)
         is_default = params == s.defaults()
         if best is None or sc > best[0] or (sc == best[0] and is_default):
@@ -281,9 +308,12 @@ def evaluate_strategy(s: StrategyDef, li: LaneInputs, base_cache: dict[Any, Any]
         best = (0.0, params, len(trd), float(np.mean([x["net_return"] for x in trd])) if trd else None)
     vseg = segs["validation"]
     tr = simulate(m, mask, vseg, ex, li.buy, li.sell, short, xm)
-    bmean = baseline(m, vseg, ex, li.buy, li.sell, short, base_cache)
+    bmean = baseline(m, vseg, ex, li.buy, li.sell, short, base_cache, xmask=xm)
     met = metrics(tr, m, vseg, bmean)
     met["folds"] = fold_metrics(tr, vseg, li.folds, bmean)
+    ledger = {"validation": [_compact(x) for x in tr]}
+    if li.audit_discovery:
+        ledger["discovery"] = [_compact(x) for x in simulate(m, mask, segs["discovery"], ex, li.buy, li.sell, short, xm)]
     if len(tr) > 1:
         met["excess_sd"] = float(np.std(np.array([x["net_return"] for x in tr]) - (bmean or 0.0), ddof=1))
     signals = int((mask & ~m.no_signal).sum())
@@ -291,7 +321,7 @@ def evaluate_strategy(s: StrategyDef, li: LaneInputs, base_cache: dict[Any, Any]
                discovery_mean_net=best[3], met=met, segs=segs, exit=ex, signals=signals,
                regimes=regime_breakdown(tr, regimes) if regimes else {},
                exit_text=ex.text(s.doc["exit"].get("when"), short), seconds=round(time.perf_counter() - t0, 3),
-               _mask=mask, _xmask=xm)
+               baseline_mean_net=bmean, trades=ledger, _mask=mask, _xmask=xm)
     return res
 
 
@@ -300,9 +330,11 @@ def final_read(res: Mapping[str, Any], li: LaneInputs, base_cache: dict[Any, Any
     seg = res["segs"]["test"]
     short = res["direction"] == "short"
     tr = simulate(m, res["_mask"], seg, res["exit"], li.buy, li.sell, short, res["_xmask"])
-    bmean = baseline(m, seg, res["exit"], li.buy, li.sell, short, base_cache)
-    return metrics(tr, m, seg, bmean)
+    bmean = baseline(m, seg, res["exit"], li.buy, li.sell, short, base_cache, xmask=res["_xmask"])
+    met = metrics(tr, m, seg, bmean)
+    met["_trades"] = tr
+    return met
 
 
-__all__ = ["ENGINE_CONTRACT", "Exit", "LaneInputs", "baseline", "evaluate_strategy", "final_read", "lane_regimes",
+__all__ = ["ENGINE_CONTRACT", "TRADE_FIELDS", "Exit", "LaneInputs", "baseline", "evaluate_strategy", "final_read", "lane_regimes",
            "regime_breakdown", "segments", "simulate"]

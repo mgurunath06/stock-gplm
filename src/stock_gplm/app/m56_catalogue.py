@@ -248,8 +248,22 @@ def timeframes_from_dependencies(deps: str) -> tuple[str, ...]:
     return TIMEFRAMES
 
 
-def _direction(text: str) -> str:
-    return "short" if any(x in text.lower() for x in (" short", "bearish", "death cross")) else "long"
+# Trade direction from explicit markers only. v1 matched any " short" substring, so "Short-term momentum",
+# "short EMAs" or "short covering" became short trades (fixed 2026-11-15, found by ``gplm verify``).
+_SHORT_MARKERS = re.compile(  # explicit trade-direction markers, anywhere in the entry
+    r"\(\s*short\b|\bshort\s*\)|\bshort\s*/|\bvpa short\b|\bshort rule\b|\bshort sell|\breduce exposure\b", re.I)
+_SHORT_NAMES = re.compile(  # setups that are short by definition; matched in the strategy name only
+    r"\bbearish\b|\bdeath cross\b|\bbull trap\b|\bupthrust\b|\bevening star\b|\bblack crows\b|\bdark cloud\b"
+    r"|\bshooting star\b|\boverbought rejection\b|\bgap exhaustion\b|\bexhaustion gap fade\b|\bexhaustion cap\b",
+    re.I)
+_NOT_DIRECTION = re.compile(r"\bshort[-\s]?(term|emas?|period|covering|squeeze|sellers?|interest|buildup|option)\b",
+                            re.I)
+
+
+def _direction(text: str, name: str = "") -> str:
+    """``short`` only for explicit markers (anywhere) or a bearish-by-definition setup name; else ``long``."""
+    t = _NOT_DIRECTION.sub(" ", text)
+    return "short" if _SHORT_MARKERS.search(t) or _SHORT_NAMES.search(name) else "long"
 
 
 def _strip_code(text: str) -> str:
@@ -323,7 +337,7 @@ def _v2_reference(rid: str, ordinal: int, category_no: int, category: str, name:
         tfs = timeframes_from_dependencies(deps)
     else:
         tfs = timeframes_v1(combined)
-    direction = explicit_direction or fields.get("direction", "").strip().lower() or _direction(combined)
+    direction = explicit_direction or fields.get("direction", "").strip().lower() or _direction(combined, name)
     if definition is not None:
         status, reason = "STRUCTURED_DEFINITION", "reviewed strategy.v3 definition supplied with the entry"
     elif "RESEARCH_METHOD_INPUTS" in req:
@@ -403,7 +417,7 @@ def _parse_markdown(path: Path, policy: CataloguePolicy, b: _Builder) -> None:
                 continue
             combined = " ".join((name, explanation, rule, trailing or ""))
             b.accept(Reference(ident[0], ident[1], category_no, category, name, explanation, rule, trailing or "",
-                               _direction(combined), timeframes_v1(combined), requirements(combined),
+                               _direction(combined, name), timeframes_v1(combined), requirements(combined),
                                "PENDING_COMPILATION", "safe declarative translation not yet selected", {}, 1),
                      lineno, s)
             continue

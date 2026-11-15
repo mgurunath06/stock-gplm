@@ -26,6 +26,7 @@ Lanes run in a process pool (``--workers``); the main process ingests and commit
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -48,7 +49,8 @@ from .m56 import _bundle_sha
 from .m56_catalogue import CataloguePolicy, load_catalogue
 from .m56_status import GatePolicy, derive, validation_evidence
 from . import strategy_dsl as dsl
-from .strategy_engine import ENGINE_CONTRACT, LaneInputs, evaluate_strategy, final_read, lane_regimes
+from .strategy_engine import (ENGINE_CONTRACT, TRADE_FIELDS, LaneInputs, _compact, evaluate_strategy, final_read,
+                              lane_regimes)
 from .strategy_library import StrategyDef, StrategyLibrary, normalize, select, validate
 
 CONTRACT = "stock-gplm.research-matrix.v2"
@@ -304,11 +306,25 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
     finals: list[tuple[str, str, str, str]] = []
     discovered: list[dict[str, Any]] = []
     tested: list[tuple[dict[str, Any], StrategyDef, dict[str, Any]]] = []
+    audit_cfg = job.get("audit") or {}
+    want_trades = audit_cfg.get("trades", "validation_final") != "none"
+    ledger: list[list[Any]] = []
+    ml_log: list[dict[str, Any]] = []
+
+    def keep_trades(s: StrategyDef, res: Mapping[str, Any], segment: str, trades: Sequence[Any]) -> None:
+        if not want_trades or li is None:
+            return
+        m = li.market
+        for t in trades:
+            tt = list(t) if isinstance(t, (list, tuple)) else _compact(t)
+            ledger.append([s.id, s.sha256[:16], s.direction, json.dumps(res.get("params") or {}, sort_keys=True),
+                           segment, m.label(tt[0]), m.label(tt[0] + 1), m.label(tt[1]), *tt[2:]])
     li = None
     cached_hits = 0
     if lane is not None:
         ctx = _ctx_for(bars[tf], tf, lane, bars, job["refs"], job.get("benchmark"))
-        li = LaneInputs(ctx, lane.market, lane.costs.buy, lane.costs.sell, lane.intraday, tf, gates.walk_forward_folds)
+        li = LaneInputs(ctx, lane.market, lane.costs.buy, lane.costs.sell, lane.intraday, tf, gates.walk_forward_folds,
+                        audit_discovery=(job.get("audit") or {}).get("trades") == "all")
         regimes = lane_regimes(ctx, lane.market, int(len(lane.market) * 0.6))
         base_cache: dict[Any, Any] = {}
     for s in strategies:
@@ -338,6 +354,8 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
             replay = _replay(s, data.symbol, tf, lane.data_fingerprint)
             row["replay"] = int(replay)
             tested.append((row, s, res))
+            for seg_name, trs in (res.get("trades") or {}).items():
+                keep_trades(s, res, seg_name, trs)
         rows.append(row)
     ml_status: list[str] = []
     if lane is not None and "evolve" in job["methods"]:
@@ -348,6 +366,8 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
             known = {s.fingerprint() for s in strategies}
             ev = Evolver(li, segs, job["seed"], job["budget"], allow_short=True)
             out = ev.run()
+            if audit_cfg.get("ml_log", True):
+                ml_log.extend({"method": "evolve", **x} for x in out.get("log", []))
             prov = {"lane": {"symbol": data.symbol, "timeframe": tf, "data_fingerprint": lane.data_fingerprint},
                     "seed": job["seed"], "budget": job["budget"], "population": out["population"],
                     "generations": out["generations"], "evaluated": out["evaluated"],
@@ -364,6 +384,8 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
                 row.update(source="ML", method="evolve", device="cpu (NumPy GP over the DSL)", replay=0)
                 if res.get("status") == "TESTED":
                     tested.append((row, sdef, res))
+                    for seg_name, trs in (res.get("trades") or {}).items():
+                        keep_trades(sdef, res, seg_name, trs)
                 rows.append(row)
                 discovered.append({"doc": doc, "row_index": len(rows) - 1})
                 n_new += 1
@@ -386,6 +408,7 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
                 full = res if "_mask" in res else evaluate_strategy(s, li, {}, None)
                 if full.get("status") == "TESTED" and full.get("params") == params:
                     fm = final_read(full, li, {})
+                    keep_trades(s, full, "final", fm.pop("_trades", []))
                     fm["validation_evidence"] = validation_evidence(met)
                     st = derive({"evidence_stage": "TEST_ONCE", "classification": "", "metrics": fm}, gates)
                     row.update(final_trades=fm.get("effective_n"), final_mean_net=fm.get("mean_net"),
@@ -422,6 +445,7 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
                 "ml_strategies": len(discovered), "ml_status": ",".join(ml_status), "cached_results": cached_hits,
                 "seconds": round(time.monotonic() - t0, 2)}
     return {"rows": rows, "lane": lane_row, "finals": finals, "cache_rows": cache_rows, "discovered": discovered,
+            "audit": {"trades": ledger, "ml_log": ml_log},
             "lane_obj": lane if job.get("return_lane") else None, "key": job["key"]}
 
 
@@ -517,6 +541,9 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
     if not include_disabled:
         pool = {k: v for k, v in pool.items() if v.enabled}
     benchmark = rcfg.get("benchmark_symbol")  # None: no index series registered; bench() reports missing data
+    audit_cfg = {"trades": "validation_final", "ml_log": True, **(rcfg.get("audit") or {})}
+    if audit_cfg["trades"] not in ("none", "validation_final", "all"):
+        raise ValueError("research.audit.trades must be none, validation_final or all")
     seed = int(app.s.section("models").get("seed", 55)) + 1
     store = Matrix(out)
     store.register_catalogue(refs)
@@ -531,7 +558,8 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
                         "selected": len(pool), "patterns": list(strategy_patterns or []),
                         "invalid": loaded.invalid, "new_or_changed": loaded.changes[:200]},
             "gate_policy": gates.to_dict(), "costs": app.s.section("costs"), "config_sha256": app.s.sha256,
-            "device": backend.label, "workers": workers, "benchmark_symbol": benchmark}
+            "device": backend.label, "workers": workers, "benchmark_symbol": benchmark,
+            "audit": {**audit_cfg, "dir": str(out / "audit"), "contract": AUDIT_CONTRACT}}
     (out / "run-config.json").write_text(json.dumps(meta, indent=2, sort_keys=True, default=str) + "\n",
                                          encoding="utf-8")
     (out / "catalogue-report.json").write_text(json.dumps(parsed.report(), indent=2, default=str) + "\n",
@@ -567,6 +595,7 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
                 r["reasons"] = (r.get("reasons") or "") + f"; equivalent to existing library strategy {sid}"
         if ml_inline and job["data"] is not None:
             _ml_inline(app, backend, job, res, rows, finals, gates, cfg, seed, store, out, lib, ml_inline, budget)
+        write_audit(out, job["key"], res["lane"], res.get("audit") or {}, job.get("audit") or {})
         store.commit(job["key"], res["lane"], rows, finals, res["cache_rows"], app.run_id or "")
         lanes_status[res["lane"]["status"]] = lanes_status.get(res["lane"]["status"], 0) + 1
         app.progress.update(task="research", stock=job["data"].symbol, timeframe=job["timeframe"])
@@ -615,7 +644,8 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
                                        "sha256": s.sha256, "enabled": s.enabled} for s in appl + scope_rows],
                        "ref_text": ref_text, "refs": ref_data, "benchmark": benchmark, "cache": cache,
                        "config_sha": app.s.sha256, "consumed": consumed, "methods": list(methods), "seed": seed,
-                       "budget": budget, "key": key, "return_lane": bool(ml_inline) and ex is None}
+                       "budget": budget, "key": key, "return_lane": bool(ml_inline) and ex is None,
+                       "audit": audit_cfg}
                 if ex is None:
                     try:
                         finish(compute_lane(job), job)
@@ -668,7 +698,9 @@ def _ml_inline(app: App, backend: Backend, job: Mapping[str, Any], res: Mapping[
             if read:
                 finals.append(("ml-tree-lane", data.symbol, tf, lane.data_fingerprint))
             for r in mrows:
-                doc = _tree_to_dsl(r, data.symbol, tf, lane.data_fingerprint, app.run_id or "")
+                doc = _tree_to_dsl(r, data.symbol, tf, lane.data_fingerprint, app.run_id or "", out)
+                if doc is None:
+                    r["reasons"] = (r.get("reasons") or "") + "; tree definition not found: not saved to library"
                 if doc is not None:
                     try:
                         sid, _ = lib.save_discovered(doc)
@@ -678,6 +710,13 @@ def _ml_inline(app: App, backend: Backend, job: Mapping[str, Any], res: Mapping[
         else:
             info, mrows, _ = _screen_lane(app, backend, data, tf, bars, budget, gates, out, dict(base))
         status.append(f"{method}:{info['status']}")
+        if (job.get("audit") or {}).get("ml_log", True):
+            res.setdefault("audit", {}).setdefault("ml_log", []).extend(
+                {"method": method, "lane_status": info.get("status"), "strategy_id": r.get("strategy_id"),
+                 "rule": r.get("entry_rule") or r.get("rule"), "library_id": r.get("library_id"),
+                 "classification": r.get("classification"), "val_trades": r.get("val_trades"),
+                 "val_mean_net": r.get("val_mean_net"), "val_p_value": r.get("val_p_value"),
+                 "val_q_value": r.get("val_q_value"), "definition_file": r.get("definition_file")} for r in mrows)
         for r in mrows:
             r.update(source="ML", origin="ML_DISCOVERED", status="TESTED", reference_id="", strategy_version=1,
                      block_reason="", category="ML: " + method)
@@ -686,9 +725,18 @@ def _ml_inline(app: App, backend: Backend, job: Mapping[str, Any], res: Mapping[
     res["lane"]["ml_status"] = ",".join(x for x in status if x)
 
 
-def _tree_to_dsl(row: Mapping[str, Any], symbol: str, tf: str, fp: str, run_id: str) -> dict[str, Any] | None:
-    path = row.get("definition_file")
-    if not path or not Path(path).is_file():
+def _tree_to_dsl(row: Mapping[str, Any], symbol: str, tf: str, fp: str, run_id: str,
+                 base: Path | None = None) -> dict[str, Any] | None:
+    """Translate a tree-path definition into a DSL strategy. ``definition_file`` is stored relative to the run
+    directory (``base``); before 2026-11-15 it was resolved against the working directory, so tree rules were
+    never found and never saved to the library."""
+    raw = row.get("definition_file")
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute() and base is not None:
+        path = Path(base) / path
+    if not path.is_file():
         return None
     src = json.loads(Path(path).read_text(encoding="utf-8"))
     conds = (src.get("entry") or {}).get("conditions") or []
@@ -717,10 +765,70 @@ def _tree_to_dsl(row: Mapping[str, Any], symbol: str, tf: str, fp: str, run_id: 
                      "target_atr": ex.get("target_atr"), "trail_atr": ex.get("trail_atr")},
             "applicability": {"symbols": [bare], "timeframes": [tf]}, "requires": ["OHLCV", "LANE_FEATURES"],
             "provenance": {"method": "tree", "lane": {"symbol": symbol, "timeframe": tf, "data_fingerprint": fp},
-                           "run_id": run_id, "source_definition": path},
+                           "run_id": run_id, "source_definition": str(path)},
             "evidence": {k: row.get(k) for k in ("classification", "validation_status", "val_trades", "val_mean_net",
                                                  "val_q_value", "final_trades", "final_mean_net")},
             "enabled": row.get("classification") != "REJECTED"}
+
+
+# --------------------------------------------------------------------------- audit trail
+
+AUDIT_CONTRACT = "stock-gplm.research-audit.v1"
+TRADE_COLUMNS = ("strategy_id", "strategy_sha16", "direction", "params", "segment", "signal_bar", "entry_bar",
+                 "exit_bar") + TRADE_FIELDS[2:]
+
+
+def _atomic_gz(path: Path, text: str) -> str:
+    import gzip
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    data = text.encode("utf-8")
+    with gzip.GzipFile(tmp, "wb", compresslevel=6, mtime=0) as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_audit(out: Path, lane_key: str, lane: Mapping[str, Any], audit: Mapping[str, Any],
+                cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Per-lane audit files, written atomically *before* the lane is committed (checkpoint-safe).
+
+    ``audit/trades/<SYMBOL>/<tf>.csv.gz``  every validation and final-segment trade (plus discovery trades of
+    the chosen configuration with ``research.audit.trades = "all"``) of every tested strategy: bar dates,
+    prices, exit reason, gross/net return, MFE/MAE.
+    ``audit/ml/<SYMBOL>/<tf>.jsonl.gz``   every ML candidate evaluated: GP genomes (entry, exit, fitness,
+    trades, mean/excess net, baseline) and tree/screen candidates with their validation evidence.
+    ``audit/index.jsonl``                 one line per committed lane: files, row counts, SHA-256 of contents.
+    A rerun of an interrupted lane overwrites its files; a completed (reused) lane is never rewritten.
+    """
+    import csv
+    import io
+
+    sym = str(lane.get("symbol") or "UNKNOWN")
+    tf = str(lane.get("timeframe") or "")
+    base = out / "audit"
+    files: dict[str, Any] = {}
+    trades = audit.get("trades") or []
+    if cfg.get("trades", "validation_final") != "none" and trades:
+        buf = io.StringIO()
+        w = csv.writer(buf, lineterminator="\n")
+        w.writerow(TRADE_COLUMNS)
+        w.writerows(trades)
+        rel = f"trades/{sym}/{tf}.csv.gz"
+        files[rel] = {"rows": len(trades), "sha256": _atomic_gz(base / rel, buf.getvalue())}
+    log = audit.get("ml_log") or []
+    if cfg.get("ml_log", True) and log:
+        rel = f"ml/{sym}/{tf}.jsonl.gz"
+        text = "".join(json.dumps(_jsonable(x), default=str, sort_keys=True) + "\n" for x in log)
+        files[rel] = {"rows": len(log), "sha256": _atomic_gz(base / rel, text)}
+    if files:
+        base.mkdir(parents=True, exist_ok=True)
+        with (base / "index.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"contract": AUDIT_CONTRACT, "lane_key": lane_key, "symbol": sym, "timeframe": tf,
+                                 "data_fingerprint": lane.get("data_fingerprint"), "run_id": lane.get("run_id"),
+                                 "files": files, "utc": utc_now()}, sort_keys=True) + "\n")
+    return files
 
 
 # --------------------------------------------------------------------------- reporting

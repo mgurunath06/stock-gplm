@@ -31,7 +31,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-DSL_CONTRACT = "stock-gplm.strategy-dsl.v1"
+DSL_CONTRACT = "stock-gplm.strategy-dsl.v2"  # v2: TA-Lib/Wilder SMA-seeded smoothing
 
 
 class DSLError(ValueError):
@@ -398,24 +398,37 @@ def sma(x: np.ndarray, n: int) -> np.ndarray:
     return _S(x).rolling(n, min_periods=n).mean().to_numpy()
 
 
-def ema(x: np.ndarray, n: int) -> np.ndarray:
-    s = _S(x)
-    first = s.first_valid_index()
+# Initialisation convention (``stock-gplm.strategy-dsl.v2``, 2026-11-15): TA-Lib / Wilder.
+# Exponential smoothers (EMA alpha = 2/(n+1); Wilder RMA alpha = 1/n) are seeded with the simple average of
+# the first n defined inputs and report from that bar on. True range is undefined on the first bar (no
+# previous close), so ATR(n) first reports at bar n. This matches TA-Lib's SMA, EMA, RSI and ATR and the
+# M5.4 feature path (``m54.indicators._seeded_recursive``). Known residual differences from TA-Lib:
+# its MACD aligns the fast EMA's seed with the slow one, and its ADX seeds Wilder sums with n-1 values;
+# both differ only during warm-up. v1 seeded at the first bar (pandas ``ewm(adjust=False)``).
+def _seeded(x: np.ndarray, n: int, alpha: float) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
     out = np.full(len(x), np.nan)
-    if first is None:
+    fin = np.nonzero(np.isfinite(x))[0]
+    if fin.size < n:
         return out
-    out[first:] = s.iloc[first:].ewm(span=n, adjust=False, min_periods=n).mean().to_numpy()
+    first = int(fin[0])
+    seed_end = first + n - 1
+    if seed_end >= len(x) or not np.isfinite(x[first:seed_end + 1]).all():
+        return out
+    tail = x[seed_end:].copy()
+    tail[0] = x[first:seed_end + 1].mean()
+    vals = pd.Series(tail).ewm(alpha=alpha, adjust=False).mean().to_numpy()
+    vals[np.isnan(tail)] = np.nan  # a missing input stays missing; it is never filled
+    out[seed_end:] = vals
     return out
+
+
+def ema(x: np.ndarray, n: int) -> np.ndarray:
+    return _seeded(x, n, 2.0 / (n + 1))
 
 
 def rma(x: np.ndarray, n: int) -> np.ndarray:
-    s = _S(x)
-    first = s.first_valid_index()
-    out = np.full(len(x), np.nan)
-    if first is None:
-        return out
-    out[first:] = s.iloc[first:].ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean().to_numpy()
-    return out
+    return _seeded(x, n, 1.0 / n)
 
 
 def _windows(x: np.ndarray, n: int) -> np.ndarray:
@@ -456,7 +469,8 @@ def _div(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def true_range(h: np.ndarray, lo: np.ndarray, c: np.ndarray) -> np.ndarray:
     pc = shift(c, 1)
     tr = np.fmax(h - lo, np.fmax(np.abs(h - pc), np.abs(lo - pc)))
-    tr[0] = h[0] - lo[0]
+    if len(tr):
+        tr[0] = np.nan  # TA-Lib: no true range without a previous close
     return tr
 
 
@@ -897,14 +911,18 @@ def _cci(c: Context, n: Any) -> np.ndarray:
 
 @fn("mfi", 1, 1, "money flow index mfi(n)")
 def _mfi(c: Context, n: Any) -> np.ndarray:
+    """TA-Lib MFI: n money flows, each needing the previous typical price (first value at bar n).
+    A window with no money flow at all (zero volume or a flat typical price) is undefined (NaN), not 100."""
+    n = _n(n)
     tp = (c.high + c.low + c.close) / 3
     mf = tp * c.volume
     d = tp - shift(tp, 1)
-    pos = rolling_sum(np.where(d > 0, mf, 0.0), _n(n))
-    neg = rolling_sum(np.where(d < 0, mf, 0.0), _n(n))
+    pos = rolling_sum(np.where(np.isnan(d), np.nan, np.where(d > 0, mf, 0.0)), n)
+    neg = rolling_sum(np.where(np.isnan(d), np.nan, np.where(d < 0, mf, 0.0)), n)
     with np.errstate(divide="ignore", invalid="ignore"):
         out = np.where(neg == 0, 100.0, 100 - 100 / (1 + pos / neg))
-    out[np.isnan(pos)] = np.nan
+    out[(pos + neg) == 0] = np.nan
+    out[np.isnan(pos) | np.isnan(neg)] = np.nan
     return out
 
 
