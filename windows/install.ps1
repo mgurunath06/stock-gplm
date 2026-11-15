@@ -64,7 +64,8 @@ if ($DataRoot) {
   $cfg.data.real_raw_tree = $DataRoot
   $cfg.discovery.engine_config = (Join-Path $Repo "config\m54\unified-default.json")
   $out = Join-Path $Repo "config\app\gplm.windows.json"
-  $cfg | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 $out
+  # UTF-8 without BOM (Windows PowerShell 5.1 adds a BOM with -Encoding UTF8; GPLM tolerates both)
+  [System.IO.File]::WriteAllText($out, ($cfg | ConvertTo-Json -Depth 20), (New-Object System.Text.UTF8Encoding($false)))
   Write-Host "Wrote $out (gplm.cmd uses it automatically)"
 }
 

@@ -44,7 +44,7 @@ def _symbols(args: argparse.Namespace, app: Any) -> list[str]:
         if uni in ("all", "all-eligible", "all-local"):
             syms = list_symbols(app.s)["symbols"]
         else:
-            doc = json.loads(Path(uni).read_text(encoding="utf-8"))
+            doc = json.loads(Path(uni).read_text(encoding="utf-8-sig"))
             syms = [normalize_symbol(x) for x in (doc["symbols"] if isinstance(doc, dict) else doc)]
         if getattr(args, "max_symbols", None):
             syms = syms[: args.max_symbols]
@@ -287,7 +287,7 @@ def cmd_strategies(args: argparse.Namespace) -> int:
     if args.action in ("list", "show", "export", "history", "validate"):
         if args.action == "validate":
             try:
-                d = validate(json.loads(Path(args.target).read_text(encoding="utf-8")))
+                d = validate(json.loads(Path(args.target).read_text(encoding="utf-8-sig")))
                 _p(json.dumps(d, indent=2))
                 return 0
             except (StrategyError, OSError, ValueError) as exc:
@@ -350,13 +350,13 @@ def cmd_strategies(args: argparse.Namespace) -> int:
                     src = src.get(p, {})
                 target[parts[-1]] = value
             if args.file:
-                changes.update(json.loads(Path(args.file).read_text(encoding="utf-8")))
+                changes.update(json.loads(Path(args.file).read_text(encoding="utf-8-sig")))
             res = lib.copy_for_edit(sid, changes, args.name)
             _p(f"created {res['strategy_id']} v{res['version']} (inactive; activate with `gplm strategies activate "
                f"{res['strategy_id']}`): {res['path']}")
             return {"status": "created", **res}
         if args.action == "import":
-            doc = json.loads(Path(args.target).read_text(encoding="utf-8"))
+            doc = json.loads(Path(args.target).read_text(encoding="utf-8-sig"))
             docs = doc.get("strategies", [doc]) if isinstance(doc, dict) else doc
             out = []
             for d in docs:

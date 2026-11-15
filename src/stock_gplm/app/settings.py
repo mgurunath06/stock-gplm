@@ -88,7 +88,7 @@ class Settings:
 def load(path: str | Path | None = None, home: str | Path | None = None,
          overrides: Mapping[str, Any] | None = None) -> Settings:
     cfg_path = Path(path or os.environ.get("GPLM_CONFIG") or DEFAULT_CONFIG).resolve()
-    raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+    raw = json.loads(cfg_path.read_text(encoding="utf-8-sig"))  # tolerate a BOM (Windows PowerShell 5.1 writes one)
     if raw.get("contract") != CONTRACT:
         raise ValueError(f"{cfg_path} is not a {CONTRACT} document")
     for key, value in (overrides or {}).items():
@@ -99,9 +99,10 @@ def load(path: str | Path | None = None, home: str | Path | None = None,
             raw[section] = value
     base = cfg_path.parent
     d = raw["data"]
-    home_value = home or os.environ.get("GPLM_HOME") or raw.get("home", "../../var/gplm")
+    explicit = home or os.environ.get("GPLM_HOME")  # command line / environment: relative to the working directory
+    home_path = Path(os.path.expanduser(str(explicit))).resolve() if explicit else _resolve(base, raw.get("home", "../../var/gplm"))
     return Settings(
-        path=cfg_path, raw=raw, home=_resolve(base, str(home_value)),
+        path=cfg_path, raw=raw, home=home_path,
         daily_root=_resolve(base, d["daily_root"]),
         minute_roots=tuple(_resolve(base, r) for r in d["minute_roots"]),
         real_raw_tree=_resolve(base, d["real_raw_tree"]),

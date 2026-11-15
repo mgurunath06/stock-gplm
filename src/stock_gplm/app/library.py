@@ -330,7 +330,7 @@ def seed_templates(lib: Library, template_dir: Path) -> list[dict[str, Any]]:
     """Register every manually authored template under ``config/app/strategies`` (idempotent)."""
     out = []
     for p in sorted(Path(template_dir).glob("*.json")):
-        doc = json.loads(p.read_text(encoding="utf-8"))
+        doc = json.loads(p.read_text(encoding="utf-8-sig"))
         out.append(lib.add(doc, immutable=True, origin=f"template:{p.name}", active=bool(doc.pop("active", True))
                            if "active" in doc else True, provenance={"template_file": p.name}))
     return out

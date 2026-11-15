@@ -81,3 +81,24 @@ features, as in M5.4.
 
 A checksum proves byte integrity only, not authenticity or market-data correctness. The full catalogue is
 reproducible with `gplm ingest --stocks ...` (or `--universe all`); results land in the audit database.
+
+## Universe-wide catalogue (`gplm ingest --universe all`, 2026-11-15, 4 min 9 s on CPU)
+
+2,394 symbols (every collected `-EQ` directory minus ETF-like names), 33,539 files:
+
+| Files | Decision | Count |
+| --- | --- | ---: |
+| daily | ACCEPT | 9,418 |
+| daily | QUARANTINE_CONTENT (6 symbols) | 9 |
+| minute | REVIEW (flags only, e.g. zero-volume bars) | 21,683 |
+| minute | ACCEPT_CLOSING_PHASE_V2 (218 symbols) | 2,318 |
+| minute | ACCEPT | 30 |
+| minute | QUARANTINE — negative volume *before* 15:20 (77 symbols) | 81 |
+
+The 15:20 counter reset appears for only 218 symbols, consistent with a closing session limited to a subset
+of stocks (plausibly derivatives-eligible names); this supports, but does not prove, the closing-phase
+reading. The 81 sessions with negative volume earlier in the day do not fit it and stay excluded.
+2,359 symbols end on 2026-11-13, 25 on 2026-10-29 (no minute data), 10 on 2026-11-12. Issue rows:
+MANY_ZERO_VOLUME_BARS 15,510 (1,813 symbols), CALENDAR_GAP 5,734, CORPORATE_ACTION_UNCERTAIN 3,140
+(1,412 symbols; open gaps above 10%), LARGE_INTRADAY_BAR_MOVE 1,189, INCOMPLETE_SESSION 11,
+MINUTE_DAILY_PRICE_MISMATCH 2. Re-running the command parses nothing unless a file changed.
