@@ -21,7 +21,7 @@ def test_authoritative_catalogue_has_eleven_modules_and_preserves_tracked_gaps()
                                                    for m in row.get("missing", []))]
     # The original 11 missing rows remain in the completion contract; two are now implemented.
     assert len([row for row in missing if not row.get("exprs")]) == 9
-    assert len([row for row in missing if row.get("exprs")]) == 5
+    assert len([row for row in missing if row.get("exprs")]) == 2
     assert TIMEFRAMES == ("1m", "5m", "15m", "30m", "60m", "4h", "1d", "1w")
 
 
@@ -76,3 +76,29 @@ def test_quadratic_coefficients_and_weis_wave_are_mathematically_exact() -> None
     assert list(direction) == [0, 1, 1, 1, -1, -1, -1, 1]
     assert volume[4] == 90 and volume[7] == 150
     assert previous[7] == 60  # completed first up wave: 10+20+30
+
+
+def test_stateful_cpr_smi_and_fvg_use_only_information_available_now() -> None:
+    daily = fx.frame_from([100, 102, 100], [110, 105, 101], [90, 101, 99], [100, 104, 100])
+    dc = dsl.Context.from_frame(daily, "1d", False)
+    touch = dsl.evaluate(dsl.parse("virgin_cpr_touch(20)"), dc)
+    count = dsl.evaluate(dsl.parse("virgin_cpr_count(20)"), dc)
+    assert list(touch) == [0, 0, 1] and list(count) == [0, 1, 1]
+
+    intr = fx.intraday(2, 5, minutes=75)
+    intr["minute_of_session"] = np.tile([15, 30, 315, 345, 375], 2)
+    intr.loc[:, "open"] = [100, 100.5, 101, 101, 102, 103, 103, 103, 103, 104]
+    intr.loc[:, "close"] = [100.5, 101, 101, 102, 103, 103, 103, 103, 104, 105]
+    ic = dsl.Context.from_frame(intr, "75m", True)
+    smi = dsl.evaluate(dsl.parse("smart_money_index"), ic)
+    first = -(101 / 100 - 1) + (103 / 101 - 1)
+    assert np.allclose(smi[:4], 0) and smi[4] == pytest.approx(first)
+    assert np.allclose(smi[5:9], first) and smi[9] != pytest.approx(first)
+
+    fvg = fx.frame_from([100] * 6, [101, 102, 106, 108, 107, 104], [99, 100, 105, 106, 103, 100],
+                        [100, 101, 105, 107, 104, 101])
+    fc = dsl.Context.from_frame(fvg, "1d", False)
+    direction = dsl.evaluate(dsl.parse("open_fvg_direction"), fc)
+    active = dsl.evaluate(dsl.parse("open_fvg_count"), fc)
+    assert direction[2] == 1 and active[2] == 1
+    assert direction[-1] == -1 and active[-1] == 1  # bullish gaps mitigated; a new bearish gap remains

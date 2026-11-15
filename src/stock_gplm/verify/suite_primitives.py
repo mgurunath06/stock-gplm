@@ -117,8 +117,12 @@ def _row(row: dict[str, Any], fr: dict[str, pd.DataFrame], bench: dict[str, pd.D
                 (tuple(tf for tf in TIMEFRAMES if tf not in {"1d", "1w"}) if row.get("intraday") else TIMEFRAMES))
     evals = []
     errors = []
-    for expr in row.get("exprs", []):
-        for tf in tfs:
+    base_exprs = list(row.get("exprs", []))
+    scoped = row.get("exprs_by_timeframe") or {}
+    for tf in tfs:
+        expressions = base_exprs + (scoped.get("intraday", []) if tf not in {"1d", "1w"} else scoped.get("daily", []))
+        expressions += scoped.get(tf, [])
+        for expr in dict.fromkeys(expressions):
             r = evaluate(expr, fr[tf], tf, bench)
             evals.append({"expr": expr, "timeframe": tf, **r})
             if not r["ok"]:
@@ -128,11 +132,12 @@ def _row(row: dict[str, Any], fr: dict[str, pd.DataFrame], bench: dict[str, pd.D
     missing = row.get("missing") or []
     kinds = {m["kind"] for m in missing}
     vb = row.get("verified_by")
+    all_exprs = base_exprs + [x for values in (row.get("exprs_by_timeframe") or {}).values() for x in values]
     if errors:
         status, verdict, why = "ERROR", FAIL, "; ".join(errors[:4])
-    elif not row.get("exprs") and "NOT_IMPLEMENTED" in kinds:
+    elif not all_exprs and "NOT_IMPLEMENTED" in kinds:
         status, verdict, why = "NOT_IMPLEMENTED", FAIL, "; ".join(f"{m['what']} ({m['reason']})" for m in missing)
-    elif not row.get("exprs"):
+    elif not all_exprs:
         status, verdict = ("NEEDS_DATA" if kinds & {"DATA", "DEFERRED"} else "METHOD"), WARN
         why = "; ".join(f"{m['kind']}: {m['what']} ({m['reason']})" for m in missing) or row.get("method", "")
     else:
@@ -156,5 +161,5 @@ def _row(row: dict[str, Any], fr: dict[str, pd.DataFrame], bench: dict[str, pd.D
             verdict = worst(verdict, WARN)
             why = (why + "; " if why else "") + "approximation: " + row["approximation"]
     return {"module": row["module"], "name": row["name"], "status": status, "verdict": verdict, "why": why,
-            "exprs": row.get("exprs", []), "timeframes": list(tfs), "verified_by": vb or "",
+            "exprs": all_exprs, "timeframes": list(tfs), "verified_by": vb or "",
             "missing": missing, "evaluations": evals}

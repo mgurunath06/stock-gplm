@@ -768,7 +768,7 @@ _IMPL: dict[str, Callable[..., Any]] = {}
 LAZY = {"bench", "ref_symbol", "htf"}
 INTRADAY_ONLY = {"vwap", "vwap_std", "or_high", "or_low", "minute_of_session", "session_high", "session_low", "slot_rvol",
                  "window_high", "window_low",
-                 "session_open", "bar_of_session"}
+                 "session_open", "bar_of_session", "smart_money_index"}
 BENCHMARK_FUNCS = {"bench", "ref_symbol"}
 HTF_FUNCS = {"htf"}
 FEATURE_FUNCS = {"feature"}
@@ -1411,6 +1411,107 @@ fn("bar_of_session", 0, 0, "1-based bar index inside the session")(
 fn("session_high", 0, 0, "session high so far")(lambda c: (_need_intraday(c, "session_high"), _session_cum(c, c.high, "max"))[1])
 fn("session_low", 0, 0, "session low so far")(lambda c: (_need_intraday(c, "session_low"), _session_cum(c, c.low, "min"))[1])
 fn("session_open", 0, 0, "session open")(lambda c: (_need_intraday(c, "session_open"), _session_cum(c, c.open, "first"))[1])
+
+
+@fn("smart_money_index", 0, 0, "cumulative SMI: prior SMI - first-30-minute return + last-hour return")
+def _smart_money_index(c: Context) -> np.ndarray:
+    _need_intraday(c, "smart_money_index")
+    gid, _ = _session_groups(c)
+    mos = _mos(c)
+    out = np.full(c.n, np.nan)
+    value = 0.0
+    for group in np.unique(gid):
+        idx = np.flatnonzero(gid == group)
+        out[idx] = value
+        first = idx[mos[idx] <= 30]
+        last = idx[mos[idx] > 315]
+        if len(first) and len(last):
+            first_ret = c.close[first[-1]] / c.open[idx[0]] - 1
+            last_ret = c.close[last[-1]] / c.open[last[0]] - 1
+            value += -first_ret + last_ret
+            out[idx[-1]] = value  # known only when the session's final bar has closed
+    return out
+
+
+def _virgin_cpr(c: Context, max_age: int) -> tuple[np.ndarray, np.ndarray]:
+    key = f"__virgin_cpr_{max_age}"
+    if key in c.cache:
+        return c.cache[key]
+    gid, _ = _session_groups(c)
+    groups = np.unique(gid)
+    agg: dict[int, tuple[float, float, float]] = {}
+    for group in groups:
+        idx = np.flatnonzero(gid == group)
+        agg[int(group)] = (float(np.nanmax(c.high[idx])), float(np.nanmin(c.low[idx])), float(c.close[idx[-1]]))
+    touch = np.zeros(c.n, dtype=float)
+    count = np.zeros(c.n, dtype=float)
+    active: list[tuple[int, float, float]] = []
+    previous_group = None
+    for i in range(c.n):
+        group = int(gid[i])
+        if group != previous_group:
+            if previous_group is not None:
+                h, lo, close = agg[previous_group]
+                pivot = (h + lo + close) / 3
+                bc = (h + lo) / 2
+                tc = 2 * pivot - bc
+                active.append((previous_group, min(bc, tc), max(bc, tc)))
+            active = [zone for zone in active if group - zone[0] <= max_age]
+            previous_group = group
+        kept = []
+        for zone in active:
+            if c.high[i] >= zone[1] and c.low[i] <= zone[2]:
+                touch[i] += 1
+            else:
+                kept.append(zone)
+        active = kept
+        count[i] = len(active)
+    c.cache[key] = (touch, count)
+    return c.cache[key]
+
+
+@fn("virgin_cpr_touch", 0, 1, "number of untouched prior CPR zones first touched on this bar [max_age=20]")
+def _virgin_cpr_touch(c: Context, max_age: Any = 20) -> np.ndarray:
+    return _virgin_cpr(c, _n(max_age, lo=1, hi=500))[0]
+
+
+@fn("virgin_cpr_count", 0, 1, "untouched prior CPR zones still active after this bar [max_age=20]")
+def _virgin_cpr_count(c: Context, max_age: Any = 20) -> np.ndarray:
+    return _virgin_cpr(c, _n(max_age, lo=1, hi=500))[1]
+
+
+def _open_fvg(c: Context) -> tuple[np.ndarray, np.ndarray]:
+    if "__open_fvg" in c.cache:
+        return c.cache["__open_fvg"]
+    direction = np.zeros(c.n, dtype=float)
+    count = np.zeros(c.n, dtype=float)
+    active: list[tuple[int, float, float]] = []  # direction, lower, upper
+    for i in range(c.n):
+        kept = []
+        for d, lower, upper in active:
+            mitigated = c.low[i] <= lower if d > 0 else c.high[i] >= upper
+            if not mitigated:
+                kept.append((d, lower, upper))
+        active = kept
+        if i >= 2 and np.isfinite(c.low[i]) and np.isfinite(c.high[i - 2]):
+            if c.low[i] > c.high[i - 2]:
+                active.append((1, float(c.high[i - 2]), float(c.low[i])))
+            elif c.high[i] < c.low[i - 2]:
+                active.append((-1, float(c.high[i]), float(c.low[i - 2])))
+        direction[i] = active[-1][0] if active else 0
+        count[i] = len(active)
+    c.cache["__open_fvg"] = (direction, count)
+    return c.cache["__open_fvg"]
+
+
+@fn("open_fvg_direction", 0, 0, "direction of most recent unmitigated fair-value gap (+1/-1, else 0)")
+def _open_fvg_direction(c: Context) -> np.ndarray:
+    return _open_fvg(c)[0]
+
+
+@fn("open_fvg_count", 0, 0, "number of causally detected fair-value gaps not yet fully mitigated")
+def _open_fvg_count(c: Context) -> np.ndarray:
+    return _open_fvg(c)[1]
 
 
 def _opening_range(c: Context, minutes: int, high: bool) -> np.ndarray:

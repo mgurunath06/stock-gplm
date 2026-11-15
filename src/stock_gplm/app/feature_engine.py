@@ -52,6 +52,15 @@ def _parameters(exprs: Sequence[str]) -> str:
     return "; ".join(dict.fromkeys(found))
 
 
+def expressions_for(row: Mapping[str, Any], timeframe: str) -> list[str]:
+    """Expressions applicable to one lane, including optional scoped additions."""
+    out = list(row.get("exprs") or [])
+    scoped = row.get("exprs_by_timeframe") or {}
+    out.extend(scoped.get("intraday", []) if timeframe not in {"1d", "1w"} else scoped.get("daily", []))
+    out.extend(scoped.get(timeframe, []))
+    return list(dict.fromkeys(out))
+
+
 def _blocked(row: Mapping[str, Any]) -> tuple[str | None, str]:
     missing = list(row.get("missing") or [])
     kinds = {str(m.get("kind")) for m in missing}
@@ -97,7 +106,7 @@ def compute_lane(symbol: str, timeframe: str, bar: Bars, data_fingerprint: str, 
     expressions = list(dict.fromkeys(expr for row in rows
                                      if (not row.get("intraday") or timeframe not in {"1d", "1w"})
                                      and (not row.get("timeframes") or timeframe in row["timeframes"])
-                                     for expr in row.get("exprs", [])))
+                                     for expr in expressions_for(row, timeframe)))
     key = sha({"contract": CONTRACT, "catalogue": catalogue_sha, "data": data_fingerprint,
                "timeframe": timeframe, "expressions": expressions})
     npz, meta = _cache_paths(cache_root, symbol, timeframe, key)
@@ -130,7 +139,7 @@ def coverage_rows(symbol: str, timeframe: str, bar: Bars | None, data_fingerprin
                                                     cache_root)
     out = []
     for row in rows:
-        exprs = list(row.get("exprs") or [])
+        exprs = expressions_for(row, timeframe)
         blocked, reason = _blocked(row)
         applicable = ((not row.get("intraday") or timeframe not in {"1d", "1w"}) and
                       (not row.get("timeframes") or timeframe in row["timeframes"]))
