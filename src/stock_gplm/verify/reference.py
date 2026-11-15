@@ -3,10 +3,10 @@
 Written from the textbook definitions, not from the engine's code, so a shared bug cannot hide.
 Missing values are ``nan``. Recursive smoothers take a ``seed``:
 
-* ``"first"`` - start the recursion at the first defined input (pandas ``ewm(adjust=False)``),
-  reporting values from the n-th defined input on. This is the GPLM DSL convention.
-* ``"sma"``  - seed with the simple average of the first n defined inputs (Wilder / TA-Lib
-  convention). Used to measure how far the DSL is from the textbook during warm-up.
+* ``"sma"``   - seed with the simple average of the first n defined inputs (Wilder / TA-Lib
+  convention; the GPLM DSL convention since strategy-dsl.v2). Default.
+* ``"first"`` - start the recursion at the first defined input (pandas ``ewm(adjust=False)``; the
+  DSL v1 convention), kept to quantify the v1 -> v2 change.
 """
 from __future__ import annotations
 
@@ -39,7 +39,8 @@ def _smooth(x: Sequence[float], n: int, alpha: float, seed: str) -> L:
     if first is None:
         return out
     if seed == "sma":
-        if first + n > len(x) or not all(fin(v) for v in x[first:first + n]):
+        first = next((i for i in range(len(x) - n + 1) if all(fin(v) for v in x[i:i + n])), None)
+        if first is None:
             return out
         prev = sum(x[first:first + n]) / n
         out[first + n - 1] = prev
@@ -56,11 +57,11 @@ def _smooth(x: Sequence[float], n: int, alpha: float, seed: str) -> L:
     return out
 
 
-def ema(x: Sequence[float], n: int, seed: str = "first") -> L:
+def ema(x: Sequence[float], n: int, seed: str = "sma") -> L:
     return _smooth(x, n, 2.0 / (n + 1), seed)
 
 
-def rma(x: Sequence[float], n: int, seed: str = "first") -> L:
+def rma(x: Sequence[float], n: int, seed: str = "sma") -> L:
     return _smooth(x, n, 1.0 / n, seed)
 
 
@@ -119,7 +120,7 @@ def roc(x: Sequence[float], n: int) -> L:
     return [div(x[i], x[i - n]) - 1 if i >= n else NAN for i in range(len(x))]
 
 
-def rsi(x: Sequence[float], n: int, seed: str = "first") -> L:
+def rsi(x: Sequence[float], n: int, seed: str = "sma") -> L:
     """Wilder RSI. Flat window (no gains, no losses) = 50; no losses = 100."""
     d = [NAN] + [x[i] - x[i - 1] for i in range(1, len(x))]
     up = [NAN if not fin(v) else max(v, 0.0) for v in d]
@@ -136,28 +137,28 @@ def rsi(x: Sequence[float], n: int, seed: str = "first") -> L:
     return out
 
 
-def true_range(h: Sequence[float], lo: Sequence[float], c: Sequence[float], first_bar: bool = True) -> L:
-    """TR. ``first_bar=True`` defines TR[0] = high - low (no previous close)."""
+def true_range(h: Sequence[float], lo: Sequence[float], c: Sequence[float], first_bar: bool = False) -> L:
+    """TR. TA-Lib: undefined on bar 0 (no previous close); ``first_bar=True`` uses high - low there."""
     out = [h[0] - lo[0] if first_bar else NAN]
     for i in range(1, len(c)):
         out.append(max(h[i] - lo[i], abs(h[i] - c[i - 1]), abs(lo[i] - c[i - 1])))
     return out
 
 
-def atr(h: Sequence[float], lo: Sequence[float], c: Sequence[float], n: int, seed: str = "first",
-        first_bar: bool = True) -> L:
+def atr(h: Sequence[float], lo: Sequence[float], c: Sequence[float], n: int, seed: str = "sma",
+        first_bar: bool = False) -> L:
     return rma(true_range(h, lo, c, first_bar), n, seed)
 
 
-def macd(x: Sequence[float], fast: int = 12, slow: int = 26, sig: int = 9, seed: str = "first") -> tuple[L, L, L]:
+def macd(x: Sequence[float], fast: int = 12, slow: int = 26, sig: int = 9, seed: str = "sma") -> tuple[L, L, L]:
     ef, es = ema(x, fast, seed), ema(x, slow, seed)
     line = [a - b for a, b in zip(ef, es)]
     signal = ema(line, sig, seed)
     return line, signal, [a - b for a, b in zip(line, signal)]
 
 
-def dmi(h: Sequence[float], lo: Sequence[float], c: Sequence[float], n: int, seed: str = "first",
-        first_bar: bool = True) -> tuple[L, L, L]:
+def dmi(h: Sequence[float], lo: Sequence[float], c: Sequence[float], n: int, seed: str = "sma",
+        first_bar: bool = False) -> tuple[L, L, L]:
     """(ADX, +DI, -DI), Wilder."""
     pdm, mdm = [NAN], [NAN]
     for i in range(1, len(h)):
@@ -209,7 +210,7 @@ def mfi(h: Sequence[float], lo: Sequence[float], c: Sequence[float], v: Sequence
                 pos += mf
             elif tp[j] < tp[j - 1]:
                 neg += mf
-        out[i] = 100.0 if neg == 0 else 100 - 100 / (1 + pos / neg)
+        out[i] = NAN if pos + neg == 0 else (100.0 if neg == 0 else 100 - 100 / (1 + pos / neg))
     return out
 
 
@@ -298,7 +299,7 @@ def _le(a: float, b: float) -> bool:
 
 
 def supertrend(h: Sequence[float], lo: Sequence[float], c: Sequence[float], n: int, mult: float,
-               seed: str = "first") -> tuple[L, L]:
+               seed: str = "sma") -> tuple[L, L]:
     """Supertrend (line, direction +1/-1), the common TradingView definition on (high+low)/2."""
     a = atr(h, lo, c, n, seed)
     N = len(c)

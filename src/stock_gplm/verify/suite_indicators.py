@@ -78,7 +78,7 @@ def compare(name: str, expr: str, ref: Ref, recursive: bool, period: int, frame:
             ) -> dict[str, Any]:
     d = cols(frame)
     got = dsl_values(expr, frame)
-    want = np.asarray(ref(d, "first"), dtype=float)
+    want = np.asarray(ref(d, "sma"), dtype=float)
     err = fx.rel_err(got, want)
     nan_mis = int((np.isfinite(got) != np.isfinite(want)).sum())
     mis_bars = np.nonzero(np.isfinite(got) != np.isfinite(want))[0]
@@ -92,10 +92,10 @@ def compare(name: str, expr: str, ref: Ref, recursive: bool, period: int, frame:
     probe = sorted({int(fin[0]) if fin.size else 0, n // 2, n - 1})
     row["sample"] = _sample(frame, got, want, probe)
     if recursive:
-        tb = np.asarray(ref(d, "sma"), dtype=float)
-        dev = fx.rel_err(got, tb)
-        row.update(textbook_max_rel_dev=dev, textbook_converged_1e3=fx.first_converged(got, tb, 1e-3),
-                   textbook_converged_1e6=fx.first_converged(got, tb, 1e-6))
+        v1 = np.asarray(ref(d, "first"), dtype=float)  # DSL v1 (first-bar seed), to quantify the change
+        row.update(textbook_max_rel_dev=fx.rel_err(got, want), textbook_converged_1e3=fx.first_converged(got, want, 1e-3),
+                   textbook_converged_1e6=fx.first_converged(got, want, 1e-6), v1_max_rel_dev=fx.rel_err(v1, want),
+                   v1_converged_1e3=fx.first_converged(v1, want, 1e-3))
     return row
 
 
@@ -130,9 +130,9 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
                           [10, 11, 12, 13, 14])
         cases = [
             ("sma(close, 3)", [math.nan, math.nan, 11.0, 12.0, 13.0]),
-            ("ema(close, 3)", [math.nan, math.nan, 11.25, 12.125, 13.0625]),  # alpha 0.5, seeded at the first close
+            ("ema(close, 3)", [math.nan, math.nan, 11.0, 12.0, 13.0]),  # TA-Lib: seed SMA(10,11,12)=11, alpha 0.5
             ("highest(high, 2)", [math.nan, 11.5, 12.5, 13.5, 14.5]),
-            ("tr", [1.0, 1.5, 1.5, 1.5, 1.5]),  # bar 0: high-low; later: high - previous close
+            ("tr", [math.nan, 1.5, 1.5, 1.5, 1.5]),  # TA-Lib: undefined without a previous close
             ("roc(close, 2)", [math.nan, math.nan, 0.2, 13 / 11 - 1, 14 / 12 - 1]),
         ]
         f2 = fx.frame_from([10, 11, 10, 12], [10, 11, 10, 12], [10, 11, 10, 12], [10, 11, 10, 12])
@@ -160,16 +160,8 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
             c.evidence.update(row)
             verdict_for(row, c)
             if rec:
-                k3 = row["textbook_converged_1e3"]
-                c.note(f"textbook (SMA-seeded, TA-Lib/Wilder) max relative deviation "
-                       f"{row['textbook_max_rel_dev']:.3g}; within 0.1% from bar {k3}, within 1e-6 from bar "
-                       f"{row['textbook_converged_1e6']}")
-                if row["textbook_max_rel_dev"] > 1e-3 and (k3 is None or k3 > 2 * period):
-                    c.warn(f"warm-up seeding differs from the TA-Lib/Wilder textbook: up to "
-                           f"{100 * row['textbook_max_rel_dev']:.2f}% apart during warm-up (DSL seeds at the first "
-                           f"bar; textbook seeds with an SMA); within 0.1% from bar {k3}, within 1e-6 from bar "
-                           f"{row['textbook_converged_1e6']}. Rules evaluated in the first {k3} bars of a lane can "
-                           f"fire differently from a charting platform.")
+                c.note(f"TA-Lib/Wilder SMA seeding from the first bar (the reference uses it); the DSL v1 first-bar "
+                       f"seed differed by up to {100 * row['v1_max_rel_dev']:.2f}% until bar {row['v1_converged_1e3']}")
         sec.run(f"indicator:{name}", f"{expr} equals an independent pure-Python reference on a 1,500-bar fixture",
                 one)
 
@@ -212,12 +204,9 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
             sem.append({"case": case, "expression": expr, "last_value": got, "expected": want, "why": why, "ok": ok})
             c.expect(ok, f"{case}: {expr} last value {got} expected {want} ({why})")
         mz = float(dsl_values("mfi(14)", cases["zero_volume"])[-1])
-        sem.append({"case": "zero_volume", "expression": "mfi(14)", "last_value": mz, "expected": "documented",
-                    "why": "no money flow at all", "ok": True})
-        if mz == 100.0:
-            c.warn("zero_volume: mfi(14) returns 100 (no negative flow is read as maximal buying pressure); a "
-                   "volume-less window has no money flow, so NaN would be the neutral convention. The reference "
-                   "agrees with the engine, so this is a convention, not an arithmetic error.")
+        sem.append({"case": "zero_volume", "expression": "mfi(14)", "last_value": mz, "expected": math.nan,
+                    "why": "no money flow at all: undefined, never 100", "ok": math.isnan(mz)})
+        c.expect(math.isnan(mz), f"zero_volume: mfi(14) = {mz}; a window without money flow must be NaN")
         sp = dsl_values("rsi(close, 14)", cases["single_spike"])
         c.expect(bool(np.all(np.isfinite(sp[15:]))), "single spike: RSI must stay finite")
         c.evidence.update(cases=out, semantic_expectations=sem)
@@ -245,9 +234,10 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
                         "max_rel_dev_after_20x_period": late})
             c.expect(late < 1e-6, f"{name}: DSL and M5.4 disagree after warm-up (20 x period: {late:.3g})")
             if dev > 1e-3:
-                c.warn(f"{name}: DSL and M5.4 feature path use different warm-up seeds (max deviation "
-                       f"{100 * dev:.2f}%, identical to 1e-6 from bar {k}). Tree rules and ATR stops use the M5.4 "
-                       f"(SMA-seeded) values; DSL rules use first-bar seeding.")
+                c.warn(f"{name}: DSL and M5.4 feature path differ during warm-up (max deviation {100 * dev:.2f}%, "
+                       f"identical to 1e-6 from bar {k}). Both seed with an SMA; M5.4 counts the first bar's "
+                       f"directional movement as 0 where the DSL (and TA-Lib) leave it undefined. M5.4 is left "
+                       f"unchanged so cached M5.4 features and tree results stay reproducible.")
         c.evidence["pairs"] = out
     sec.run("cross_check_m54_feature_path", "The DSL agrees with the independent M5.4 feature implementation after "
             "warm-up", m54)

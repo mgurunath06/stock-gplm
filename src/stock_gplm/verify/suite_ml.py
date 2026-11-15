@@ -76,6 +76,24 @@ def run(sec: Section, ev: dict[str, Any], work: Path) -> None:
         c.note(f"{out['evaluated']} distinct genomes evaluated over {out['generations']} generations; "
                f"{len(sel)} selected; every fitness call used bars {seg[0]}..{seg[1] - 1} only (full log in "
                f"ml-evolve-log.jsonl)")
+    def regression(c: Check) -> None:
+        """Engine v1 compared signal-exit rules with a baseline held to the time exit; GP exploited it."""
+        ev_ = evo.Evolver(li, seg, seed=55, budget="quick")
+        g = evo.Genome(["close < open", "er(10) < 0.5951"], "short", 3)  # v1's top pick on this fixture
+        fit = ev_.fitness(g)
+        out = state.get("out") or evo.Evolver(li, seg, seed=55, budget="quick").run()
+        sel = out.get("selected") or []
+        planted = [x for x in sel if x.direction == "long" and "falling(close, 3)" in x.entry()]
+        c.evidence.update(v1_artefact_genome=g.entry(), v1_artefact_fitness_before=11.86, fitness_now=fit,
+                          stats_now=g.stats, selected=[{"entry": x.entry(), "direction": x.direction,
+                                                        "exit": x.exit(), "stats": x.stats} for x in sel])
+        c.expect(not np.isfinite(fit) or fit <= 0, f"v1 artefact genome still scores {fit:.2f} (was 11.86)")
+        c.expect(all((x.stats.get("mean_net") or 0) > 0 for x in sel), "a selected genome loses money")
+        c.expect(bool(planted), "the planted edge (3 down closes -> long) was not rediscovered")
+    sec.run("regression_false_ml_advantage_gone", "The v1 false advantage is gone: the genome that exploited the "
+            "biased baseline now scores <= 0, every selected rule makes money, and GP finds the planted edge "
+            "(3 down closes -> long)", regression)
+
     sec.run("gp_evolves_on_discovery_data_only", "Genetic programming evaluates new genomes over generations, is "
             "deterministic per seed, and computes fitness on the discovery segment only", evolve)
 
@@ -220,8 +238,9 @@ def run(sec: Section, ev: dict[str, Any], work: Path) -> None:
                 if d is not None:
                     c.expect(bool(d.doc.get("evidence")) and d.doc["provenance"].get("run_id"),
                              f"{lid}: evidence/provenance not attached")
-            elif r["method"] == "tree" and d is None:
-                c.warn(f"tree row {r['strategy_id']} kept in the matrix but not saved to the library")
+            elif r["method"] == "tree":
+                c.expect(d is not None and d.needs.get("features"),
+                         f"tree row {r['strategy_id']} not saved to the library as a feature strategy")
         by = {m: sum(1 for x in out if x["method"] == m) for m in ("evolve", "tree")}
         c.expect(by["evolve"] > 0 and by["tree"] > 0, f"pipeline produced {by}")
         c.evidence.update(ml_rows=out, library_dir=str(p["home"] / "strategy-library" / "discovered"))

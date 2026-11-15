@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 
 from ..app import strategy_dsl as dsl
+from ..app.m56_catalogue import _direction as _m56_dir
 from ..app.m56_catalogue import load_catalogue
 from ..app.strategy_library import StrategyLibrary
 from . import fixtures as fx
@@ -124,15 +125,20 @@ def run(sec: Section, ev: dict[str, Any], work: Path) -> None:
             c.warn(f"... {len(rev) - 60} more REVIEW rows in strategies.csv")
         c.note("verdicts: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     def m56_direction(c: Check) -> None:
-        bad = [{"reference_id": r.reference_id, "name": r.name, "m56_direction": r.direction,
-                "text_direction": spec_direction(r)} for r in refs.values() if r.direction != spec_direction(r)]
-        c.evidence["disagreements"] = bad
-        if bad:
-            c.warn(f"{len(bad)} reference(s) where the M5.6 catalogue parser's keyword direction differs from the "
-                   f"text (it treats any ' short' substring, e.g. 'Short-term', as a short trade): "
-                   + ", ".join(f"{b['reference_id']} {b['name']}" for b in bad[:12]))
-        c.note("M5.7 uses the library's explicit direction field; the M5.6 field is metadata only")
-    sec.run("reference_direction_metadata", "The catalogue parser's direction metadata matches the original text",
+        libdir: dict[str, set[str]] = {}
+        for s in lib:
+            libdir.setdefault(s.reference_id, set()).add(s.direction)
+        bad = [{"reference_id": r.reference_id, "name": r.name, "parser_direction": r.direction,
+                "library_direction": sorted(libdir.get(r.reference_id, set()))}
+               for r in refs.values() if libdir.get(r.reference_id) != {r.direction}]
+        guard = [t for t in ("Short-term momentum ignition", "Traders (short EMAs) pulling away",
+                             "Short Covering Rally") if _m56_dir(t) != "long"]
+        c.evidence.update(disagreements=bad, false_short_phrases=guard)
+        c.expect(not bad, f"{len(bad)} reference(s) where the catalogue parser's direction differs from the curated "
+                          f"library: " + ", ".join(f"{b['reference_id']} {b['name']}" for b in bad[:12]))
+        c.expect(not guard, f"phrases misread as short trades: {guard}")
+    sec.run("reference_direction_metadata", "The catalogue parser classifies trade direction from explicit markers "
+            "('Short-term', 'short EMAs' are not shorts) and agrees with the curated library for every reference",
             m56_direction)
 
     sec.run("interpretation_audit", "Each JSON interpretation carries the indicators, parameters, thresholds and "

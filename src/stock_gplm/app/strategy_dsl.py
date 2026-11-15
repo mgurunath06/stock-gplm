@@ -408,13 +408,15 @@ def sma(x: np.ndarray, n: int) -> np.ndarray:
 def _seeded(x: np.ndarray, n: int, alpha: float) -> np.ndarray:
     x = np.asarray(x, dtype=float)
     out = np.full(len(x), np.nan)
-    fin = np.nonzero(np.isfinite(x))[0]
-    if fin.size < n:
+    if len(x) < n:
         return out
-    first = int(fin[0])
+    # seed at the end of the first run of n consecutive defined inputs (leading/sporadic NaNs are skipped)
+    run = np.convolve(np.isfinite(x).astype(np.int64), np.ones(n, dtype=np.int64), "valid")
+    full = np.nonzero(run == n)[0]
+    if not full.size:
+        return out
+    first = int(full[0])
     seed_end = first + n - 1
-    if seed_end >= len(x) or not np.isfinite(x[first:seed_end + 1]).all():
-        return out
     tail = x[seed_end:].copy()
     tail[0] = x[first:seed_end + 1].mean()
     vals = pd.Series(tail).ewm(alpha=alpha, adjust=False).mean().to_numpy()

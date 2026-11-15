@@ -1,6 +1,10 @@
 """Section 4: walk-forward segments, discovery-only optimisation, statistics, gates and holdout protection."""
 from __future__ import annotations
 
+import csv
+import gzip
+import io
+import json
 import math
 from collections import defaultdict
 from pathlib import Path
@@ -102,7 +106,7 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
             for short, when in ((False, "close > sma(close, 5)"), (True, "close < sma(close, 5)")):
                 ex = se.Exit(10, 2.5, None, None)
                 xm = dsl.signal(when, li.ctx)
-                engine = se.baseline(li.market, seg, ex, li.buy, li.sell, short, {})
+                engine = se.baseline(li.market, seg, ex, li.buy, li.sell, short, {}, xmask=xm)
                 a, b = seg
                 every = np.arange(a, b)
                 same = se.simulate(li.market, np.ones(len(frame), bool), seg, ex, li.buy, li.sell, short, xm,
@@ -287,6 +291,22 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
         c.evidence.update(command="gplm " + " ".join(p["args"][:13]) + " ...", rows=len(rows),
                           q_values_rechecked=checked, max_q_diff=worst, final_reads=p["finals_first"],
                           classifications=dict(counts), development_end=p["dev_end"])
+        audit_dir = p["out"] / "audit"
+        idx = [json.loads(x) for x in (audit_dir / "index.jsonl").read_text(encoding="utf-8").splitlines()] \
+            if (audit_dir / "index.jsonl").is_file() else []
+        c.expect(len(idx) == 1, f"audit index has {len(idx)} lane lines; expected 1 (resume must not rewrite)")
+        tfile = audit_dir / "trades" / "AAA-EQ" / "1d.csv.gz"
+        ledger = list(csv.DictReader(io.StringIO(gzip.open(tfile, "rt", encoding="utf-8").read()))) \
+            if tfile.is_file() else []
+        c.expect(bool(ledger), "no per-trade audit ledger written")
+        mism = []
+        for r in rows:
+            if r["status"] == "TESTED" and r["source"] != "ML" or r["method"] == "evolve":
+                n_led = sum(1 for t in ledger if t["strategy_id"] == r["strategy_id"] and t["segment"] == "validation")
+                if r["status"] == "TESTED" and str(n_led) != str(r["val_trades"] or 0):
+                    mism.append((r["strategy_id"], n_led, r["val_trades"]))
+        c.expect(not mism, f"ledger trade counts differ from matrix val_trades: {mism[:5]}")
+        c.evidence.update(audit_index=idx, ledger_rows=len(ledger), ledger_example=ledger[:2])
         c.note(f"{len(rows)} matrix rows; {checked} stored q-values recomputed independently; final-segment reads "
                f"{len(p['finals_first'])} (unchanged on resume)")
     sec.run("end_to_end_research_matrix", "A real research-matrix run on synthetic raw files respects the boundary, "
