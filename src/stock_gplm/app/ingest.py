@@ -94,6 +94,34 @@ class SymbolData:
         return str(self.daily["date"].iloc[-1]) if len(self.daily) else None
 
 
+def window_data(data: SymbolData, start: str | None = None, end: str | None = None) -> SymbolData:
+    """Restrict a symbol's candles to sessions in ``[start, end]`` (inclusive ISO dates).
+
+    Applied before any lane, feature, label or score is built, so no row outside the window can
+    influence results. A windowed copy gets its own fingerprint, so caches and final-segment locks
+    are never shared with the unwindowed series. With no bounds the input is returned unchanged.
+    """
+    if not start and not end:
+        return data
+
+    def keep(col: pd.Series) -> pd.Series:
+        s = col.astype(str)
+        m = pd.Series(True, index=col.index)
+        if start:
+            m &= s >= start
+        if end:
+            m &= s <= end
+        return m
+
+    daily = data.daily[keep(data.daily["date"])].reset_index(drop=True)
+    minute = data.minute[keep(data.minute["session"])].reset_index(drop=True) if len(data.minute) else data.minute
+    summary = {**data.summary, "window": {"start": start, "end": end},
+               "first": str(daily["date"].iloc[0]) if len(daily) else None,
+               "last": str(daily["date"].iloc[-1]) if len(daily) else None, "daily_rows": len(daily)}
+    return SymbolData(data.symbol, daily, minute, sha({"fp": data.fingerprint, "start": start, "end": end})[:32],
+                      summary, data.changed_files)
+
+
 class Ingestor:
     """Ingest symbols into the catalog and canonical caches. One instance per run."""
 

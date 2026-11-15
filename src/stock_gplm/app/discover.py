@@ -34,7 +34,7 @@ from . import ACCESS_BASIS
 from .candidates import Rule, search
 from .compute import Backend
 from .context import App
-from .ingest import Ingestor, SymbolData
+from .ingest import Ingestor, SymbolData, window_data
 from .lanes import all_bars, build_lane
 from .library import Library, from_m54
 
@@ -180,7 +180,8 @@ def discover(app: App, symbols: Sequence[str], *, data_mode: str, timeframes: st
     results = []
     for sym in symbols:
         prog.update(force=True, task="discover", stock=sym, note="ingesting")
-        data = ing.ingest(sym, use_minute=data_mode != "daily")
+        # The window applies before the engine and the broad screen see any candle.
+        data = window_data(ing.ingest(sym, use_minute=data_mode != "daily"), start, end)
         bars = all_bars(data)
         record: dict[str, Any] = {"symbol": data.symbol, "candles": {k: data.summary.get(k) for k in (
             "first", "last", "daily_rows", "minute_sessions_used", "minute_first", "minute_last")}}

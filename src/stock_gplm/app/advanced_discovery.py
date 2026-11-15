@@ -40,8 +40,13 @@ def _tree_paths(model: Any, names: list[str], max_conditions: int = 6) -> list[d
     return rows
 
 
-def discover_tree_strategies(lane: Lane, cfg: Mapping[str, Any], *, seed: int = 56) -> dict[str, Any]:
-    """Return independently learned, declarative tree-path strategies for one lane."""
+def discover_tree_strategies(lane: Lane, cfg: Mapping[str, Any], *, seed: int = 56,
+                             allow_test: bool = True) -> dict[str, Any]:
+    """Return independently learned, declarative tree-path strategies for one lane.
+
+    ``allow_test=False`` means this lane's final segment was already consumed by an earlier tree
+    run: promoted paths stay ``EXPERIMENTAL`` and the final segment is not read again.
+    """
     try:
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.tree import DecisionTreeClassifier
@@ -119,7 +124,9 @@ def discover_tree_strategies(lane: Lane, cfg: Mapping[str, Any], *, seed: int = 
                     and (vm.get("mean_net") or 0) > 0 and (vm.get("max_drawdown") or -1) >= -max_dd and stable)
         test_met = None
         classification = "REJECTED"
-        if promoted:
+        if promoted and not allow_test:
+            classification = "EXPERIMENTAL"
+        elif promoted:
             trades = simulate(lane.market, item["mask"], segments["test"], policy, lane.costs)
             base = baseline(lane.market, segments["test"], policy, lane.costs)
             test_met = metrics(trades, lane.market, segments["test"], base)
@@ -139,7 +146,7 @@ def discover_tree_strategies(lane: Lane, cfg: Mapping[str, Any], *, seed: int = 
                            "lineage": doc["provenance"]})
     return {"status": "COMPLETED", "method": "gradient_boosting_plus_decision_tree", "device": "cpu (scikit-learn)",
             "train_rows": len(fit_rows), "selected_features": selected_names, "generated": len(paths),
-            "candidates": candidates, "segments": segments}
+            "candidates": candidates, "segments": segments, "final_segment_read": allow_test}
 
 
 __all__ = ["discover_tree_strategies"]

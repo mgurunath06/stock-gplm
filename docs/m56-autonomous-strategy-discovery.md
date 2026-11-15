@@ -18,6 +18,22 @@ possible outcomes are `EVALUATED_VALIDATION`, `BLOCKED_TIMEFRAME`, `BLOCKED_MISS
 `BLOCKED_INSUFFICIENT_HISTORY`, or `BLOCKED_IMPLEMENTATION`. Therefore “300 represented” never means
 “300 executed.”
 
+## Development-period window (locked holdout stays closed)
+
+`m56.development_end` (default `2025-10-20`, the last session before the M3.2 locked holdout that
+starts 2025-10-21) bounds every M5.6 path: reference evaluation, the broad screen, the M5.4 engine,
+tree discovery and cross-stock replay. Candles are windowed with `ingest.window_data` immediately
+after ingest, before any lane, feature, label or score exists; a windowed series gets its own
+fingerprint, so caches and final-segment locks are never shared with unwindowed data. `--end` may
+narrow the window but a later `--end` is refused. A metamorphic test proves that distorting every
+row after the boundary leaves all M5.6 results byte-identical. Ingest itself still decodes whole
+files under the M5.5 owner basis. All real minute files currently start 2026-01-01, so a
+development run is daily-only (`1d`, `1w`); intraday timeframes report `BLOCKED_MISSING_DATA`.
+
+Tree discovery reads a lane's final segment at most once per data fingerprint. Learned thresholds
+change a path's strategy id, so the lock is per lane, not per strategy; later promoted paths on a
+consumed lane stay `EXPERIMENTAL` and a `M56_HOLDOUT_REUSE_REFUSED` event is recorded.
+
 ## Validation and discovery
 
 Executable reference rules use the production causal candle/feature lane and pessimistic trade

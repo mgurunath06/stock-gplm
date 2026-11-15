@@ -128,3 +128,71 @@ def test_reference_run_attempts_every_strategy_and_persists_explicit_coverage(
     idb = AuditDB(tmp_path / "discovery-home" / "gplm.sqlite", readonly=True)
     assert idb.one("SELECT COUNT(*) n FROM m56_method_runs")["n"] >= 2
     idb.close()
+
+
+def test_window_data_bounds_rows_and_changes_fingerprint() -> None:
+    import pandas as pd
+
+    from stock_gplm.app.ingest import SymbolData, window_data
+
+    daily = pd.DataFrame({"date": ["2025-10-17", "2025-10-20", "2025-10-21", "2026-01-02"], "close": [1, 2, 3, 4]})
+    minute = pd.DataFrame({"session": ["2025-10-20", "2026-01-02"], "close": [1, 2]})
+    d = SymbolData("AAA-EQ", daily, minute, "fp")
+    assert window_data(d) is d
+    w = window_data(d, end="2025-10-20")
+    assert list(w.daily["date"]) == ["2025-10-17", "2025-10-20"]
+    assert list(w.minute["session"]) == ["2025-10-20"]
+    assert w.fingerprint != d.fingerprint and w.summary["window"]["end"] == "2025-10-20"
+
+
+def _windowed_run(tmp_path: Path, name: str, monkeypatch: pytest.MonkeyPatch, distort: bool,
+                  end: str | None = None) -> list[tuple]:
+    import stock_gplm.app.m56 as m56mod
+
+    raw = tmp_path / "raw"
+    if not raw.exists():
+        make_fixture(raw, ("AAA",), start="2021-01-01", end="2026-03-31", minute_from="2026-03-01",
+                     cutoff="2026-03-02", seed=91)
+    cfg = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    cfg["data"].update(daily_root=str(raw / "daily" / "NSE"), minute_roots=[str(raw / "minute" / "NSE")],
+                       real_raw_tree=str(raw))
+    cfg["m56"].update(min_oos_trades=1, walk_forward_folds=3, fdr_q=1.0, max_drawdown=1.0,
+                      development_end="2025-06-30")
+    cp = tmp_path / f"{name}.json"
+    cp.write_text(json.dumps(cfg), encoding="utf-8")
+    real = m56mod.ingest_many
+
+    def fake(*a, **k):  # identical before the development end; wildly different after it
+        out = real(*a, **k)
+        if distort:
+            for d in out.values():
+                late = d.daily["date"].astype(str) > "2025-06-30"
+                for col in ("open", "high", "low", "close"):
+                    d.daily.loc[late, col] = d.daily.loc[late, col] * 7.0
+        return out
+
+    monkeypatch.setattr(m56mod, "ingest_many", fake)
+    app = App(cp, tmp_path / name, quiet=True)
+    app.start("m56", "test", {}, device="cpu")
+    try:
+        res = run_m56(app, ["AAA-EQ"], ["1d"], resolve("cpu"), catalogue=CATALOGUE, mode="reference", end=end)
+        app.finish("COMPLETED", {})
+    finally:
+        app.close()
+    assert res["window"]["end"] == "2025-06-30"
+    db = AuditDB(tmp_path / name / "gplm.sqlite", readonly=True)
+    rows = [(r["strategy_id"], r["regime"], r["evidence_stage"], r["classification"], r["metrics_json"])
+            for r in db.q("SELECT * FROM m56_results ORDER BY strategy_id, regime, evidence_stage")]
+    db.close()
+    return rows
+
+
+def test_rows_after_development_end_cannot_change_any_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    clean = _windowed_run(tmp_path, "clean", monkeypatch, distort=False)
+    distorted = _windowed_run(tmp_path, "distorted", monkeypatch, distort=True)
+    assert clean and clean == distorted
+
+
+def test_end_after_development_end_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ValueError, match="locked holdout stays closed"):
+        _windowed_run(tmp_path, "late", monkeypatch, distort=False, end="2026-01-31")

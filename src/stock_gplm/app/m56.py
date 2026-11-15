@@ -21,7 +21,7 @@ from ..m54.backtest import ExitPolicy, baseline, bh_adjust, fold_metrics, metric
 from .compute import Backend
 from .context import App
 from .db import jdump, sha, utc_now
-from .ingest import SymbolData, ingest_many
+from .ingest import SymbolData, ingest_many, window_data
 from .lanes import all_bars, build_lane
 from .library import Library, strategy_features, strategy_mask, validate
 
@@ -510,7 +510,16 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
                               "reference_count": 300, "mode": mode}
     if manifest_only:
         return result
-    datas = ingest_many(app.s, app.db, symbols, use_minute=any(tf.endswith("m") for tf in timeframes))
+    # Development-period boundary: rows after it never reach a lane, feature, label or score.
+    dev_end = cfg.get("development_end")
+    if dev_end:
+        if end and end > dev_end:
+            raise ValueError(f"--end {end} is after m56.development_end {dev_end}; the locked holdout stays closed")
+        end = end or dev_end
+    result["window"] = {"start": start, "end": end, "development_end": dev_end}
+    app.db.event("M56_DATA_WINDOW", result["window"])
+    datas = {k: window_data(v, start, end) for k, v in
+             ingest_many(app.s, app.db, symbols, use_minute=any(tf.endswith("m") for tf in timeframes)).items()}
     if mode in ("reference", "both"):
         result["reference"] = evaluate_references(app, parse_reference_catalogue(catalogue), datas, timeframes,
                                                    backend, cfg)
@@ -576,7 +585,19 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
                     advanced_runs.append({"symbol": symbol, "timeframe": tf, "status": "REUSED_CHECKPOINT",
                                           **prior})
                     continue
-                advanced = discover_tree_strategies(lane, cfg, seed=int(app.s.section("models").get("seed", 55)) + 1)
+                # One final-segment read per lane fingerprint: learned thresholds change the strategy id,
+                # so a per-strategy lock alone would let a re-tuned rerun re-select on the same segment.
+                consumed = app.db.one(
+                    "SELECT result_id FROM m56_results WHERE origin='DISCOVERED' AND evidence_stage='TEST_ONCE' "
+                    "AND symbol=? AND timeframe=? AND data_fingerprint=? AND "
+                    "json_extract(lineage_json, '$.method')='gradient_boosting_plus_decision_tree' LIMIT 1",
+                    (symbol, tf, lane.data_fingerprint))
+                if consumed:
+                    app.db.event("M56_HOLDOUT_REUSE_REFUSED", {"method": "gradient_boosting_plus_decision_tree",
+                                                                "symbol": symbol, "timeframe": tf,
+                                                                "result_id": consumed["result_id"]}, level="WARN")
+                advanced = discover_tree_strategies(lane, cfg, seed=int(app.s.section("models").get("seed", 55)) + 1,
+                                                    allow_test=not consumed)
                 accepted = 0
                 for candidate in advanced.get("candidates", []):
                     added = library.add(candidate["document"], immutable=True,
