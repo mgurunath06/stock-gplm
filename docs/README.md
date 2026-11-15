@@ -37,5 +37,7 @@
 - [M4/M5 agent handover — 2026-11-14](M4-M5-AGENT-HANDOVER.md)
 - [M5.4 local-first stock-behaviour discovery (`gplm`)](m54-behaviour-discovery.md)
 - [M5.3 reconciliation and M5.4 canonical architecture — 2026-11-15](m54-reconciliation.md)
+- [M5.4 unified daily+minute multi-timeframe strategy discovery](m54-unified-discovery.md)
+- [DRAFT: independent 2026 minute-research study authorization](m54-minute-2026-study-authorization-DRAFT.md)
 - [Optional LLM assistance](llm-assistance.md)
 - [Architecture and milestone boundaries](architecture.md)
