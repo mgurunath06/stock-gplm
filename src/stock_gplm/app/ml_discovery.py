@@ -190,6 +190,7 @@ def _row(base: dict[str, Any], method: str, sid: str, st: dict[str, Any], val: d
             "discovery_status": st["discovery_status"], "val_trades": v.get("effective_n"),
             "val_mean_net": v.get("mean_net"), "val_win_rate": v.get("win_rate"),
             "val_max_drawdown": v.get("max_drawdown"), "val_q_value": v.get("q_value"),
+            "val_sharpe": v.get("sharpe_annualized"), "val_profit_factor": v.get("profit_factor"),
             "val_p_value": v.get("p_value"), "final_trades": t.get("effective_n") if test else None,
             "final_mean_net": t.get("mean_net") if test else None,
             "final_max_drawdown": t.get("max_drawdown") if test else None, "rule": rule,

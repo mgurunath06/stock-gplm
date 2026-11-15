@@ -174,3 +174,37 @@ It produced 24 strategies: 9 tree, all REJECTED, and 15 screen (4 DISCOVERED, 11
 Next real-data discovery run: **CONDITIONAL GO**. It is OK for daily development-period research runs on selected stocks or
 `--universe all` (survivorship-biased). Results are diagnostic until a strategy derives VALIDATED. Minute and intraday
 discovery is blocked by the holdout boundary.
+
+## Unified research matrix: `gplm research-matrix` (2026-11-15)
+
+One generic command. Only the CLI arguments or config change between one stock, a list, Nifty 500 or all stocks.
+- **Catalogue:** every registered strategy (currently 340) gets one row per stock x timeframe:
+  `TESTED` or `BLOCKED_IMPLEMENTATION` / `BLOCKED_MISSING_DATA` / `BLOCKED_TIMEFRAME_SCOPE` / `BLOCKED_INSUFFICIENT_HISTORY`.
+  Tested rows use the M5.6 translation, cost simulator and folds, BH over the lane's tested family, and `m56_status` gates.
+  The final development segment is read once per strategy x lane fingerprint.
+- **ML:** the `ml-discover` tree (sklearn) and screen (GPU) methods run on the same lane. Their rows have `source=ML`.
+- **Outputs** (`<home>\reports\research\<name>\`): `matrix.csv` and `matrix.sqlite` (full coverage, including blocked and
+  rejected rows), `ranked_validated.csv` (VALIDATED only), `lanes.csv`, `summary.md`, `catalogue-report.json`,
+  `run-config.json` and `strategies\` (ML originals read-only, plus editable copies).
+- **Resume:** the lane key is symbol, timeframe, data fingerprint, catalogue bundle, config, ML methods and budget.
+  Code changes alone do not recompute a lane.
+- **Universe:** `--stocks`, `--universe all`, `--universe nifty500` (needs `config\universes\ind_nifty500list.csv`,
+  downloaded by hand in a browser, with a `Symbol` column; or set `research.universes.nifty500` in config), or `--universe <file.csv|.json>`.
+
+```powershell
+.\windows\gplm.cmd research-matrix --stocks "RELIANCE" --timeframes "1d" --mode both --name reliance-1d
+.\windows\gplm.cmd research-matrix --universe all --timeframes "1d" --mode both --name universe-matrix-1d
+.\windows\gplm.cmd research-matrix --universe nifty500 --timeframes "1d,1w" --mode both --name nifty500-matrix
+# resume: rerun the identical command
+```
+The commands lock `state`. While another job such as `universe-1d` is running, either wait or pass `--home <other dir>`.
+Smoke runs used `--home H:\Guru\Learning\StockGLPM\state-research-smoke`.
+
+**RELIANCE 1d smoke result** (data 2022-10-31 to 2025-10-20, 4 s): 340 catalogue rows. 25 TESTED (all REJECTED);
+227 BLOCKED_IMPLEMENTATION, 60 BLOCKED_MISSING_DATA and 28 BLOCKED_TIMEFRAME_SCOPE. ML produced 8 strategies:
+3 tree, all REJECTED; 5 screen, 1 DISCOVERED and 4 REJECTED. None was VALIDATED.
+Across 3 stocks x (1d, 1w), 25 of 340 catalogue strategies executed on at least one lane.
+
+**Not done:** new declarative implementations for the 314 blocked strategies. They need reviewed translations or `definition`
+entries in a JSON supplement; no logic was invented. Group-level ML (no membership provenance exists) and
+parallel lanes (lanes run sequentially; the screen is GPU-batched) are also not done.

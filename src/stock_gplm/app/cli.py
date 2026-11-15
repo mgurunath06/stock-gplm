@@ -298,6 +298,39 @@ def cmd_ml_discover(args: argparse.Namespace) -> int:
     return _run(args, "ml-discover", work, be)
 
 
+def cmd_research(args: argparse.Namespace) -> int:
+    """Unified catalogue + ML research matrix (development window only); resumable per stock x timeframe."""
+    be = _backend(args.device)
+
+    def work(app: Any) -> dict[str, Any]:
+        from .m56 import TIMEFRAMES
+        from .research import resolve_universe, run
+
+        syms, basis = resolve_universe(app, args.stocks or args.stock, args.universe, args.max_symbols)
+        tfs = list(TIMEFRAMES) if args.timeframes == "all" else [x.strip() for x in args.timeframes.split(",")]
+        bad = sorted(set(tfs) - set(TIMEFRAMES))
+        if bad:
+            raise ValueError(f"unsupported timeframes: {bad}")
+        methods = [x.strip() for x in args.methods.split(",") if x.strip() and x.strip() != "none"]
+        if args.mode == "catalogue":
+            methods = []
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "research" / args.name
+        _p(f"Research: {len(syms)} stock(s) [{basis}] x {len(tfs)} timeframe(s); ML {methods or 'off'} -> {out}")
+        res = run(app, syms, tfs, be, catalogue=Path(args.catalogue).resolve(), methods=methods, out=out,
+                  budget=args.budget, start=args.start, end=args.end, universe_basis=basis,
+                  catalogue_enabled=args.mode in ("both", "catalogue"))
+        if not args.json:
+            _p(f"  lanes: {res['lanes']}")
+            _p(f"  catalogue: {res['catalogue_registered']} registered, {res['catalogue_executed']} executed")
+            for r in res["by_status"]:
+                _p(f"  {r['source']:<9} {r['status']:<30} {r['n']}")
+            _p(f"  summary: {res['summary']}")
+            _p("  resume: rerun the identical command (completed stock x timeframe lanes are skipped)")
+        return res
+
+    return _run(args, "research-matrix", work, be)
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     be = _backend(args.device)
 
@@ -670,6 +703,20 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--start")
     d.add_argument("--end")
     d.add_argument("--skip-engine", action="store_true", help="run only the batched broad screen")
+    rs = add("research-matrix", cmd_research, "unified matrix: every catalogue strategy + local ML discovery (resumable)")
+    stocks(rs)
+    device(rs)
+    rs.add_argument("--name", required=True, help="run name; output <home>/reports/research/<name> (reuse to resume)")
+    rs.add_argument("--out", help="explicit output directory instead of --name location")
+    rs.add_argument("--timeframes", default="1d", help="all, or comma list from 1m,5m,15m,30m,60m,1d,1w")
+    rs.add_argument("--mode", choices=["both", "catalogue", "ml"], default="both",
+                    help="catalogue evaluation, autonomous ML discovery, or both")
+    rs.add_argument("--methods", default="tree,screen", help="ML methods used by --mode ml/both: tree,screen")
+    rs.add_argument("--budget", choices=["quick", "standard", "deep"], default="quick")
+    rs.add_argument("--catalogue", default=str(Path(__file__).resolve().parents[3] / "config" / "strategies" /
+                                               "reference-300-strategies.txt"))
+    rs.add_argument("--start")
+    rs.add_argument("--end", help="defaults to m56.development_end; later dates are refused")
     mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
     stocks(mld)
     device(mld)
