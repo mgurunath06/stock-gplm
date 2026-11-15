@@ -30,8 +30,9 @@ def test_research_matrix_covers_catalogue_and_resumes(tmp_path: Path) -> None:
     assert cli.main(args) == 0
     n_refs = len(parse_catalogue(CATALOGUE).references)
     db = sqlite3.connect(out / "matrix.sqlite")
-    cat = dict(db.execute("SELECT symbol, COUNT(*) FROM matrix WHERE source='CATALOGUE' GROUP BY 1").fetchall())
-    assert cat == {"AAA-EQ": n_refs, "MISSING-EQ": n_refs}  # one row per registered strategy, blocked or tested
+    cat = dict(db.execute("SELECT symbol, COUNT(DISTINCT reference_id) FROM matrix WHERE source='CATALOGUE' "
+                          "GROUP BY 1").fetchall())
+    assert cat == {"AAA-EQ": n_refs, "MISSING-EQ": n_refs}  # every reference has >= 1 row (one per interpretation)
     statuses = {r[0] for r in db.execute("SELECT status FROM matrix WHERE symbol='AAA-EQ' AND source='CATALOGUE'")}
     assert {"TESTED", "BLOCKED_IMPLEMENTATION", "BLOCKED_MISSING_DATA"} <= statuses
     assert db.execute("SELECT COUNT(*) FROM matrix WHERE status!='TESTED' AND classification!='NOT_TESTED'"
@@ -44,7 +45,7 @@ def test_research_matrix_covers_catalogue_and_resumes(tmp_path: Path) -> None:
     db = sqlite3.connect(out / "matrix.sqlite")
     assert db.execute("SELECT COUNT(*) FROM matrix").fetchone()[0] == total
     db.close()
-    assert "executed on at least one lane" in (out / "summary.md").read_text(encoding="utf-8")
+    assert "executed and backtested with costs on at least one lane" in (out / "summary.md").read_text(encoding="utf-8")
     assert (out / "ranked_validated.csv").is_file()
     for mode, want in (("catalogue", {"CATALOGUE"}), ("ml", {"ML"})):
         o2 = tmp_path / mode

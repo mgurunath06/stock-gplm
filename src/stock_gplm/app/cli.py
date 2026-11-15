@@ -312,16 +312,26 @@ def cmd_research(args: argparse.Namespace) -> int:
         if bad:
             raise ValueError(f"unsupported timeframes: {bad}")
         methods = [x.strip() for x in args.methods.split(",") if x.strip() and x.strip() != "none"]
+        bad_m = sorted(set(methods) - {"evolve", "tree", "screen"})
+        if bad_m:
+            raise ValueError(f"unknown ML methods {bad_m}; use evolve,tree,screen")
         if args.mode == "catalogue":
             methods = []
         out = Path(args.out).resolve() if args.out else app.s.reports_dir / "research" / args.name
         _p(f"Research: {len(syms)} stock(s) [{basis}] x {len(tfs)} timeframe(s); ML {methods or 'off'} -> {out}")
+        pats = [x.strip() for x in (args.strategies or "").split(",") if x.strip()] or None
+        workers = args.workers if args.workers is not None else max(1, min(len(syms) * len(tfs),
+                                                                            (os.cpu_count() or 2) - 2))
         res = run(app, syms, tfs, be, catalogue=Path(args.catalogue).resolve(), methods=methods, out=out,
                   budget=args.budget, start=args.start, end=args.end, universe_basis=basis,
-                  catalogue_enabled=args.mode in ("both", "catalogue"))
+                  catalogue_enabled=args.mode in ("both", "catalogue"), strategy_patterns=pats,
+                  library_extra=args.library, workers=workers, include_disabled=args.include_disabled)
         if not args.json:
-            _p(f"  lanes: {res['lanes']}")
-            _p(f"  catalogue: {res['catalogue_registered']} registered, {res['catalogue_executed']} executed")
+            _p(f"  lanes: {res['lanes']}   workers: {workers}")
+            _p(f"  catalogue: {res['catalogue_registered']} references, {res['catalogue_executed']} executed; "
+               f"coverage {res['catalogue_coverage']}")
+            _p(f"  backtests executed (TESTED rows): {res['tested_rows']}; ML strategies saved to library: "
+               f"{res['library_saved']}")
             for r in res["by_status"]:
                 _p(f"  {r['source']:<9} {r['status']:<30} {r['n']}")
             _p(f"  summary: {res['summary']}")
@@ -647,6 +657,119 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_library(args: argparse.Namespace) -> int:
+    """Manage the declarative strategy library. Read-only actions need no lock."""
+    from .research import library_roots
+    from .strategy_library import StrategyLibrary, normalize, validate
+
+    app = _app(args, readonly=args.action in ("list", "show", "history", "functions", "validate", "compare"))
+    try:
+        roots, writable = library_roots(app)
+        lib = StrategyLibrary(roots, writable)
+        a, t = args.action, list(args.target or [])
+        if a == "functions":
+            from .strategy_dsl import FUNCTIONS
+            for k, v in sorted(FUNCTIONS.items()):
+                _p(f"{k:<18} {v[2]}")
+            return 0
+        if a == "validate":
+            if t:
+                raw = json.loads(Path(t[0]).read_text(encoding="utf-8-sig"))
+                bundle = isinstance(raw, dict) and "strategies" in raw
+                for s in (raw["strategies"] if bundle else [raw]):
+                    d = normalize(s, raw.get("defaults") if bundle else None, raw.get("exit_profiles"))
+                    validate(d)
+                    _p(f"OK {d['id']}")
+                return 0
+            r = lib.load(record=False)
+            _p(json.dumps({**r.summary(), "invalid_entries": r.invalid}, indent=2))
+            return 1 if r.invalid else 0
+        if a in ("list", "show", "history", "compare"):
+            r = lib.load(record=False)
+            if a == "list":
+                rows = [s for s in r.strategies.values() if (not args.origin or s.origin == args.origin)
+                        and (not args.timeframe or args.timeframe in s.timeframes)
+                        and (not args.stock or s.applies(args.stock, args.timeframe or s.timeframes[0]))]
+                for s in sorted(rows, key=lambda x: x.id):
+                    st = (s.blocked or {}).get("status", "EXECUTABLE")
+                    _p(f"{s.id:<34} v{s.version:<3} {s.origin:<18} {st:<22} {'on ' if s.enabled else 'off'} "
+                       f"{','.join(s.timeframes):<22} {s.doc.get('name', '')[:60]}")
+                _p(f"{len(rows)} strategies; library {r.summary()}")
+            elif a == "show":
+                for sid in t:
+                    s = r.strategies.get(sid)
+                    _p(json.dumps({"id": sid, "version": s.version, "path": s.path, "enabled": s.enabled,
+                                   "doc": s.doc} if s else {"id": sid, "error": "not found"}, indent=2, default=str))
+            elif a == "history":
+                for sid in t:
+                    _p(json.dumps(lib.history_of(sid), indent=2))
+            else:
+                import sqlite3
+                if not args.run:
+                    raise SystemExit("compare needs --run <research output directory>")
+                db = sqlite3.connect(Path(args.run) / "matrix.sqlite")
+                cols = ("strategy_id", "symbol", "timeframe", "status", "classification", "val_trades", "val_mean_net",
+                        "val_win_rate", "val_sharpe", "val_max_drawdown", "val_q_value", "final_mean_net")
+                _p("  ".join(cols))
+                q = ",".join("?" * len(t))
+                for row in db.execute(f"SELECT {','.join(cols)} FROM matrix WHERE strategy_id IN ({q}) ORDER BY "
+                                      "strategy_id, symbol", t):
+                    _p("  ".join(str(v)[:12] for v in row))
+            return 0
+        if a == "add":
+            for f in t:
+                _p(f"added {lib.add_file(Path(f))} -> {writable / 'user'}")
+            return 0
+        if a == "edit":
+            changes: dict[str, Any] = {}
+            for kv in args.set or []:
+                k, v = kv.split("=", 1)
+                try:
+                    changes[k] = json.loads(v)
+                except ValueError:
+                    changes[k] = v
+            for sid in t:
+                _p(f"editable copy written: {lib.copy_for_edit(sid, changes)} (the default stays immutable; "
+                   f"'gplm library restore {sid}' brings it back)")
+            return 0
+        if a in ("enable", "disable"):
+            for sid in t:
+                lib.set_enabled(sid, a == "enable")
+                _p(f"{sid}: {a}d")
+            return 0
+        if a == "restore":
+            for sid in t:
+                _p(f"{sid}: default restored; archived copies {lib.restore(sid)}")
+            return 0
+        from .strategy_ai import propose, translate
+
+        tfs = [x.strip() for x in args.timeframes.split(",") if x.strip()]
+        cfg = app.s.section("ai")
+        if a == "translate":
+            text = " ".join(t)
+            if Path(text).is_file():
+                text = Path(text).read_text(encoding="utf-8")
+            res = translate(app.db, lib, cfg, args.provider, text, timeframes=tfs,
+                            symbols=[args.stock] if args.stock else None, reference_id=args.reference,
+                            allow_remote=args.allow_remote, allow_unknown_cost=args.allow_unknown_cost)
+        else:
+            import sqlite3
+            if not args.run:
+                raise SystemExit("propose needs --run <research output directory> to learn from")
+            db = sqlite3.connect(Path(args.run) / "matrix.sqlite")
+            db.row_factory = sqlite3.Row
+            rows = [dict(r) for r in db.execute(
+                "SELECT * FROM matrix WHERE status='TESTED' ORDER BY CAST(val_p_value AS REAL) LIMIT 30")]
+            rows += [dict(r) for r in db.execute(
+                "SELECT * FROM matrix WHERE status='TESTED' ORDER BY CAST(val_mean_net AS REAL) LIMIT 15")]
+            res = propose(app.db, lib, cfg, args.provider, rows, n=args.n, timeframes=tfs,
+                          allow_remote=args.allow_remote, allow_unknown_cost=args.allow_unknown_cost)
+        _p(json.dumps(res, indent=2, default=str))
+        return 0
+    finally:
+        app.close()
+
+
 def cmd_symbols(args: argparse.Namespace) -> int:
     from .ingest import list_symbols
     from .settings import load
@@ -711,7 +834,12 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--timeframes", default="1d", help="all, or comma list from 1m,5m,15m,30m,60m,1d,1w")
     rs.add_argument("--mode", choices=["both", "catalogue", "ml"], default="both",
                     help="catalogue evaluation, autonomous ML discovery, or both")
-    rs.add_argument("--methods", default="tree,screen", help="ML methods used by --mode ml/both: tree,screen")
+    rs.add_argument("--methods", default="evolve", help="ML methods for --mode ml/both: evolve,tree,screen (or none)")
+    rs.add_argument("--strategies", help="only these library ids / reference ids / origins (comma list, globs ok, "
+                                         "e.g. 'C3-*,ML_DISCOVERED,MY-*')")
+    rs.add_argument("--library", action="append", help="extra strategy-library root directory (repeatable)")
+    rs.add_argument("--workers", type=int, help="parallel lane processes (default: CPU count - 2)")
+    rs.add_argument("--include-disabled", action="store_true", help="also run disabled library strategies")
     rs.add_argument("--budget", choices=["quick", "standard", "deep"], default="quick")
     rs.add_argument("--catalogue", default=str(Path(__file__).resolve().parents[3] / "config" / "strategies" /
                                                "reference-300-strategies.txt"))
@@ -790,6 +918,22 @@ def build_parser() -> argparse.ArgumentParser:
     ai.add_argument("--timeframe", default="1d")
     ai.add_argument("--allow-remote", action="store_true")
     ai.add_argument("--allow-unknown-cost", action="store_true")
+    lb = add("library", cmd_library, "declarative strategy library (DSL): list/show/validate/add/edit/enable/"
+                                     "disable/restore/history/functions/translate/propose/compare")
+    lb.add_argument("action", choices=["list", "show", "validate", "add", "edit", "enable", "disable", "restore",
+                                       "history", "functions", "translate", "propose", "compare"])
+    lb.add_argument("target", nargs="*", help="strategy id(s), a JSON file (add/validate) or text (translate)")
+    lb.add_argument("--origin")
+    lb.add_argument("--stock")
+    lb.add_argument("--timeframe")
+    lb.add_argument("--set", action="append", help="edit: dotted.key=JSON value, repeatable (e.g. exit.max_hold_bars=7)")
+    lb.add_argument("--provider", default="anthropic")
+    lb.add_argument("--timeframes", default="1d")
+    lb.add_argument("--reference", help="translate: catalogue reference id the text belongs to")
+    lb.add_argument("--run", help="propose/compare: research run directory (matrix.sqlite) to learn from")
+    lb.add_argument("--n", type=int, default=10)
+    lb.add_argument("--allow-remote", action="store_true")
+    lb.add_argument("--allow-unknown-cost", action="store_true")
     add("status", cmd_status, "lock, live progress and latest runs")
     sy = add("symbols", cmd_symbols, "list the local universe")
     sy.add_argument("--all", action="store_true")

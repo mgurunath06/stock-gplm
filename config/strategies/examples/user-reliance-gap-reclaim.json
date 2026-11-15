@@ -1,0 +1,14 @@
+{
+  "id": "USR-RELIANCE-GAP-RECLAIM",
+  "origin": "USER_DEFINED",
+  "name": "RELIANCE gap-down reclaim of prior close (example user strategy)",
+  "description": "Acceptance example: added through configuration only, applies to one stock. Not part of the catalogue.",
+  "style": "MEAN_REVERSION",
+  "direction": "long",
+  "entry": "gap < -$g and close > close[1] and close > sma(close, 50)",
+  "params": {"g": {"default": 0.01, "grid": [0.005, 0.01, 0.015]}},
+  "exit": {"max_hold_bars": 5, "stop_atr": 1.5, "target_atr": 2.0},
+  "applicability": {"symbols": ["RELIANCE"], "timeframes": ["1d"]},
+  "fidelity": "EXACT",
+  "assumptions": ["gap = open / previous close - 1"]
+}
