@@ -25,9 +25,12 @@ def _tree_paths(model: Any, names: list[str], max_conditions: int = 6) -> list[d
     def visit(node: int, path: list[dict[str, Any]]) -> None:
         left, right = int(tree.children_left[node]), int(tree.children_right[node])
         if left == right:
+            # scikit-learn >= 1.4 stores class fractions in tree.value (not counts); the sample count
+            # must come from n_node_samples, or every leaf fails the minimum-size check.
             counts = tree.value[node][0]
-            total = float(counts.sum())
-            probability = float(counts[1] / total) if total and len(counts) > 1 else 0.0
+            mass = float(counts.sum())
+            probability = float(counts[1] / mass) if mass and len(counts) > 1 else 0.0
+            total = float(tree.n_node_samples[node])
             if probability >= 0.55 and total >= 10 and 0 < len(path) <= max_conditions:
                 rows.append({"conditions": path, "leaf_probability": probability, "leaf_samples": int(total)})
             return

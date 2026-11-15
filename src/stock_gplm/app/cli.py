@@ -267,6 +267,37 @@ def cmd_m56(args: argparse.Namespace) -> int:
     return _run(args, "m56", work, be)
 
 
+def cmd_ml_discover(args: argparse.Namespace) -> int:
+    """Local ML strategy discovery over stored candles (development window only); resumable."""
+    be = _backend(args.device)
+
+    def work(app: Any) -> dict[str, Any]:
+        from .db import sha
+        from .m56 import TIMEFRAMES
+        from .ml_discovery import run
+
+        syms = _symbols(args, app)
+        tfs = list(TIMEFRAMES) if args.timeframes == "all" else [x.strip() for x in args.timeframes.split(",")]
+        bad = sorted(set(tfs) - set(TIMEFRAMES))
+        if bad:
+            raise ValueError(f"unsupported timeframes: {bad}")
+        methods = [x.strip() for x in args.methods.split(",") if x.strip()]
+        name = args.name or "run-" + sha({"symbols": syms, "tfs": tfs, "methods": methods, "budget": args.budget,
+                                          "start": args.start, "end": args.end})[:10]
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "ml-discovery" / name
+        _p(f"ML discovery: {len(syms)} stock(s) x {len(tfs)} timeframe(s) x {len(methods)} method(s) -> {out}")
+        res = run(app, syms, tfs, be, methods=methods, out=out, budget=args.budget, start=args.start, end=args.end)
+        if not args.json:
+            _p(f"  lanes: {res['lane_status']}")
+            for c in res["classifications"]:
+                _p(f"  {c['method']:<7} {c['classification']:<13} {c['n']}")
+            _p(f"  summary: {res['summary']}")
+            _p(f"  resume/extend: rerun the same command (completed lanes are skipped)")
+        return res
+
+    return _run(args, "ml-discover", work, be)
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     be = _backend(args.device)
 
@@ -639,6 +670,16 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--start")
     d.add_argument("--end")
     d.add_argument("--skip-engine", action="store_true", help="run only the batched broad screen")
+    mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
+    stocks(mld)
+    device(mld)
+    mld.add_argument("--timeframes", default="1d,1w", help="all, or comma list from 1m,5m,15m,30m,60m,1d,1w")
+    mld.add_argument("--methods", default="tree,screen", help="tree (sklearn, CPU), screen (GPU when available)")
+    mld.add_argument("--budget", choices=["quick", "standard", "deep"], default="quick", help="screen search size")
+    mld.add_argument("--start")
+    mld.add_argument("--end", help="defaults to m56.development_end; later dates are refused")
+    mld.add_argument("--name", help="output folder name under <home>/reports/ml-discovery (default: derived)")
+    mld.add_argument("--out", help="explicit output directory (reuse it to resume)")
     m56 = add("m56", cmd_m56, "M5.6 full reference-library coverage plus autonomous local discovery")
     stocks(m56)
     device(m56)
