@@ -63,3 +63,17 @@ Known limitations: failed steps appear in `errors`, not as table rows; `--run-na
 default report location (not a custom `--out`); each reused step still rebuilds the as-of lane (existing
 predict cost) because the snapshot/identity check needs it; the 15m run is ~25x the daily step count.
 Next: owner runs the two commands above; then remaining OHLCV algorithm families.
+
+## Fix: direction labels were cost-biased (contract v2, 2026-11-15)
+
+Owner observed only DOWN/UNCERTAIN predictions. Cause: Stock DNA discovery, calibration labels, reveal
+`actual_direction` and Brier all defined UP as "next-open-to-close return beats the ~39 bps delivery
+round trip". Typical daily moves are smaller, so patterns were learned as DOWN, the DNA quality check
+credited the cost drag to DOWN patterns, and small gross rises were scored as actual DOWN.
+
+Fix: `stock-gplm.stock-dna.v2` and `stock-gplm.m58-prediction.v2` label direction on the gross move.
+Costs apply only to the TRADE gate (confident calibrated UP plus positive mean long net return over
+>= `m58.prediction.minimum_trade_gate_outcomes` (default 20) similar earlier calibration rows) and to trade P&L.
+v1 predictions/evaluations remain frozen and untouched; evaluations now count only the current contract.
+Consequence: rerunning the August daily command creates 19 new v2 predictions (new IDs), not reuses.
+Tests: 18 M5.8 passed incl. cost-invariance regressions; app/m56/locking 32 passed, 1 skipped.

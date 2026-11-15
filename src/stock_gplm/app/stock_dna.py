@@ -16,7 +16,9 @@ from .db import sha, utc_now
 from .ingest import Ingestor, window_data
 from .lanes import Lane, all_bars, build_lane
 
-CONTRACT = "stock-gplm.stock-dna.v1"
+# v2: direction and success are labelled on the gross price move; costs only affect the long-trade
+# net figures. v1 labelled "UP" as "beats the round-trip cost", which biased patterns toward DOWN.
+CONTRACT = "stock-gplm.stock-dna.v2"
 DEFAULT_TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "4h", "1d", "1w")
 
 
@@ -60,7 +62,9 @@ def _regimes(lane: Lane) -> np.ndarray:
 def _candidate(feature: str, side: str, threshold: float, disc_values: np.ndarray,
                validation_values: np.ndarray, disc_returns: np.ndarray, validation_returns: np.ndarray,
                validation_rows: np.ndarray, current_value: float, horizon: int, baseline_up: float,
-               baseline_mean: float, regimes: np.ndarray, min_samples: int) -> dict[str, Any]:
+               baseline_mean: float, regimes: np.ndarray, min_samples: int,
+               round_trip_cost: float = 0.0) -> dict[str, Any]:
+    """Returns are gross (cost-free) forward moves: direction is a market question, not a trade one."""
     op = "<=" if side == "LOW" else ">="
     dm = disc_values <= threshold if side == "LOW" else disc_values >= threshold
     direction = "UP" if np.nanmean(disc_returns[dm]) >= 0 else "DOWN"
@@ -82,15 +86,16 @@ def _candidate(feature: str, side: str, threshold: float, disc_values: np.ndarra
     regime: dict[str, Any] = {}
     for name in sorted(set(regimes[rows].tolist())) if n else []:
         rr = signed[regimes[rows] == name]
-        regime[name] = {"observations": len(rr), "mean_directional_net_return": float(np.mean(rr))}
+        regime[name] = {"observations": len(rr), "mean_directional_gross_return": float(np.mean(rr))}
     return {"pattern_id": "dna-" + sha({"f": feature, "s": side, "t": threshold, "h": horizon})[:16],
             "feature": feature, "condition": f"{feature} {op} {threshold:.10g}", "threshold": threshold,
             "threshold_side": side, "direction": direction, "horizon_bars": horizon, "observations": n,
             "successes": wins, "success_rate": rate, "success_ci95_low": lo, "success_ci95_high": hi,
             "baseline_success_rate": base_rate, "improvement": None if rate is None else rate - base_rate,
-            "mean_forward_net_return": float(np.mean(rets)) if n else None,
-            "median_forward_net_return": float(np.median(rets)) if n else None,
-            "baseline_mean_net_return": baseline_mean, "p_value": p, "q_value": None,
+            "mean_forward_gross_return": float(np.mean(rets)) if n else None,
+            "median_forward_gross_return": float(np.median(rets)) if n else None,
+            "mean_forward_long_net_return": float(np.mean(rets) - round_trip_cost) if n else None,
+            "round_trip_cost": round_trip_cost, "baseline_mean_gross_return": baseline_mean, "p_value": p, "q_value": None,
             "stable_halves": bool(all(len(x) and np.mean(x) > 0 for x in halves)), "regimes": regime,
             "last_occurrence_index": int(rows[-1]) if n else None,
             "currently_holds": bool(np.isfinite(current_value) and
@@ -115,7 +120,8 @@ def discover_lane(lane: Lane, cfg: Mapping[str, Any], horizons: Sequence[int] = 
         if valid_end <= split + 2:
             continue
         all_rows = np.arange(valid_end)
-        returns = m.close[all_rows + horizon] / m.open[all_rows + 1] - 1 - lane.costs.buy - lane.costs.sell
+        cost = float(lane.costs.buy + lane.costs.sell)
+        returns = m.close[all_rows + horizon] / m.open[all_rows + 1] - 1  # gross: direction label only
         drows = all_rows[all_rows < split]
         vrows = all_rows[(all_rows >= split) & (all_rows < validation_end)]
         dret, vret = returns[drows], returns[vrows]
@@ -131,12 +137,13 @@ def discover_lane(lane: Lane, cfg: Mapping[str, Any], horizons: Sequence[int] = 
                 side = "LOW" if q < 0.5 else "HIGH"
                 threshold = float(np.quantile(finite, q))
                 rows.append(_candidate(lane.names[j], side, threshold, dv, vv, dret, vret, vrows,
-                                       float(X[-1, j]), horizon, baseline_up, baseline_mean, regimes, min_samples))
+                                       float(X[-1, j]), horizon, baseline_up, baseline_mean, regimes, min_samples,
+                                       cost))
     tested = [r for r in rows if r["p_value"] is not None and r["observations"] >= min_samples]
     adjusted = bh_adjust([r["p_value"] for r in tested], len(tested)) if tested else []
     for row, q in zip(tested, adjusted):
         row["q_value"] = q
-        directional = (row["mean_forward_net_return"] or 0) * (1 if row["direction"] == "UP" else -1)
+        directional = (row["mean_forward_gross_return"] or 0) * (1 if row["direction"] == "UP" else -1)
         row["status"] = ("VALIDATED" if q <= fdr and directional > 0 and row["stable_halves"] else
                          "EXPERIMENTAL" if row["p_value"] < 0.10 and directional > 0 else "REJECTED")
     rows.sort(key=lambda r: (r["status"] != "VALIDATED", r["status"] != "EXPERIMENTAL",

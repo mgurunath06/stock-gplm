@@ -281,7 +281,7 @@ def test_totals_and_table_match_displayed_rows(monkeypatch: pytest.MonkeyPatch, 
 
 def test_classification_abstention_trade_and_missing_confidence_are_distinct() -> None:
     rows = [
-        {"direction": "UP", "realized_return": 0.01, "correct": 1, "prob_calibrated": 0.7, "brier": 0.09,
+        {"direction": "UP", "realized_return": 0.01, "up": 1, "correct": 1, "prob_calibrated": 0.7, "brier": 0.09,
          "trade_net_return": 0.008},
         {"direction": "DOWN", "realized_return": 0.02, "correct": 0, "prob_calibrated": None, "brier": None,
          "trade_net_return": None},
@@ -321,3 +321,33 @@ def test_legacy_prediction_gets_one_labelled_stable_reconstruction(monkeypatch: 
     assert step1["feature_snapshot_sha256"] == step2["feature_snapshot_sha256"]
     assert app.db.one("SELECT COUNT(*) n FROM predictions")["n"] == 1
     app.db.close()
+
+
+class CostlySettings(SnapshotSettings):
+    def section(self, name: str):
+        if name == "costs":
+            return {"delivery": {"commission_bps": 3.0, "slippage_bps": 5.0, "buy_statutory_bps": 12.41,
+                                 "sell_statutory_bps": 10.91},
+                    "intraday": {"commission_bps": 3.0, "slippage_bps": 5.0, "buy_statutory_bps": 3.0,
+                                 "sell_statutory_bps": 3.0}}
+        return super().section(name)
+
+
+def test_directional_classification_ignores_costs_and_actual_uses_gross_move(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Regression: v1 made 'actual DOWN' out of small gross rises and skewed every call to DOWN."""
+    data = _data()
+    d = [str(x) for x in data.daily["date"]]
+    runs = {}
+    for name, settings in (("free", SnapshotSettings), ("costly", CostlySettings)):
+        app = _app(monkeypatch, tmp_path / name, data, settings)
+        runs[name] = mp.walk_forward(app, "SYN", d[490], d[499], "1d", 1, tmp_path / name / "wf", run_name="wf")
+        app.db.close()
+    view = lambda r: [(s["predicted_direction"], s["calibrated_probability"], s["actual_direction"],
+                       s["correctness"]) for s in r["steps"]]
+    assert view(runs["free"]) == view(runs["costly"])
+    for s in runs["costly"]["steps"]:
+        assert s["actual_direction"] == ("UP" if s["actual_gross_return"] > 0 else "DOWN")
+        assert s["actual_net_return"] == pytest.approx(s["actual_gross_return"] - 0.003932)
+        if s["trade_decision"] == "TRADE":
+            assert s["predicted_direction"] == "UP"

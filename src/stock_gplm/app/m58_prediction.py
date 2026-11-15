@@ -18,7 +18,9 @@ from .m58_snapshot import build_snapshot
 from .models import PlattCalibrator
 from .stock_dna import CONTRACT as DNA_CONTRACT, discover_lane
 
-CONTRACT = "stock-gplm.m58-prediction.v1"
+# v2: directional classification, calibration, actual direction and Brier use the gross price move;
+# configured costs apply only to the TRADE gate and trade P&L. v1 rows remain frozen and untouched.
+CONTRACT = "stock-gplm.m58-prediction.v2"
 
 
 def _as_of_cutoff_ns(as_of: str) -> int:
@@ -144,9 +146,9 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
         p, support = _vote(patterns, lane, row)
         if not support:
             continue
-        ret = float(lane.market.close[row + horizon] / lane.market.open[row + 1] - 1 - cost)
-        if np.isfinite(ret):
-            cal_p.append(p); cal_y.append(int(ret > 0)); cal_ret.append(ret)
+        gross = float(lane.market.close[row + horizon] / lane.market.open[row + 1] - 1)
+        if np.isfinite(gross):
+            cal_p.append(p); cal_y.append(int(gross > 0)); cal_ret.append(gross - cost)
     pcfg = app.s.section("m58").get("prediction", {})
     calibrator = PlattCalibrator(int(pcfg.get("minimum_calibration_outcomes", 30))).fit(cal_p, cal_y)
     raw_p, support = _vote(patterns, lane, decision)
@@ -156,6 +158,16 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     direction = "UNCERTAIN" if probability is None or max(probability, 1 - probability) < min_p else \
         ("UP" if probability >= 0.5 else "DOWN")
     comparable = np.asarray(cal_ret, dtype=float)
+    # TRADE gate: long net return (after configured costs) of earlier calibration rows that would also
+    # have been confident UP calls. A correct UP classification alone is not an executable trade.
+    min_trade_n = int(pcfg.get("minimum_trade_gate_outcomes", 20))
+    if calibrated and cal_p:
+        cal_q = calibrator.apply(np.asarray(cal_p, dtype=float))
+        similar = comparable[cal_q >= min_p]
+    else:
+        similar = np.zeros(0)
+    trade_gate_net = float(np.mean(similar)) if len(similar) >= min_trade_n else None
+    tradable = direction == "UP" and calibrated and trade_gate_net is not None and trade_gate_net > 0
     expected = float(np.mean(comparable)) if calibrated and len(comparable) >= 20 else None
     interval = ([float(np.quantile(comparable, 0.1)), float(np.quantile(comparable, 0.9))]
                 if calibrated and len(comparable) >= 20 else None)
@@ -175,6 +187,11 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
                "data_last_session": data.last_session, "dna_contract": DNA_CONTRACT,
                "dna_counts": dna["counts"], "dna_patterns_considered": len(patterns),
                "supporting_stock_dna": support[:20], "calibration_outcomes": len(cal_y),
+               "direction_label": "gross price move (no costs)",
+               "trade_gate": {"similar_confident_up_outcomes": int(len(similar)),
+                              "minimum_outcomes": min_trade_n,
+                              "mean_long_net_return_after_costs": trade_gate_net,
+                              "round_trip_cost": cost},
                "feature_snapshot_sha256": snapshot_sha,
                "calibration": calibrator.status, "raw_probability_internal": raw_p,
                "probability_exposed": probability, "expected_net_return": expected,
@@ -191,7 +208,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
         "source_version": CONTRACT, "horizon_bars": horizon, "decision_label": decision_session,
         "decision_ns": int(lane.market.end_ns[decision]), "target_session": target_session, "direction": direction,
         "prob_raw": raw_p, "prob_calibrated": probability, "calibration": calibrator.status,
-        "actionable": int(direction == "UP" and calibrated), "entry_ref": float(lane.market.close[decision]),
+        "actionable": int(tradable), "entry_ref": float(lane.market.close[decision]),
         "stop": None, "target": None, "cost_bps": cost * 1e4, "data_fingerprint": lane.data_fingerprint,
         "feature_config_sha": lane.feature_config_sha, "payload": payload})
     frozen = app.db.one("SELECT * FROM predictions WHERE prediction_id=?", (prediction_id,))
@@ -241,11 +258,11 @@ def reveal(app: Any, prediction_id: str) -> dict[str, Any]:
     entry = int(decision_idx[-1]) + 1
     gross = float(lane.market.close[t] / lane.market.open[entry] - 1)
     net = gross - lane.costs.buy - lane.costs.sell
-    actual = "UP" if net > 0 else "DOWN" if net < 0 else "FLAT"
+    actual = "UP" if gross > 0 else "DOWN" if gross < 0 else "FLAT"  # direction is cost-free
     direction = pred["direction"]
     correct = None if direction == "UNCERTAIN" else int(direction == actual)
     prob = pred["prob_calibrated"]
-    brier = None if prob is None else (float(prob) - int(net > 0)) ** 2
+    brier = None if prob is None else (float(prob) - int(gross > 0)) ** 2
     trade_net = net if pred["actionable"] and direction == "UP" else None
     payload = {"actual_open": float(lane.market.open[entry]), "actual_close": float(lane.market.close[t]),
                "gross_return": gross, "net_return_after_configured_costs": net, "actual_direction": actual,
@@ -253,7 +270,7 @@ def reveal(app: Any, prediction_id: str) -> dict[str, Any]:
                "revealed_from_data_fingerprint": lane.data_fingerprint}
     app.db.add_evaluation({"prediction_id": prediction_id, "outcome_label": target,
                            "outcome_ns": int(lane.market.end_ns[t]), "realized_return": net,
-                           "up": int(net > 0), "correct": correct, "brier": brier,
+                           "up": int(gross > 0), "correct": correct, "brier": brier,
                            "trade_net_return": trade_net, "exit_reason": "TARGET_SESSION_CLOSE",
                            "bars_held": int(pred["horizon_bars"]), "payload_json": payload})
     return {"status": "REVEALED", "prediction_id": prediction_id, "target_session": target,
@@ -273,7 +290,7 @@ def _metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if group:
             bins.append({"bin": f"{lo:.1f}-{lo + 0.1:.1f}", "n": len(group),
                          "mean_probability": float(np.mean([r["prob_calibrated"] for r in group])),
-                         "observed_up_rate": float(np.mean([r["realized_return"] > 0 for r in group]))})
+                         "observed_up_rate": float(np.mean([bool(r.get("up")) for r in group]))})
     return {"predictions": len(rows), "revealed": len(revealed),
             "correct_directional": sum(int(r["correct"] == 1) for r in directional),
             "incorrect_directional": sum(int(r["correct"] == 0) for r in directional),
@@ -290,7 +307,7 @@ def _metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def evaluate(app: Any, symbol: str | None, out: Path, start: str | None = None, end: str | None = None,
              timeframe: str | None = None, horizon: int | None = None,
              run_name: str | None = None, prediction_ids: Sequence[str] | None = None) -> dict[str, Any]:
-    where, params = "WHERE p.mode='HISTORICAL_FROZEN'", []
+    where, params = "WHERE p.mode='HISTORICAL_FROZEN' AND p.source_version=?", [CONTRACT]
     if symbol:
         where += " AND p.symbol=?"; params.append(normalize_symbol(symbol))
     if start:
@@ -313,7 +330,7 @@ def evaluate(app: Any, symbol: str | None, out: Path, start: str | None = None, 
         else:
             where += f" AND p.prediction_id IN ({','.join('?' * len(prediction_ids))})"
             params.extend(prediction_ids)
-    rows = app.db.q("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return FROM predictions p "
+    rows = app.db.q("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, e.up FROM predictions p "
                     "LEFT JOIN evaluations e ON e.prediction_id=p.prediction_id " + where + " ORDER BY p.decision_ns",
                     params)
     mode = ("NAMED_RUN" if run_name or prediction_ids is not None else
@@ -328,7 +345,7 @@ def evaluate(app: Any, symbol: str | None, out: Path, start: str | None = None, 
 
 def _step(app: Any, prediction_id: str, creation_status: str, snapshot: Mapping[str, Any],
           snapshot_origin: str = SNAPSHOT_FROZEN) -> dict[str, Any]:
-    row = app.db.one("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, "
+    row = app.db.one("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, e.up, "
                      "e.payload_json evaluation_payload FROM predictions p LEFT JOIN evaluations e "
                      "ON e.prediction_id=p.prediction_id WHERE p.prediction_id=?", (prediction_id,))
     assert row is not None
