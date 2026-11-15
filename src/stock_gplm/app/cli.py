@@ -211,6 +211,21 @@ def cmd_prediction_evaluate(args: argparse.Namespace) -> int:
     return _run(args, "prediction-evaluate", work)
 
 
+def cmd_prediction_walk_forward(args: argparse.Namespace) -> int:
+    def work(app: Any) -> dict[str, Any]:
+        from .m58_prediction import walk_forward
+
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "prediction-evaluation" / args.name
+        result = walk_forward(app, args.stock, args.start, args.end, args.timeframe, args.horizon, out,
+                              args.max_steps)
+        if not args.json:
+            _p(f"Walk-forward {result['status']}: {result['steps_done']}/{result['planned']} steps; "
+               f"new frozen {result['newly_frozen']}, new revealed {result['newly_revealed']}")
+            _p(f"  report: {out / 'walk-forward-summary.json'}")
+        return result
+    return _run(args, "prediction-walk-forward", work)
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Correctness-verification suite on synthetic fixtures; exit 0 pass, 1 correctness failure, 2 tracked gaps."""
     from datetime import datetime, timezone
@@ -985,6 +1000,16 @@ def build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--stock")
     pe.add_argument("--name", default="all")
     pe.add_argument("--out")
+    pw = add("prediction-walk-forward", cmd_prediction_walk_forward,
+             "chronological freeze-then-reveal evaluation over a session range (resumable)")
+    pw.add_argument("--stock", required=True)
+    pw.add_argument("--start", required=True)
+    pw.add_argument("--end", required=True)
+    pw.add_argument("--timeframe", default="1d")
+    pw.add_argument("--horizon", type=int, default=1)
+    pw.add_argument("--max-steps", type=int)
+    pw.add_argument("--name", required=True)
+    pw.add_argument("--out")
     mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
     stocks(mld)
     device(mld)

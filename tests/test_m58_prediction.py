@@ -89,3 +89,22 @@ def test_future_mutation_cannot_change_frozen_prediction_identity(monkeypatch: p
     assert second["status"] == "ALREADY_FROZEN" and second["prediction_id"] == first["prediction_id"]
     assert db.one("SELECT COUNT(*) n FROM predictions")["n"] == 1
     db.close()
+
+
+def test_walk_forward_freezes_before_revealing_and_resumes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    data = _data()
+    class FakeIngestor:
+        def __init__(self, *_a, **_k): pass
+        def ingest(self, *_a, **_k): return data
+    monkeypatch.setattr(mp, "Ingestor", FakeIngestor)
+    db = AuditDB(tmp_path / "gplm.sqlite", tmp_path / "events", run_id="test-run")
+    app = SimpleNamespace(s=Settings(tmp_path), db=db)
+    start = str(data.daily["date"].iloc[497]); end = str(data.daily["date"].iloc[499])
+    first = mp.walk_forward(app, "SYN", start, end, "1d", 1, tmp_path / "wf", max_steps=2)
+    assert first["status"] == "COMPLETED" and first["steps_done"] == 2
+    assert first["newly_frozen"] == 2 and first["newly_revealed"] == 2
+    second = mp.walk_forward(app, "SYN", start, end, "1d", 1, tmp_path / "wf", max_steps=2)
+    assert second["newly_frozen"] == 0 and second["newly_revealed"] == 0
+    assert db.one("SELECT COUNT(*) n FROM predictions")["n"] == 2
+    assert db.one("SELECT COUNT(*) n FROM evaluations")["n"] == 2
+    db.close()

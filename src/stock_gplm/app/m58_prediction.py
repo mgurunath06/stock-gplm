@@ -157,7 +157,11 @@ def reveal(app: Any, prediction_id: str) -> dict[str, Any]:
     if not len(idx):
         raise ValueError(f"actual target session {target} is not available; reveal remains blocked")
     t = int(idx[-1])
-    gross = float(lane.market.close[t] / lane.market.open[t] - 1)
+    decision_idx = np.flatnonzero(lane.market.sessions == str(pred["decision_label"]))
+    if not len(decision_idx) or int(decision_idx[-1]) + 1 > t:
+        raise ValueError("prediction decision/target sessions are not ordered in the accepted lane")
+    entry = int(decision_idx[-1]) + 1
+    gross = float(lane.market.close[t] / lane.market.open[entry] - 1)
     net = gross - lane.costs.buy - lane.costs.sell
     actual = "UP" if net > 0 else "DOWN" if net < 0 else "FLAT"
     direction = pred["direction"]
@@ -165,7 +169,7 @@ def reveal(app: Any, prediction_id: str) -> dict[str, Any]:
     prob = pred["prob_calibrated"]
     brier = None if prob is None else (float(prob) - int(net > 0)) ** 2
     trade_net = net if pred["actionable"] and direction == "UP" else None
-    payload = {"actual_open": float(lane.market.open[t]), "actual_close": float(lane.market.close[t]),
+    payload = {"actual_open": float(lane.market.open[entry]), "actual_close": float(lane.market.close[t]),
                "gross_return": gross, "net_return_after_configured_costs": net, "actual_direction": actual,
                "frozen_prediction": {"direction": direction, "probability": prob},
                "revealed_from_data_fingerprint": lane.data_fingerprint}
@@ -211,4 +215,33 @@ def evaluate(app: Any, symbol: str | None, out: Path) -> dict[str, Any]:
     return {**result, "report": str(out / "prediction-evaluation.json")}
 
 
-__all__ = ["CONTRACT", "evaluate", "predict", "reveal"]
+def walk_forward(app: Any, symbol: str, start: str, end: str, timeframe: str, horizon: int, out: Path,
+                 max_steps: int | None = None) -> dict[str, Any]:
+    """Chronological freeze-then-reveal loop. Natural keys make reruns a deterministic resume."""
+    symbol = normalize_symbol(symbol)
+    data = Ingestor(app.s, app.db).ingest(symbol, use_minute=True)
+    sessions = [str(x) for x in data.daily["date"].tolist()]
+    plan = [(sessions[i], sessions[i + horizon]) for i in range(len(sessions) - horizon)
+            if start <= sessions[i] <= end]
+    if max_steps is not None:
+        plan = plan[:max_steps]
+    done = frozen = revealed = 0
+    errors = []
+    for as_of, target in plan:
+        try:
+            pred = predict(app, symbol, as_of, target, timeframe, horizon, out / "frozen")
+            frozen += int(pred["status"] == "FROZEN")
+            actual = reveal(app, pred["prediction_id"])
+            revealed += int(actual["status"] == "REVEALED")
+            done += 1
+        except Exception as exc:
+            errors.append({"as_of": as_of, "target": target, "error": f"{type(exc).__name__}: {exc}"})
+    summary = evaluate(app, symbol, out)
+    result = {"status": "COMPLETED" if not errors else "PARTIAL", "symbol": symbol, "planned": len(plan),
+              "steps_done": done, "newly_frozen": frozen, "newly_revealed": revealed,
+              "errors": errors, "evaluation": summary}
+    (out / "walk-forward-summary.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    return result
+
+
+__all__ = ["CONTRACT", "evaluate", "predict", "reveal", "walk_forward"]
