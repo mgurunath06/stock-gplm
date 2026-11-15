@@ -362,3 +362,202 @@ Instead of hardcoding 300 separate scripts, build an **AST (Abstract Syntax Tree
 * **Operators (`Comparators`):** `>, <, >=, <=, ==, crosses_above, crosses_below, between`
 * **Lookbacks (`Offsets`):** `[t]`, `[t-1]`, `[t-n]`, `Window(20)`
 * **Regime Tag (`Metadata`):** Tag every strategy with `"regime": "TREND" | "MEAN_REVERSION" | "VOLATILITY_BREAKOUT"` so your app automatically applies the right stop-loss logic (e.g., `2x ATR Trailing Stop` for Trend vs `SMA(5) Exit` for Mean Reversion).
+
+---
+
+## GPLM EXPANSION ADDENDUM — 40 ADDITIONAL RESEARCH STRATEGIES (301–340)
+
+**Status:** Proposed test candidates, not demonstrated trading edges. These additions do not replace or alter any of the original 300 strategies. The original section numbering is preserved. The global IDs 301–340 are unique across this addendum.
+
+**Research design:** All formulas below are indicative declarative logic/pseudocode, with adjustable thresholds. Evaluate signals only after the referenced bar is completed; execute no earlier than the next tradable bar. Never derive historical membership, regime states, anchors or thresholds using future information. Apply India-specific costs, liquidity, corporate-action adjustments, and product/shorting eligibility.
+
+**Minimum, not maximum:** GPLM must test these 340 library entries wherever their data and execution prerequisites are satisfied, while separately proposing and validating additional stock-specific, horizon-specific, ML-discovered strategies. Missing data must produce `NOT_TESTABLE`, never synthetic values or a misleading pass.
+
+### Category 7: Intraday Price Behaviour & Microstructure
+
+301. **First-Half-Hour to Last-Half-Hour Momentum:** Test whether morning price discovery predicts closing direction.
+   - **Candidate logic:** `R_0930 = Close(09:45)/Open(09:15)-1; signal at 09:45 if R_0930 > calibrated_quantile; evaluate a separate 15:00–15:30 return/entry policy`
+   - **Data dependencies:** minute OHLCV; NSE session calendar.
+
+302. **Opening Gap Exhaustion:** Large opening gap rejected by early trading.
+   - **Candidate logic:** `Gap = Open_today/Close_prev-1; Gap > threshold AND Close(09:30) < Open_today AND Close(09:30) < session_VWAP; enter on next bar`
+   - **Data dependencies:** minute + daily OHLCV.
+
+303. **VWAP Deviation Persistence:** Distinguish persistent directional pressure from transient deviations.
+   - **Candidate logic:** `Z = (Close-VWAP)/RollingStd(Close-VWAP,N); persistence = count(Z>z0,last k bars); signal if persistence >= m AND slope(VWAP)>0`
+   - **Data dependencies:** minute OHLCV.
+
+304. **Intraday Volume-Curve Surprise:** Detect unexpected participation relative to the same time of day.
+   - **Candidate logic:** `RVOL_slot = Volume(current_slot)/median(Volume(same_slot,previous 20 sessions)); signal when RVOL_slot > q AND Return_slot > 0`
+   - **Data dependencies:** minute OHLCV with historical time slots.
+
+305. **Pre-Open Auction Imbalance Continuation:** Test whether pre-open excess buy interest predicts early continuation.
+   - **Candidate logic:** `Imbalance=(Indicative_Buy_Qty-Indicative_Sell_Qty)/max(Indicative_Total_Qty,1); signal when Imbalance>q AND Open>Prev_Close AND first completed bar positive`
+   - **Data dependencies:** historical NSE pre-open indicative order quantities; minute OHLCV.
+
+### Category 8: Statistical & Cross-Sectional Mean Reversion
+
+306. **Market-Neutral Residual Reversal:** Buy extreme weakness unexplained by broad market movement.
+   - **Candidate logic:** `Residual_t=StockReturn_t-Beta_past*NiftyReturn_t; Z=rolling_zscore(sum(Residual,last k),lookback); signal Z<-2 and Z rising`
+   - **Data dependencies:** daily stock + Nifty history.
+
+307. **Sector-Neutral Reversal:** Detect stock-specific overselling versus sector peers.
+   - **Candidate logic:** `Residual_t=StockReturn_t-Beta_sector_past*SectorReturn_t; signal rolling_Z(Residual,k)<-2 AND Residual_t>Residual_prev`
+   - **Data dependencies:** daily stock and historical sector-index data.
+
+308. **Liquidity-Shock Reversal:** Study reversal after unusually expensive price moves.
+   - **Candidate logic:** `Amihud=abs(Return)/max(RupeeTurnover,epsilon); signal Amihud > prior_rolling_quantile(0.95) AND Return<-q AND next completed bar closes higher`
+   - **Data dependencies:** daily OHLCV + traded value; optionally minute.
+
+309. **Half-Life Optimized Spread Reversion:** Tune horizon from past spread decay rather than fixed days.
+   - **Candidate logic:** `Fit spread_delta=a+b*spread_lag on training-only window; half_life=-ln(2)/ln(1+b) if 0<1+b<1; signal spread_Z<-2 with stable estimated half_life`
+   - **Data dependencies:** historical residual/spread series.
+
+310. **Distance-Based Pair Spread Reversion:** Match similar stocks using training-only distance.
+   - **Candidate logic:** `Select pair by minimum sum((NormPrice_A-NormPrice_B)^2) in formation window; trade when spread_Z outside +/-2 and exit near 0`
+   - **Data dependencies:** daily OHLCV for pair universe; transaction costs.
+
+### Category 9: Regime-Adaptive Strategies
+
+311. **Hidden Markov Regime-Switching Selection:** Select rules under inferred latent volatility/trend states.
+   - **Candidate logic:** `Train HMM on historical returns/volatility; P(state|observations_up_to_t) > p0 AND strategy_state_score>threshold`
+   - **Data dependencies:** daily/minute OHLCV; fitted HMM.
+
+312. **Change-Point Breakout:** Detect structural changes without forward observation.
+   - **Candidate logic:** `Online change-point posterior P(change at t | data<=t)>p0 AND Close>prior_20_bar_high`
+   - **Data dependencies:** daily/minute OHLCV.
+
+313. **Volatility-Conditioned Momentum:** Use momentum only within suitable volatility bins.
+   - **Candidate logic:** `ROC(20)>q AND HV(20) in historically successful train-only volatility quantile band`
+   - **Data dependencies:** daily OHLCV.
+
+314. **Adaptive Mean-Reversion Window:** Adapt signal lookback to historical reversion timescale.
+   - **Candidate logic:** `Estimate half_life using rolling past observations; N=clip(round(half_life),minN,maxN); signal ZScore(Close-SMA(N),N)<-z0 and turns up`
+   - **Data dependencies:** daily/minute OHLCV.
+
+315. **Regime-Transition Ensemble:** Mix diverse proven rules from past-only state probabilities.
+   - **Candidate logic:** `Score=sum_i P(regime_i|data<=t)*validated_score(strategy_i,regime_i); execute if Score>threshold`
+   - **Data dependencies:** OHLCV + validated strategy outputs.
+
+### Category 10: Breadth & Market Internals
+
+316. **Advance-Decline Thrust:** Detect expanding market participation.
+   - **Candidate logic:** `Breadth=(Advancers-Decliners)/max(EligibleUniverseCount,1); signal SMA(Breadth,5) crosses above trained_threshold`
+   - **Data dependencies:** point-in-time NSE universe + daily close.
+
+317. **New High-New Low Expansion:** Detect broad leadership from expanding highs.
+   - **Candidate logic:** `NHNL=(Count(NewHigh20)-Count(NewLow20))/EligibleUniverseCount; signal NHNL above rolling_past_percentile(90)`
+   - **Data dependencies:** point-in-time universe + daily OHLCV.
+
+318. **Percentage-Above-50DMA Thrust:** Spot sharp breadth recovery.
+   - **Candidate logic:** `PctAbove50=count(Close>SMA50)/EligibleCount; signal PctAbove50[t]-PctAbove50[t-10]>q`
+   - **Data dependencies:** point-in-time universe + daily OHLCV.
+
+319. **Sector Participation Divergence:** Avoid rallies sustained by very few constituents.
+   - **Candidate logic:** `SectorIndex_ROC(10)>0 AND PctSectorAdvancing[t]<PctSectorAdvancing[t-5]; classify as weakening breadth filter`
+   - **Data dependencies:** historical index membership and daily OHLCV.
+
+320. **Equal-Weight versus Cap-Weight Divergence:** Compare broad participation against cap-weight concentration.
+   - **Candidate logic:** `EWreturn=mean(constituent_returns adjusted for eligibility); CWreturn=index_return; signal EWreturn-CWreturn > trailing calibrated_quantile`
+   - **Data dependencies:** point-in-time constituents + index prices.
+
+### Category 11: Event-Time & Calendar Technical Signals
+
+321. **Pre-Holiday Momentum:** Evaluate repeatable price action before trading holidays.
+   - **Candidate logic:** `If session_t immediately precedes exchange holiday AND ROC(3)>q, test next feasible session return against matched controls`
+   - **Data dependencies:** historical NSE holiday calendar + daily OHLCV.
+
+322. **Post-Holiday Gap Reversion:** Test whether reopening gaps retrace.
+   - **Candidate logic:** `Gap_on_first_reopen=Open/PrevClose-1; if abs(Gap)>q and first 15m rejects gap, test reversal to prev close`
+   - **Data dependencies:** NSE holidays + minute/daily OHLCV.
+
+323. **Index-Rebalance Pressure:** Study temporary flows around membership changes.
+   - **Candidate logic:** `On dated, previously announced index inclusion/deletion: abnormal_volume_Z>2 AND abnormal_return direction aligns with event; exit after calibrated sessions`
+   - **Data dependencies:** historical dated constituent announcements + OHLCV.
+
+324. **Early-Month Session Trend:** Separate first trading days from generic turn-of-month effect.
+   - **Candidate logic:** `TradingSessionOfMonth in {1,2,3} AND prior_5D_ROC>q; evaluate seasonality out of sample`
+   - **Data dependencies:** historical trading calendar + daily OHLCV.
+
+325. **Expiry-Day Volatility Transition:** Test changes around actual historical derivatives expiry.
+   - **Candidate logic:** `DistanceToActualExpiry<=1 AND HV_intraday/HV_prior_sessions>q AND VWAP trend confirms direction`
+   - **Data dependencies:** dated NSE derivative expiry calendar + minute OHLCV.
+
+### Category 12: Advanced Momentum & Cross-Sectional Selection
+
+326. **Momentum Acceleration:** Find improving returns rather than high returns alone.
+   - **Candidate logic:** `Acceleration=ROC(20)[t]-ROC(20)[t-20]; signal Acceleration>q AND Close>SMA50`
+   - **Data dependencies:** daily OHLCV.
+
+327. **Momentum Stability:** Prefer persistent advances to single exceptional rallies.
+   - **Candidate logic:** `Stability=count(rolling_5D_ROC>0,last 60)/available_windows; rank high stability AND ROC60>0`
+   - **Data dependencies:** daily OHLCV.
+
+328. **Industry-Neutral Momentum:** Find stock leadership above its own industry peers.
+   - **Candidate logic:** `AdjustedMomentum=ROC126_stock-median(ROC126_industry_peers); buy top decile within industry`
+   - **Data dependencies:** point-in-time industry membership + daily OHLCV.
+
+329. **Momentum Crash Recovery:** Explore re-entry after factor-wide reversal ends.
+   - **Candidate logic:** `FactorMomentum_DD<trained_threshold AND FactorMomentum_ROC5>0 AND candidate_stock_RankMomentum top-decile`
+   - **Data dependencies:** point-in-time universe + daily OHLCV.
+
+330. **Multi-Horizon Momentum Disagreement:** Test pullback recovery within long trend.
+   - **Candidate logic:** `ROC126>q_long AND ROC5<q_short_negative AND Close crosses above EMA10`
+   - **Data dependencies:** daily OHLCV.
+
+### Category 13: Volatility Structure & Risk-Aware Signals
+
+331. **Realised Volatility Term-Structure:** Compare near-term and longer-run volatility.
+   - **Candidate logic:** `VR=RealizedVol(5)/max(RealizedVol(60),epsilon); signal VR crosses above trained_threshold AND Close>prior_20_high`
+   - **Data dependencies:** daily/minute OHLCV.
+
+332. **Jump versus Continuous Volatility:** Separate discontinuous moves from diffuse volatility.
+   - **Candidate logic:** `JumpProxy=max(RV-BipowerVariation,0); signal JumpProxy/RV>q AND next-bar momentum confirms`
+   - **Data dependencies:** minute OHLCV; contiguous sessions.
+
+333. **Overnight versus Intraday Volatility Imbalance:** Differentiate gap-driven from session-driven trading.
+   - **Candidate logic:** `OvernightVar=Var(log(Open/PrevClose),20); IntradayVar=Var(log(Close/Open),20); signal ratio>q with directional condition`
+   - **Data dependencies:** daily OHLCV.
+
+334. **Downside Volatility Expansion:** Trigger exits when downside moves dominate.
+   - **Candidate logic:** `DownsideSemiVar(10)/max(DownsideSemiVar(60),epsilon)>q; reduce exposure or exit if trend confirmation fails`
+   - **Data dependencies:** daily/minute OHLCV.
+
+335. **Volatility-Targeted Momentum:** Risk-scale momentum positions rather than binary selection.
+   - **Candidate logic:** `If ROC63>q: weight=min(max_weight,target_vol/max(RealizedVol20,vol_floor)); rebalance on next eligible bar`
+   - **Data dependencies:** daily OHLCV + risk constraints.
+
+### Category 14: ML-Native Open-Ended Discovery Methods
+
+336. **Genetic Programming Rule Discovery:** Evolve interpretable logical and numerical rule expressions.
+   - **Candidate logic:** `Generate valid ASTs from allowlisted primitives; fit candidates only on training folds; select by cost-adjusted walk-forward robustness and complexity penalty`
+   - **Data dependencies:** feature matrix + walk-forward folds + AST evaluator.
+
+337. **Symbolic Regression Signal Discovery:** Find concise mathematical predictors rather than fixed indicators.
+   - **Candidate logic:** `Search bounded symbolic expressions predicting next-horizon net returns; rank by purged cross-validation performance and expression complexity`
+   - **Data dependencies:** feature matrix + labelled horizons.
+
+338. **Feature Interaction Discovery:** Discover non-obvious combinations of existing technical features.
+   - **Candidate logic:** `Generate interaction candidates f_i*f_j and conditional gates; retain only stable out-of-fold incremental improvements`
+   - **Data dependencies:** computed features + training folds.
+
+339. **Historical Nearest-Neighbour Analogues:** Compare current technical state with historical counterparts.
+   - **Candidate logic:** `Normalize features on train-only history; nearest neighbors strictly before t; use kNN forward-return distribution to issue conditional signal`
+   - **Data dependencies:** historical technical feature vectors + forward labels.
+
+340. **Meta-Labelled Entry Filtering:** Decide when an existing primary strategy should be executed.
+   - **Candidate logic:** `Primary rule produces candidate; meta-model predicts P(net_return>costs | features_at_signal); trade only if calibrated probability passes threshold`
+   - **Data dependencies:** primary signals + train-only outcomes/features.
+
+---
+
+### Strategy Engine Requirements for the Expanded Library
+
+- **Identity and editability:** Stable global strategy IDs; immutable, restorable library defaults; editable user-owned copies. No hardcoded strategy rules in application logic.
+- **Configurability:** External JSON/YAML/AST specification for inputs, parameters, universe, timeframe, long/short direction, entry, exit, stops, risk sizing and execution policy.
+- **Research provenance:** Record originating idea, version, feature specifications, training period, purged walk-forward folds, holdout boundary, costs, training artifacts and reproducibility hashes.
+- **Discovery beyond the minimum:** Keep algorithmic search, symbolic regression and other ML-generated rules open-ended, with complexity penalties, deduplication, causal features and independent validation.
+- **Data gating:** Daily and minute OHLCV can support many candidates. Historical pre-open data, accurate point-in-time membership, corporate events, delivery, derivatives/options, trades and order books must be independently acquired when a strategy requires them.
+- **Leakage prevention:** Training-only normalisation and thresholds; timestamp-aware joins; no use of future swing points, next-bar fills at already-observed prices, or holdout-driven selection.
+- **Execution realism:** Consider brokerage, Indian taxes/levies and exchange charges, slippage, bid-ask spread, market impact, halts/circuits and applicable instrument restrictions.
+- **Outcome:** Show `TESTED`, `NOT_TESTABLE`, `REJECTED` or `PROMISING_PENDING_VALIDATION` per strategy × instrument × horizon, with supporting metrics and evidence.
