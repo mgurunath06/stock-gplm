@@ -85,4 +85,11 @@ $env:PYTHONPATH="src"; $env:PYTHONUTF8="1"
 ```
 
 ## Status log
-- 2026-11-15: anomaly resolved, backup verified, tests classified, probe run. Next: fixes 1 and 3, then commit.
+- 2026-11-15: anomaly resolved, backup verified, tests classified, probe run.
+- Commits (local only, not pushed): `b6801d3` Codex M5.6 as verified; `ef50254` this handover;
+  `75e66a6` fixes 1 and 3 (development window plus lane lock). `tests/test_m56.py`: 8 passed; app/discovery tests:
+  28 passed, 1 skipped. The negative control confirmed that the metamorphic test detects a leak.
+- `config/app/gplm.windows.json` (local, untracked) also received `m56.development_end = 2025-10-20`.
+- First real development run started:
+  `.\windows\gplm.cmd m56 --stocks RELIANCE,HDFCBANK,ICICIBANK --timeframes 1d,1w --mode both --budget quick --device auto --resume`
+  The log is `H:\Guru\Learning\StockGLPM\reports\m56-acceptance-20261115\real-run1-dev.log`.
