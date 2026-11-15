@@ -170,6 +170,47 @@ def cmd_stock_dna(args: argparse.Namespace) -> int:
     return _run(args, "stock-dna", work)
 
 
+def cmd_predict(args: argparse.Namespace) -> int:
+    def work(app: Any) -> dict[str, Any]:
+        from .m58_prediction import predict
+
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "predictions" / "frozen"
+        result = predict(app, args.stock, args.as_of, args.target, args.timeframe, args.horizon, out)
+        if not args.json:
+            _p(f"Prediction {result['prediction_id']} {result['status']}: {result['direction']} "
+               f"P={result['probability']} action={result['action']} evidence={result['evidence_quality']}")
+            _p(f"  report: {result['report']}")
+        return result
+    return _run(args, "predict", work)
+
+
+def cmd_prediction_reveal(args: argparse.Namespace) -> int:
+    def work(app: Any) -> dict[str, Any]:
+        from .m58_prediction import reveal
+
+        result = reveal(app, args.prediction)
+        if not args.json:
+            _p(f"{result['status']}: predicted {result.get('predicted_direction')} / actual "
+               f"{result.get('actual_direction')} / correct {result.get('correct')}")
+        return result
+    return _run(args, "prediction-reveal", work)
+
+
+def cmd_prediction_evaluate(args: argparse.Namespace) -> int:
+    def work(app: Any) -> dict[str, Any]:
+        from .m58_prediction import evaluate
+
+        out = Path(args.out).resolve() if args.out else app.s.reports_dir / "prediction-evaluation" / args.name
+        result = evaluate(app, args.stock, out)
+        if not args.json:
+            _p(f"Predictions {result['predictions']}; revealed {result['revealed']}; accuracy "
+               f"{result['directional_accuracy']}; abstention {result['abstention_rate']}; "
+               f"mean Brier {result['mean_brier']}")
+            _p(f"  report: {result['report']}")
+        return result
+    return _run(args, "prediction-evaluate", work)
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Correctness-verification suite on synthetic fixtures; exit 0 pass, 1 correctness failure, 2 tracked gaps."""
     from datetime import datetime, timezone
@@ -929,6 +970,21 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--as-of", help="inclusive data cutoff YYYY-MM-DD (default latest accepted session)")
     sd.add_argument("--name")
     sd.add_argument("--out")
+    pr = add("predict", cmd_predict, "freeze a point-in-time Stock-DNA historical prediction")
+    pr.add_argument("--stock", required=True)
+    pr.add_argument("--as-of", required=True, help="inclusive cutoff YYYY-MM-DD")
+    pr.add_argument("--target", required=True, help="target session YYYY-MM-DD")
+    pr.add_argument("--timeframe", default="1d")
+    pr.add_argument("--horizon", type=int, default=1)
+    pr.add_argument("--out")
+    rv = add("prediction-reveal", cmd_prediction_reveal,
+             "reveal actual outcome for an already frozen historical prediction")
+    rv.add_argument("--prediction", required=True, help="frozen prediction id")
+    pe = add("prediction-evaluate", cmd_prediction_evaluate,
+             "walk-forward accuracy, calibration, abstention and net-performance report")
+    pe.add_argument("--stock")
+    pe.add_argument("--name", default="all")
+    pe.add_argument("--out")
     mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
     stocks(mld)
     device(mld)

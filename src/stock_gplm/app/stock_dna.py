@@ -102,7 +102,8 @@ def _candidate(feature: str, side: str, threshold: float, disc_values: np.ndarra
 def discover_lane(lane: Lane, cfg: Mapping[str, Any], horizons: Sequence[int] = (1,)) -> dict[str, Any]:
     m, X = lane.market, lane.X
     n = len(m)
-    split = max(1, min(n - 2, int(n * float(cfg.get("discovery_fraction", 0.65)))))
+    split = max(1, min(n - 3, int(n * float(cfg.get("discovery_fraction", 0.55)))))
+    validation_end = max(split + 1, min(n - 2, split + int(n * float(cfg.get("validation_fraction", 0.25)))))
     quantiles = [float(x) for x in cfg.get("quantiles", [0.2, 0.8])]
     max_features = int(cfg.get("max_features", 160))
     min_samples = int(cfg.get("min_validation_observations", 20))
@@ -116,7 +117,7 @@ def discover_lane(lane: Lane, cfg: Mapping[str, Any], horizons: Sequence[int] = 
         all_rows = np.arange(valid_end)
         returns = m.close[all_rows + horizon] / m.open[all_rows + 1] - 1 - lane.costs.buy - lane.costs.sell
         drows = all_rows[all_rows < split]
-        vrows = all_rows[all_rows >= split]
+        vrows = all_rows[(all_rows >= split) & (all_rows < validation_end)]
         dret, vret = returns[drows], returns[vrows]
         baseline_up = float(np.mean(vret > 0))
         baseline_mean = float(np.mean(vret))
@@ -144,6 +145,7 @@ def discover_lane(lane: Lane, cfg: Mapping[str, Any], horizons: Sequence[int] = 
     return {"contract": CONTRACT, "symbol": lane.symbol, "timeframe": lane.timeframe,
             "data_fingerprint": lane.data_fingerprint, "feature_config_sha": lane.feature_config_sha,
             "bars": n, "data_start": lane.label(0), "data_end": lane.label(n - 1), "split_index": split,
+            "validation_end_index": validation_end, "calibration_start_index": validation_end,
             "patterns": rows, "counts": {s: sum(r["status"] == s for r in rows) for s in
                                            ("VALIDATED", "EXPERIMENTAL", "REJECTED", "INSUFFICIENT_EVIDENCE")}}
 
