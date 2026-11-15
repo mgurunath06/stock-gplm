@@ -34,6 +34,17 @@
     "SUPPORT_RESISTANCE": {"params": {"period": [20]}},
     "STATS": {"params": {"period": [20]}}
   },
+  "snapshot_indicators": {
+    "EMA": {"params": {"period": [10, 20, 34, 50, 100, 200]}},
+    "SMA": {"params": {"period": [20, 100]}},
+    "RSI": {"params": {"period": [7, 14, 21]}},
+    "VWAP": {"params": {"session": [true]}},
+    "MACD": {"params": {"fast": [12], "slow": [26], "signal": [9]}},
+    "ROC": {"params": {"period": [1, 3, 5, 10, 20, 60]}},
+    "ATR": {"params": {"period": [14]}},
+    "BOLLINGER": {"params": {"period": [20], "width": [2.0]}},
+    "VOLUME": {"params": {"period": [20, 50]}}
+  },
   "htf": {
     "contract": "stock-gplm.m54-search-space.v1",
     "levels": {"RSI.value": [30, 50, 70], "ADX.adx": [20, 25]},

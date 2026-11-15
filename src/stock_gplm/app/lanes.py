@@ -158,7 +158,9 @@ def build_lane(data: SymbolData, timeframe: str, costs_cfg: Mapping[str, Any], s
         return None
     htf_names = [t for t in space["lane_htf"].get(timeframe, []) if len(bars[t])]
     htf = {t: bars[t] for t in htf_names}
-    feat_sha = sha({"space": space, "tf": timeframe, "htf": htf_names, "v": "lane.v1"})
+    # Report-only snapshot indicators must not change model features or frozen prediction identity.
+    model_space = {k: v for k, v in space.items() if k != "snapshot_indicators"}
+    feat_sha = sha({"space": model_space, "tf": timeframe, "htf": htf_names, "v": "lane.v1"})
     f = b.frame.reset_index(drop=True)
     frame_hash = sha({"bars": int(pd.util.hash_pandas_object(f[["session", "open", "high", "low", "close", "volume",
                                                                 "end_ns"]], index=False).sum() % (1 << 62)),

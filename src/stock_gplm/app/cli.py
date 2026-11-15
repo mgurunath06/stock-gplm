@@ -201,9 +201,10 @@ def cmd_prediction_evaluate(args: argparse.Namespace) -> int:
         from .m58_prediction import evaluate
 
         out = Path(args.out).resolve() if args.out else app.s.reports_dir / "prediction-evaluation" / args.name
-        result = evaluate(app, args.stock, out)
+        result = evaluate(app, args.stock, out, start=args.start, end=args.end,
+                          timeframe=args.timeframe, horizon=args.horizon, run_name=args.run_name)
         if not args.json:
-            _p(f"Predictions {result['predictions']}; revealed {result['revealed']}; accuracy "
+            _p(f"[{result['mode']}] Predictions {result['predictions']}; revealed {result['revealed']}; accuracy "
                f"{result['directional_accuracy']}; abstention {result['abstention_rate']}; "
                f"mean Brier {result['mean_brier']}")
             _p(f"  report: {result['report']}")
@@ -213,15 +214,27 @@ def cmd_prediction_evaluate(args: argparse.Namespace) -> int:
 
 def cmd_prediction_walk_forward(args: argparse.Namespace) -> int:
     def work(app: Any) -> dict[str, Any]:
-        from .m58_prediction import walk_forward
+        from .m58_prediction import format_run_totals, format_step_details, format_step_table, walk_forward
 
         out = Path(args.out).resolve() if args.out else app.s.reports_dir / "prediction-evaluation" / args.name
         result = walk_forward(app, args.stock, args.start, args.end, args.timeframe, args.horizon, out,
-                              args.max_steps)
+                              args.max_steps, args.name)
         if not args.json:
-            _p(f"Walk-forward {result['status']}: {result['steps_done']}/{result['planned']} steps; "
-               f"new frozen {result['newly_frozen']}, new revealed {result['newly_revealed']}")
+            _p(f"Walk-forward {result['status']}: {result['steps_done']}/{result['planned']} steps")
+            table = format_step_table(result["steps"])
+            _p(table[0])
+            for line, step in zip(table[1:], result["steps"]):
+                _p(line)
+                if args.details:
+                    for detail in format_step_details(step, app.db.get_feature_snapshot(
+                            step["feature_snapshot_sha256"]) or {}):
+                        _p(detail)
+            for err in result["errors"]:
+                _p(f"  ERROR {err['as_of']} -> {err['target']}: {err['error']}")
+            for line in format_run_totals(result):
+                _p(line)
             _p(f"  report: {out / 'walk-forward-summary.json'}")
+            _p(f"  feature snapshots: {result['steps_json']} and {result['steps_csv']}")
         return result
     return _run(args, "prediction-walk-forward", work)
 
@@ -999,6 +1012,11 @@ def build_parser() -> argparse.ArgumentParser:
              "walk-forward accuracy, calibration, abstention and net-performance report")
     pe.add_argument("--stock")
     pe.add_argument("--name", default="all")
+    pe.add_argument("--start")
+    pe.add_argument("--end")
+    pe.add_argument("--timeframe")
+    pe.add_argument("--horizon", type=int)
+    pe.add_argument("--run-name")
     pe.add_argument("--out")
     pw = add("prediction-walk-forward", cmd_prediction_walk_forward,
              "chronological freeze-then-reveal evaluation over a session range (resumable)")
@@ -1009,6 +1027,7 @@ def build_parser() -> argparse.ArgumentParser:
     pw.add_argument("--horizon", type=int, default=1)
     pw.add_argument("--max-steps", type=int)
     pw.add_argument("--name", required=True)
+    pw.add_argument("--details", action="store_true", help="print per-step feature and pattern evidence")
     pw.add_argument("--out")
     mld = add("ml-discover", cmd_ml_discover, "local ML strategy discovery + cost-aware backtest (resumable)")
     stocks(mld)

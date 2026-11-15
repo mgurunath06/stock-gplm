@@ -160,6 +160,14 @@ class Progress:
     def close(self, final_note: str | None = None) -> None:
         if final_note:
             self.state["note"] = final_note
+        meaningful = self.units_total > 0 or any(self.state.get(k) not in (None, "", 0)
+                                                 for k in self.FIELDS)
+        if not meaningful:
+            quiet = self.quiet
+            self.quiet = True
+            self.update(force=True)
+            self.quiet = quiet
+            return
         self.update(force=True)
         if not self.quiet and not self.vt:
             self.stream.write(self._line() + "\n")

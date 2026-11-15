@@ -97,6 +97,9 @@ CREATE TABLE IF NOT EXISTS checkpoints (key TEXT PRIMARY KEY, run_id TEXT, paylo
   payload_sha TEXT NOT NULL, updated_utc TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS config_snapshots (sha256 TEXT PRIMARY KEY, path TEXT NOT NULL, content TEXT NOT NULL,
   first_seen_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS feature_snapshots (
+  sha256 TEXT PRIMARY KEY, contract TEXT NOT NULL, content TEXT NOT NULL,
+  created_utc TEXT NOT NULL, run_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS m56_catalogues (
   catalogue_sha256 TEXT PRIMARY KEY, source_path TEXT NOT NULL, contract TEXT NOT NULL,
   strategy_count INTEGER NOT NULL, manifest_path TEXT NOT NULL, created_utc TEXT NOT NULL, run_id TEXT);
@@ -123,6 +126,10 @@ CREATE TRIGGER IF NOT EXISTS evaluations_no_update BEFORE UPDATE ON evaluations
   BEGIN SELECT RAISE(ABORT, 'evaluations are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS evaluations_no_delete BEFORE DELETE ON evaluations
   BEGIN SELECT RAISE(ABORT, 'evaluations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS feature_snapshots_no_update BEFORE UPDATE ON feature_snapshots
+  BEGIN SELECT RAISE(ABORT, 'feature snapshots are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS feature_snapshots_no_delete BEFORE DELETE ON feature_snapshots
+  BEGIN SELECT RAISE(ABORT, 'feature snapshots are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
   BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
@@ -381,6 +388,20 @@ class AuditDB:
         return json.loads(r["payload_json"])
 
     # ------------------------------------------------------------------ predictions / evaluations
+    def add_feature_snapshot(self, snapshot: Mapping[str, Any]) -> str:
+        """Store one immutable snapshot by content hash and return its digest."""
+        values = dict(snapshot)
+        digest = str(values.pop("snapshot_sha256", "") or sha(values))
+        body = jdump({**values, "snapshot_sha256": digest})
+        with self.tx() as c:
+            c.execute("INSERT OR IGNORE INTO feature_snapshots VALUES (?,?,?,?,?)",
+                      (digest, str(snapshot["contract"]), body, utc_now(), self.run_id))
+        return digest
+
+    def get_feature_snapshot(self, digest: str) -> dict[str, Any] | None:
+        row = self.one("SELECT content FROM feature_snapshots WHERE sha256=?", (digest,))
+        return json.loads(row["content"]) if row is not None else None
+
     def add_prediction(self, row: Mapping[str, Any]) -> bool:
         """Insert one forecast. Returns False (and inserts nothing) when its natural key exists."""
         cols = ["prediction_id", "natural_key", "mode", "run_id", "replay_id", "symbol", "timeframe", "lane_key",
@@ -413,7 +434,7 @@ class AuditDB:
     def export_table(self, table: str, fmt: str, where: str = "", params: Sequence[Any] = ()) -> str:
         allowed = {"runs", "events", "data_files", "data_issues", "candle_cache", "strategies", "models", "champions",
                    "training_history", "predictions", "evaluations", "api_calls", "checkpoints", "m56_catalogues",
-                   "m56_coverage", "m56_results", "m56_method_runs"}
+                   "m56_coverage", "m56_results", "m56_method_runs", "feature_snapshots"}
         if table not in allowed:
             raise ValueError(f"unknown table {table}")
         rows = self.q(f"SELECT * FROM {table} {where}", params)
