@@ -102,3 +102,18 @@ reading. The 81 sessions with negative volume earlier in the day do not fit it a
 MANY_ZERO_VOLUME_BARS 15,510 (1,813 symbols), CALENDAR_GAP 5,734, CORPORATE_ACTION_UNCERTAIN 3,140
 (1,412 symbols; open gaps above 10%), LARGE_INTRADAY_BAR_MOVE 1,189, INCOMPLETE_SESSION 11,
 MINUTE_DAILY_PRICE_MISMATCH 2. Re-running the command parses nothing unless a file changed.
+
+### RELIANCE minute/daily price differences
+
+The two recorded `MINUTE_DAILY_PRICE_MISMATCH` rows are provider-source disagreements, not repaired
+candles. Both sessions contain 375 regular minute bars and an accepted Shoonya daily candle:
+
+| Session | Daily OHLC | Minute-aggregated OHLC | Differences that cross 0.5% |
+| --- | --- | --- | --- |
+| 2026-01-06 | 1569.0 / 1569.0 / 1496.3 / 1507.6 | 1558.0 / 1560.8 / 1496.3 / 1508.7 | high -0.5226% (open -0.7011% is recorded but open alone does not trigger the price-mismatch rule) |
+| 2026-03-19 | 1388.0 / 1415.7 / 1376.1 / 1384.8 | 1392.0 / 1415.7 / 1376.1 / 1392.0 | close +0.5199% |
+
+The cause is `UNKNOWN`; there is no registered evidence that justifies altering either source. When an
+accepted daily candle exists, the composite daily lane keeps that daily candle. The minute bars remain
+unchanged and feed intraday lanes. The discrepancies remain visible as `WARN` evidence rows and are never
+silently filled, adjusted or used to rewrite raw files.

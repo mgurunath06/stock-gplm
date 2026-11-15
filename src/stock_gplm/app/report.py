@@ -145,7 +145,12 @@ def write_daily(out_dir: Path, summary: Mapping[str, Any], accuracy: Sequence[Ma
              f"<h1>GPLM daily report — latest completed session {html.escape(str(summary.get('latest_session')))}</h1>",
              f"<p class='mut'>{CLASSIFICATION}. Generated {utc_now()} by run {html.escape(str(summary.get('run_id')))} "
              f"on {html.escape(str(summary.get('device')))}. Predictions are research forecasts, not orders or advice.</p>"]
-    parts.append("<h2>Next-session forecasts</h2>")
+    status = str(summary.get("status", "COMPLETED"))
+    status_class = "ok" if status == "COMPLETED" else "warn"
+    counts = summary.get("lane_counts", {})
+    parts.append(f"<div class='card'><b>Run status: <span class='{status_class}'>{html.escape(status)}</span></b> "
+                 f"&mdash; {counts.get('succeeded', 0)} lanes succeeded, {counts.get('failed', 0)} failed.</div>")
+    parts.append("<h2>Accepted next-session decisions</h2>")
     for f in forecasts:
         status = f["status"]
         cls = "ok" if status == "CANDIDATES" else "warn"
@@ -153,10 +158,13 @@ def write_daily(out_dir: Path, summary: Mapping[str, Any], accuracy: Sequence[Ma
                      f"<span class='mut'>decision bar {html.escape(str(f.get('decision_label')))}</span>")
         if f.get("no_trade_reason"):
             parts.append(f"<div class='mut'>{html.escape(f['no_trade_reason'])}</div>")
-        show = f["actionable"] or [c for c in f["candidates"] if c["source_kind"] == "MODEL"][:6]
-        parts.append(_table(show, ["source_kind", "source_id", "horizon_label", "direction", "prob_calibrated",
-                                   "calibration", "entry_rule", "entry_ref", "stop", "target", "expected_rr",
-                                   "cost_bps", "actionable", "not_actionable_because"]))
+        parts.append(_table(f["actionable"], ["source_kind", "source_id", "horizon_label", "direction",
+                                                "prob_calibrated", "calibration", "entry_rule", "entry_ref",
+                                                "stop", "target", "expected_rr", "cost_bps"]))
+        rejected = [c for c in f["candidates"] if not c["actionable"]]
+        parts.append(f"<details><summary>{len(rejected)} rejected or competing forecasts</summary>" +
+                     _table(rejected, ["source_kind", "source_id", "horizon_label", "direction",
+                                       "prob_calibrated", "not_actionable_because"]) + "</details>")
         parts.append("</div>")
     parts.append("<h2>Sequential out-of-sample accuracy (stored before outcomes; evaluated after)</h2>")
     parts.append(_table(accuracy, ["lane_key", "source_kind", "source_id", "horizon_bars", "champion", "predictions",
@@ -171,6 +179,8 @@ def write_daily(out_dir: Path, summary: Mapping[str, Any], accuracy: Sequence[Ma
                                                                      "first_session", "last_session", "predictions_new",
                                                                      "evaluations_new", "rule_searches", "seconds",
                                                                      "skipped_horizons"]))
+    if summary.get("lane_failures"):
+        parts.append("<h2>Lane failures</h2>" + _table(summary["lane_failures"], ["lane", "error"]))
     parts.append("</body></html>")
     (out_dir / "report.html").write_text("".join(parts), encoding="utf-8")
     return {k: str(out_dir / k) for k in ("report.html", "summary.json", "accuracy.csv", "forecasts.csv",

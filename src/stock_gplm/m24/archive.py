@@ -155,7 +155,8 @@ def stage_archive(
                     data = source.read(item.size + 1)
                     if len(data) != item.size:
                         raise ArchiveRejected(f"archive member size is inconsistent: {item.name!r}")
-                    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+                    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                         getattr(os, "O_NOFOLLOW", 0), 0o400)
                     with os.fdopen(descriptor, "wb") as outgoing:
                         outgoing.write(data)
                     files[item.relative] = {
@@ -168,6 +169,12 @@ def stage_archive(
             })
             os.rename(partial, final)
         except BaseException:
+            if os.name == "nt":
+                for item in partial.rglob("*"):
+                    try:
+                        os.chmod(item, 0o700 if item.is_dir() else 0o600)
+                    except OSError:
+                        pass
             shutil.rmtree(partial, ignore_errors=True)
             raise
     return final

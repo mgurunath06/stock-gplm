@@ -325,7 +325,7 @@ def build_training_run(*, m31_run: Path, m32_run: Path, policy_path: Path, outpu
         _write(partial / "trials.json", reservations)
         status = {h: ("MODEL_TRAINED" if modes[h] == "MODEL_TRAINING" else "BLOCKED_EXPLORATORY_BASELINES_ONLY")
                   for h in policy.horizons}
-        outputs = {str(p.relative_to(partial)): hashlib.sha256(p.read_bytes()).hexdigest()
+        outputs = {p.relative_to(partial).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in sorted(partial.rglob("*")) if p.is_file()}
         _write(partial / "run-manifest.json", {
             **binding, "run_id": run_id, "policy": dict(policy.raw), "training_status": status,

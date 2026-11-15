@@ -305,7 +305,7 @@ def build_exploratory_run(*, m31_run: Path, m32_run: Path, policy_path: Path, et
         _write(partial / "metrics.json", metrics)
         _write(partial / "fold-metrics.csv", pd.DataFrame(fold_rows).to_csv(index=False, lineterminator="\n"))
         _write(partial / "trials.json", reservations)
-        outputs = {str(p.relative_to(partial)): hashlib.sha256(p.read_bytes()).hexdigest()
+        outputs = {p.relative_to(partial).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                    for p in sorted(partial.rglob("*")) if p.is_file()}
         _write(partial / "run-manifest.json", {
             **binding, "experiment_id": experiment_id, "bias_reasons": list(BIAS_REASONS),

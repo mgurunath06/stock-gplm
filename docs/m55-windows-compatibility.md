@@ -96,3 +96,50 @@ No Linux runtime was available for execution in this session; the POSIX branch
 continues to delegate to the existing standard-library `fcntl.flock` behavior.
 The original pre-repair audit head at event 936 remains byte-identical within the
 verified chain (`reports/windows-compat/audit-prefix.json`).
+
+## Dashboard and execution stabilization follow-up (2026-11-15)
+
+The rolling application now imports `hashlib` at module scope, covering both the
+daily and 15-minute checkpoint-validation lanes. Daily orchestration derives the
+run result from every requested lane: all lanes successful is `COMPLETED`, a mix
+is `PARTIAL`, and no successful lanes is `FAILED`. The CLI returns a non-zero
+status for partial or failed runs and prominently prints the succeeded/failed
+counts. Historical rows are not rewritten; the dashboard labels an older
+`COMPLETED` row containing `LANE_FAILED` events as
+`RECORDED_COMPLETED_WITH_FAILURES`.
+
+The dashboard resolves copied POSIX cache paths beneath the configured Windows
+cache root while retaining the recorded source path. The RELIANCE stock endpoint
+now returns 160 daily candles through 2026-11-13. Accepted forecasts appear first;
+rejected and competing forecasts remain available in drill-down sections.
+Strategy cards show a readable entry rule, evaluated and total samples, win rate,
+compounded net return, mean net return, maximum drawdown and an explicitly
+sample-size-based evidence-quality label. Device reporting separates the selected
+backend from devices that actually trained models and performed numerical work;
+an idempotent run with no fits reports no training device rather than attributing
+training to the selected GPU.
+
+The two minute/daily discrepancies and their non-repair treatment are documented
+in `docs/m55-data-investigation.md`: RELIANCE-EQ on 2026-01-06 (daily high versus
+minute-derived high) and 2026-03-19 (daily close versus minute-derived close).
+Both source streams remain unchanged and their cause remains `UNKNOWN`.
+
+Two consecutive native commands completed both requested lanes without a lane
+failure. Runs `20261115T095123Z-daily-056635bf` and
+`20261115T095447Z-daily-0c4257ab` each added zero predictions, evaluations or
+fits, leaving 10,237 predictions, 9,314 evaluations and 3,213 models. The final
+audit checked 1,406 events, head
+`5faac63d10a83b47653883fc316fb75455ab2e396d4b3549715f170eea1ee481`, with
+SQLite `quick_check=ok`.
+
+Focused application, locking, concurrency and relocated-model checks completed
+with **25 passed, 1 skipped**. The complete native-Windows suite completed with
+**748 passed, 4 skipped, 211 failed and 2 teardown errors**. Remaining failures
+are grouped as: legacy POSIX ownership/mode and administrative trust-root
+semantics (the dominant M5/M5.1/M5.12/M5.13 group); POSIX-only M2.5 credential
+and Oracle authentication primitives; unavailable unprivileged Windows symlink
+creation; and tests that mutate or clean up deliberately read-only publications.
+Smaller pre-existing platform assumptions include POSIX loopback/process probes
+and an M5.4 encoded-text expectation. These rules were not weakened, credential
+workflows were not exercised, and legitimate governance expectations were not
+changed for a Windows-only test result.

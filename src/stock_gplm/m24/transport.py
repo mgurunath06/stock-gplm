@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import selectors
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -62,22 +64,51 @@ def _run_bounded(
     total = 0
     deadline = time.monotonic() + timeout
     try:
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-            while selector.get_map():
+        if os.name == "nt":
+            chunks: queue.Queue[tuple[str, bytes | None]] = queue.Queue()
+
+            def read_pipe(name: str, stream: object) -> None:
+                while True:
+                    chunk = stream.read(64 * 1024)  # type: ignore[attr-defined]
+                    chunks.put((name, chunk or None))
+                    if not chunk:
+                        return
+
+            for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
+                threading.Thread(target=read_pipe, args=(name, stream), daemon=True).start()
+            open_pipes = 2
+            while open_pipes:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TransientTransportError("remote command exceeded its time bound")
-                for key, _ in selector.select(remaining):
-                    chunk = os.read(key.fileobj.fileno(), 64 * 1024)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise TransportError("remote command exceeded its output bound")
-                    captured[key.data].append(chunk)
+                try:
+                    name, chunk = chunks.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise TransientTransportError("remote command exceeded its time bound") from exc
+                if chunk is None:
+                    open_pipes -= 1
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    raise TransportError("remote command exceeded its output bound")
+                captured[name].append(chunk)
+        else:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+                selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TransientTransportError("remote command exceeded its time bound")
+                    for key, _ in selector.select(remaining):
+                        chunk = os.read(key.fileobj.fileno(), 64 * 1024)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise TransportError("remote command exceeded its output bound")
+                        captured[key.data].append(chunk)
         remaining = deadline - time.monotonic()
         try:
             returncode = process.wait(max(remaining, 0))
@@ -91,8 +122,8 @@ def _run_bounded(
         process.stderr.close()
     return (
         returncode,
-        b"".join(captured["stdout"]).decode("utf-8", "replace"),
-        b"".join(captured["stderr"]).decode("utf-8", "replace"),
+        b"".join(captured["stdout"]).decode("utf-8", "replace").replace("\r\n", "\n"),
+        b"".join(captured["stderr"]).decode("utf-8", "replace").replace("\r\n", "\n"),
     )
 
 

@@ -105,10 +105,21 @@ def _publish_file(target: Path, data: bytes) -> None:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chmod(temporary, 0o444)
-        os.link(temporary, target)
+        if os.name == "nt":
+            # A read-only Windows temporary cannot be unlinked. Link while
+            # writable, remove the temporary name, then make the published name
+            # read-only. os.link remains create-only, so an existing target is
+            # never replaced.
+            os.link(temporary, target)
+            os.unlink(temporary)
+            temporary = ""
+            os.chmod(target, 0o444)
+        else:
+            os.chmod(temporary, 0o444)
+            os.link(temporary, target)
     finally:
-        os.unlink(temporary)
+        if temporary:
+            os.unlink(temporary)
 
 
 def import_snapshot(

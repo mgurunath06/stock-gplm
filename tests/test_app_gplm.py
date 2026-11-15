@@ -398,6 +398,15 @@ def test_daily_cli_twice_is_idempotent_and_dashboard_serves(world: dict, tmp_pat
     assert tr["input_data"]["source_files_up_to_decision"] and tr["evaluation"]["outcome_ns"] > tr["prediction"]["decision_ns"]
     assert tr["prediction_run"]["status"] == "COMPLETED" and tr["config_snapshot"]
     db.close()
+    # Simulate a state directory copied from Linux: dashboard resolves the immutable cache identity
+    # beneath the current home instead of reporting an empty chart.
+    db = AuditDB(home / "gplm.sqlite")
+    cache = db.one("SELECT symbol, path FROM candle_cache WHERE symbol='AAA-EQ'")
+    cache_path = Path(cache["path"])
+    db.conn.execute("UPDATE candle_cache SET path=? WHERE symbol='AAA-EQ'",
+                    (f"/old/linux/state/cache/candles/{cache_path.parent.name}/{cache_path.name}",))
+    db.conn.commit()
+    db.close()
     assert (home / "reports" / "latest" / "report.html").is_file()
     # dashboard on an ephemeral port
     from http.server import ThreadingHTTPServer
@@ -416,6 +425,15 @@ def test_daily_cli_twice_is_idempotent_and_dashboard_serves(world: dict, tmp_pat
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/summary", timeout=20) as r:
             body = json.loads(r.read())
         assert body["symbols"] == ["AAA-EQ", "BBB-EQ"] and body["forecasts"]
+        assert body["latest_daily"]["effective_status"] == "COMPLETED"
+        assert body["compute_attribution"]["selected_backend"] == "cpu (NumPy)"
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/stock?symbol=AAA-EQ", timeout=20) as r:
+            stock_body = json.loads(r.read())
+        assert stock_body["candles"] and stock_body["cache"]["available"] is True
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/strategies", timeout=20) as r:
+            strategy_body = json.loads(r.read())
+        assert strategy_body and {"readable_rule", "evaluated", "win_rate", "net_return", "max_drawdown",
+                                  "evidence_quality"} <= strategy_body[0].keys()
     finally:
         srv.shutdown()
 
@@ -433,12 +451,15 @@ def test_interrupted_daily_resumes_without_duplicates(world: dict, tmp_path: Pat
         return orig(self, *a, **k)
 
     monkeypatch.setattr(LaneReplay, "_signal_predictions", boom)
-    assert cli.main(["replay", "--stocks", "AAA", "--device", "cpu", *args]) == 0  # lane failure is reported, run finishes
+    assert cli.main(["replay", "--stocks", "AAA", "--device", "cpu", *args]) == 1
     monkeypatch.setattr(LaneReplay, "_signal_predictions", orig)
     db = AuditDB(home / "gplm.sqlite", readonly=True)
     assert db.q("SELECT 1 FROM events WHERE kind='LANE_FAILED'")
     ck = db.one("SELECT payload_json FROM checkpoints WHERE key LIKE 'replay:%'")
     assert ck, "completed steps were checkpointed before the crash"
+    failed = db.one("SELECT status, summary_json FROM runs ORDER BY started_utc DESC LIMIT 1")
+    assert failed["status"] == "FAILED"
+    assert json.loads(failed["summary_json"])["result"]["lane_counts"] == {"total": 1, "succeeded": 0, "failed": 1}
     db.close()
     assert cli.main(["replay", "--stocks", "AAA", "--device", "cpu", *args]) == 0
     fresh = tmp_path / "fresh"
@@ -449,6 +470,28 @@ def test_interrupted_daily_resumes_without_duplicates(world: dict, tmp_path: Pat
     ka = {r["natural_key"] for r in a.q("SELECT natural_key FROM predictions")}
     kb = {r["natural_key"] for r in b.q("SELECT natural_key FROM predictions")}
     assert ka == kb, "a crashed-then-resumed run equals an uninterrupted run"
+
+
+def test_one_failed_lane_makes_run_partial(world: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    args = ["--config", str(world["config"]), "--home", str(home), "--quiet"]
+    original = LaneReplay.run
+
+    def fail_daily(self):
+        if self.lane.timeframe == "1d":
+            raise RuntimeError("synthetic daily-lane failure")
+        return original(self)
+
+    monkeypatch.setattr(LaneReplay, "run", fail_daily)
+    assert cli.main(["daily", "--stocks", "AAA", "--device", "cpu", *args]) == 1
+    db = AuditDB(home / "gplm.sqlite", readonly=True)
+    run = db.one("SELECT status, summary_json FROM runs ORDER BY started_utc DESC LIMIT 1")
+    assert run["status"] == "PARTIAL"
+    result = json.loads(run["summary_json"])["result"]
+    assert result["lane_counts"] == {"total": 2, "succeeded": 1, "failed": 1}
+    assert result["lane_failures"][0]["lane"] == "AAA-EQ|1d"
+    assert db.verify_chain()["ok"]
+    db.close()
 
 
 def test_cli_strategies_and_audit_commands(world: dict, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

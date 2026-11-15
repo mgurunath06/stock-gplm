@@ -85,10 +85,13 @@ def _run(args: argparse.Namespace, kind: str, fn: Any, device: Any = None) -> in
             app.db.event("DEVICE_SELECTED", {"label": device.label, "reason": device.reason, "requested": args.device})
         result = fn(app)
         app.progress.close()
-        app.finish("COMPLETED", {"result": _brief(result)})
+        status = result.get("status", "COMPLETED") if isinstance(result, dict) else "COMPLETED"
+        if status not in {"COMPLETED", "PARTIAL", "FAILED"}:
+            status = "COMPLETED"
+        app.finish(status, {"result": _brief(result)})
         if getattr(args, "json", False):
             _p(json.dumps(result, indent=2, default=str))
-        return 0
+        return 0 if status == "COMPLETED" else 1
     except KeyboardInterrupt:
         app.db.event("INTERRUPTED", {"note": "stopped by the user; completed steps are checkpointed"}, level="WARN")
         app.finish("INTERRUPTED", {})
@@ -109,7 +112,9 @@ def _brief(result: Any) -> Any:
     if isinstance(result, dict):
         return {k: v for k, v in result.items() if k in ("latest_session", "new_predictions", "new_evaluations",
                                                          "model_fits", "symbols", "forecast_status", "report_files",
-                                                         "device", "status", "budget", "lanes_done", "accepted")}
+                                                         "device", "status", "lane_counts", "lane_failures",
+                                                         "compute_attribution", "device_stats", "budget", "lanes_done",
+                                                         "accepted")}
     return None
 
 
@@ -238,7 +243,13 @@ def cmd_replay(args: argparse.Namespace) -> int:
 def _print_daily(res: dict[str, Any], args: argparse.Namespace) -> None:
     if args.json:
         return
-    _p(f"\nLatest completed session: {res['latest_session']}   device: {res['device']}")
+    counts = res.get("lane_counts", {})
+    _p(f"\nRUN STATUS: {res.get('status', 'COMPLETED')}   lanes: {counts.get('succeeded', 0)} succeeded / "
+       f"{counts.get('failed', 0)} failed")
+    _p(f"Latest completed session: {res['latest_session']}   selected backend: {res['device']}")
+    attribution = res.get("compute_attribution", {})
+    _p(f"  actual training: {attribution.get('training_devices') or 'none this run'}   "
+       f"numerical: {', '.join(attribution.get('numerical_devices', [])) or 'not recorded'}")
     for sym, d in res["data"].items():
         _p(f"  {sym:<14} last {d['last_session']} ({d['last_bar_source']})  changed files {d['changed_files']}  "
            f"minute sessions {d['minute_sessions']} (to {d['minute_last']})" + ("  STALE" if d["stale"] else ""))

@@ -5,7 +5,7 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 CURRENT_EQ_SYMBOLS = 2715
@@ -109,8 +109,10 @@ class SyncRequestV1:
             raise ValueError("unsupported M2.4 sync request contract")
         if self.transport_profile != "windows-openssh-sne-cloud":
             raise ValueError("M2.4 transport profile must be windows-openssh-sne-cloud")
-        if not isinstance(self.destination_root, str) or not self.destination_root.startswith("/"):
-            raise ValueError("destination_root must be an absolute WSL path")
+        if not isinstance(self.destination_root, str) or not (
+            PurePosixPath(self.destination_root).is_absolute() or PureWindowsPath(self.destination_root).is_absolute()
+        ):
+            raise ValueError("destination_root must be an absolute local path")
         if not isinstance(self.master_file, str) or Path(self.master_file).name != self.master_file:
             raise ValueError("master_file must be one filename")
         if "\x00" in self.destination_root:

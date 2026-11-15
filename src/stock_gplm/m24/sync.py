@@ -34,7 +34,7 @@ def _active_sync_lock(path: Path) -> bool:
     if not path.exists():
         return False
     try:
-        descriptor = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(descriptor, "r+", encoding="utf-8") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 return True
@@ -390,6 +390,11 @@ def build_plan(
 
 
 def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # Python cannot open a Windows directory for fsync. File contents are
+        # flushed before publication; atomic link/replace operations supply the
+        # namespace guarantee available through the standard library.
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -405,7 +410,11 @@ def _publish_one(source: Path, destination: Path, expected_sha256: str, triplet_
         if temporary.exists():
             if temporary.is_symlink() or not temporary.is_file() or _sha256(temporary) != expected_sha256:
                 raise FileExistsError(f"publication temporary-file conflict: {temporary}")
+            if os.name == "nt":
+                os.chmod(temporary, 0o600)
             temporary.unlink()
+            if os.name == "nt":
+                os.chmod(destination, 0o444)
         return
     if temporary.exists():
         if temporary.is_symlink() or not temporary.is_file() or _sha256(temporary) != expected_sha256:
@@ -416,13 +425,18 @@ def _publish_one(source: Path, destination: Path, expected_sha256: str, triplet_
                 outgoing.write(chunk)
             outgoing.flush()
             os.fsync(outgoing.fileno())
-        os.chmod(temporary, 0o444)
+        if os.name != "nt":
+            os.chmod(temporary, 0o444)
+    if os.name == "nt":
+        os.chmod(temporary, 0o600)
     try:
         os.link(temporary, destination)
     except FileExistsError:
         if _sha256(destination) != expected_sha256:
             raise
     temporary.unlink(missing_ok=True)
+    if os.name == "nt":
+        os.chmod(destination, 0o444)
     _fsync_directory(destination.parent)
 
 
@@ -460,7 +474,7 @@ def _acquire_lock(destination: Path, run_id: str):
     destination.mkdir(parents=True, exist_ok=True)
     lock = destination / SYNC_LOCK
     descriptor = os.open(
-        lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
+        lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600,
     )
     stream = os.fdopen(descriptor, "r+", encoding="utf-8")
     try:

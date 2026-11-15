@@ -327,7 +327,7 @@ class AuditDB:
             c.execute("UPDATE runs SET finished_utc=?, status=?, summary_json=? WHERE run_id=?",
                       (utc_now(), status, jdump(summary), self.run_id))
         self.event("RUN_FINISHED", {"status": status, **summary}, subject=self.run_id,
-                   level="INFO" if status == "COMPLETED" else "ERROR")
+                   level="INFO" if status == "COMPLETED" else ("WARN" if status == "PARTIAL" else "ERROR"))
 
     def snapshot_config(self, path: Path, content: str) -> str:
         digest = sha(content)

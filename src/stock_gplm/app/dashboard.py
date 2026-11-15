@@ -18,6 +18,7 @@ import numpy as np
 
 from . import CLASSIFICATION, __version__
 from .db import AuditDB
+from .library import Library
 from .report import accuracy_table, live_forecasts, trace_prediction, trace_run
 from .settings import Settings
 
@@ -28,11 +29,101 @@ def _db(s: Settings) -> AuditDB:
     return AuditDB(s.db_path, s.events_dir, readonly=True)
 
 
+def _state_path(recorded: str, marker: str, current_root: Path) -> Path:
+    """Resolve an absolute path retained in a state directory copied from another OS."""
+    path = Path(recorded)
+    if path.is_file():
+        return path
+    parts = recorded.replace("\\", "/").split("/")
+    if marker in parts:
+        candidate = current_root.joinpath(*parts[parts.index(marker) + 1:]).resolve()
+        if candidate.is_relative_to(current_root.resolve()) and candidate.is_file():
+            return candidate
+    return path
+
+
+def _run_view(db: AuditDB, row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    out = dict(row)
+    try:
+        out["summary"] = json.loads(out.get("summary_json") or "{}")
+    except ValueError:
+        out["summary"] = {}
+    failures = db.q("SELECT subject, payload_json FROM events WHERE run_id=? AND kind='LANE_FAILED' ORDER BY seq",
+                    (out["run_id"],))
+    out["lane_failure_count"] = len(failures)
+    out["lane_failures"] = [{"lane": r["subject"], **json.loads(r["payload_json"])} for r in failures]
+    out["effective_status"] = ("RECORDED_COMPLETED_WITH_FAILURES"
+                               if out.get("status") == "COMPLETED" and failures else out.get("status"))
+    return out
+
+
+def _strategy_document(s: Settings, db: AuditDB, sid: str) -> dict[str, Any] | None:
+    try:
+        return Library(s.strategies_dir, db).get(sid)
+    except (OSError, ValueError):
+        return None
+
+
+def _readable_rule(doc: dict[str, Any] | None) -> str:
+    if not doc:
+        return "Definition unavailable"
+    op = {"gt": ">", "lt": "<", "cross_above": "crosses above", "cross_below": "crosses below",
+          "is": "is true"}
+    clauses = []
+    for c in doc.get("entry", {}).get("conditions", []):
+        text = f"{c.get('feature', '?')} {op.get(c.get('op'), c.get('op', '?'))}"
+        if c.get("threshold") is not None:
+            text += f" {c['threshold']}"
+        clauses.append(text)
+    return f" {doc.get('entry', {}).get('logic', 'AND')} ".join(clauses) or "No entry conditions"
+
+
+def _strategy_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluated = [r for r in rows if r["correct"] is not None]
+    returns = [float(r["trade_net_return"]) for r in evaluated if r["trade_net_return"] is not None]
+    equity = peak = 1.0
+    drawdown = 0.0
+    for value in returns:
+        equity *= 1 + value
+        peak = max(peak, equity)
+        drawdown = min(drawdown, equity / peak - 1)
+    n = len(evaluated)
+    quality = ("NO_EVALUATED_OUTCOMES" if n == 0 else "LIMITED_SAMPLE" if n < 30 else
+               "DEVELOPING_SAMPLE" if n < 100 else "LARGE_SAMPLE")
+    return {"signals": len(rows), "evaluated": n,
+            "win_rate": sum(int(r["correct"]) for r in evaluated) / n if n else None,
+            "net_return": equity - 1 if returns else None,
+            "mean_net_return": sum(returns) / len(returns) if returns else None,
+            "max_drawdown": drawdown if returns else None, "evidence_quality": quality}
+
+
+def strategies(s: Settings) -> list[dict[str, Any]]:
+    db = _db(s)
+    try:
+        rows = db.q("SELECT s.* FROM strategies s JOIN (SELECT strategy_id, MAX(version) version FROM strategies "
+                    "GROUP BY strategy_id) latest ON latest.strategy_id=s.strategy_id AND latest.version=s.version "
+                    "ORDER BY s.created_utc DESC LIMIT 1000")
+        outcome_rows = db.q("SELECT p.source_id, e.correct, e.trade_net_return FROM predictions p LEFT JOIN evaluations e "
+                            "ON e.prediction_id=p.prediction_id WHERE p.source_kind='STRATEGY' ORDER BY p.decision_ns")
+        outcomes: dict[str, list[dict[str, Any]]] = {}
+        for outcome in outcome_rows:
+            outcomes.setdefault(outcome.pop("source_id"), []).append(outcome)
+        for row in rows:
+            doc = _strategy_document(s, db, row["strategy_id"])
+            row.update(_strategy_metrics(outcomes.get(row["strategy_id"], [])), readable_rule=_readable_rule(doc),
+                       description=(doc or {}).get("description"), exit_rule=(doc or {}).get("exit"))
+        return rows
+    finally:
+        db.close()
+
+
 def summary(s: Settings) -> dict[str, Any]:
     db = _db(s)
     try:
-        run = db.one("SELECT * FROM runs ORDER BY started_utc DESC LIMIT 1")
-        daily = db.one("SELECT * FROM runs WHERE kind='daily' ORDER BY started_utc DESC LIMIT 1")
+        run = _run_view(db, db.one("SELECT * FROM runs ORDER BY started_utc DESC LIMIT 1"))
+        daily = _run_view(db, db.one("SELECT * FROM runs WHERE kind='daily' ORDER BY started_utc DESC LIMIT 1"))
         fresh = db.q("SELECT symbol, last, first, rows, built_utc, summary_json FROM candle_cache ORDER BY symbol")
         for f in fresh:
             sj = json.loads(f.pop("summary_json") or "{}")
@@ -49,14 +140,15 @@ def summary(s: Settings) -> dict[str, Any]:
         api = db.one("SELECT COUNT(*) n, SUM(cost_usd) usd, SUM(cost_usd IS NULL) unknown, SUM(success=0) failed "
                      "FROM api_calls")
         forecasts = live_forecasts(db, symbols) if symbols else []
-        dev = db.one("SELECT device, COUNT(*) n FROM training_history GROUP BY device ORDER BY n DESC LIMIT 1")
+        latest_compute = ((daily or {}).get("summary") or {}).get("result", {}).get("compute_attribution")
         totals = db.one("SELECT (SELECT COUNT(*) FROM predictions) predictions, (SELECT COUNT(*) FROM evaluations) "
                         "evaluations, (SELECT COUNT(*) FROM strategies) strategy_versions, "
                         "(SELECT COUNT(*) FROM data_issues WHERE severity IN ('WARN','ERROR')) data_warnings")
         progress = json.loads(s.progress_path.read_text(encoding="utf-8")) if s.progress_path.exists() else None
         return {"app_version": __version__, "classification": CLASSIFICATION, "latest_run": run, "latest_daily": daily,
                 "freshness": fresh, "symbols": symbols, "best_models": best_models, "best_strategies": strat,
-                "warnings": warn, "api": api, "forecasts": forecasts, "training_device": dev, "totals": totals,
+                "warnings": warn, "api": api, "forecasts": forecasts, "compute_attribution": latest_compute,
+                "totals": totals,
                 "progress": progress}
     finally:
         db.close()
@@ -73,8 +165,9 @@ def _rows(s: Settings, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str,
 def stock(s: Settings, symbol: str) -> dict[str, Any]:
     cache = _rows(s, "SELECT * FROM candle_cache WHERE symbol=?", (symbol,))
     candles: list[dict[str, Any]] = []
-    if cache and Path(cache[0]["path"]).is_file():
-        with np.load(cache[0]["path"], allow_pickle=False) as z:
+    cache_path = _state_path(cache[0]["path"], "cache", s.cache_dir) if cache else None
+    if cache_path and cache_path.is_file():
+        with np.load(cache_path, allow_pickle=False) as z:
             d, o = z["d_date"][-160:], z["d_ohlcv"][-160:]
             src = z["d_source"][-160:]
         candles = [{"date": str(a), "open": float(b[0]), "high": float(b[1]), "low": float(b[2]), "close": float(b[3]),
@@ -91,8 +184,12 @@ def stock(s: Settings, symbol: str) -> dict[str, Any]:
         acc = accuracy_table(db, [symbol])
     finally:
         db.close()
+    cache_view = dict(cache[0]) if cache else None
+    if cache_view is not None:
+        cache_view["resolved_path"] = str(cache_path)
+        cache_view["available"] = bool(cache_path and cache_path.is_file())
     return {"symbol": symbol, "candles": candles, "predictions": preds, "issues": issues, "accuracy": acc,
-            "cache": cache[0] if cache else None}
+            "cache": cache_view}
 
 
 def rolling_series(s: Settings, lane: str, source: str, horizon: int) -> list[dict[str, Any]]:
@@ -143,8 +240,7 @@ class Handler(BaseHTTPRequestHandler):
                    "(?='' OR p.actionable=CAST(? AS INTEGER)) ORDER BY p.decision_ns DESC LIMIT ?",
                 (q.get("symbol", ""), q.get("symbol", ""), q.get("mode", ""), q.get("mode", ""), q.get("actionable", ""),
                  q.get("actionable", "0"), int(q.get("limit", 300)))),
-            "/api/strategies": lambda: _rows(s, "SELECT s.*, (SELECT COUNT(*) FROM predictions p WHERE p.source_id=s.strategy_id) "
-                                                "signals FROM strategies s ORDER BY created_utc DESC LIMIT 1000"),
+            "/api/strategies": lambda: strategies(s),
             "/api/strategy": lambda: {"versions": _rows(s, "SELECT * FROM strategies WHERE strategy_id=? ORDER BY version",
                                                         (q.get("id", ""),)),
                                       "document": _strategy_doc(s, q.get("id", "")),
@@ -162,8 +258,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/issue_counts": lambda: _rows(s, "SELECT code, severity, COUNT(*) n FROM data_issues GROUP BY code, severity "
                                                   "ORDER BY n DESC"),
             "/api/api_calls": lambda: _rows(s, "SELECT * FROM api_calls ORDER BY id DESC LIMIT 500"),
-            "/api/runs": lambda: _rows(s, "SELECT run_id, kind, command, started_utc, finished_utc, status, device FROM runs "
-                                          "ORDER BY started_utc DESC LIMIT 200"),
+            "/api/runs": lambda: _with_db(s, lambda db: [
+                _run_view(db, r) for r in db.q("SELECT * FROM runs ORDER BY started_utc DESC LIMIT 200")]),
             "/api/events": lambda: _rows(s, "SELECT seq, ts_utc, run_id, kind, level, subject, substr(payload_json,1,600) payload "
                                             "FROM events WHERE (?='' OR run_id=?) AND (?='' OR kind=?) AND (?='' OR subject=?) "
                                             "ORDER BY seq DESC LIMIT ?",
@@ -216,13 +312,12 @@ def _with_db(s: Settings, fn: Callable[[AuditDB], Any]) -> Any:
 
 
 def _strategy_doc(s: Settings, sid: str) -> Any:
-    rows = _rows(s, "SELECT path FROM strategies WHERE strategy_id=? ORDER BY version DESC LIMIT 1", (sid,))
-    if not rows:
-        return None
+    db = _db(s)
     try:
-        return json.loads(Path(rows[0]["path"]).read_text(encoding="utf-8"))
-    except OSError as exc:
-        return {"error": str(exc)}
+        doc = _strategy_document(s, db, sid)
+        return doc if doc is not None else {"error": "strategy definition unavailable or hash mismatch"}
+    finally:
+        db.close()
 
 
 def serve(s: Settings, host: str, port: int, open_browser: bool = False) -> None:

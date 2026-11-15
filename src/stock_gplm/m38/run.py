@@ -356,7 +356,7 @@ def build_diagnostics(*, m31_run: Path, m32_run: Path, experiment: Path, trial_l
         _write(partial / "feature-stability.json", {"importance": stability, "high_correlations_ge_0_85": correlated})
         _write(partial / "hypothesis-ledger.csv", pd.DataFrame(hypothesis_rows))
         _write(partial / "regimes.csv", regime.reset_index().rename(columns={"index": "as_of_date"}))
-        outputs = {str(p.relative_to(partial)): _sha(p) for p in sorted(partial.rglob("*")) if p.is_file()}
+        outputs = {p.relative_to(partial).as_posix(): _sha(p) for p in sorted(partial.rglob("*")) if p.is_file()}
         _write(partial / "run-manifest.json", {
             **binding, "run_id": run_id, "tag": "DIAGNOSTIC_EXPLORATORY_BIASED", "horizons": horizons,
             "trial_ledger": str(trial_ledger), "trial_ledger_sha256_unchanged": ledger_before,

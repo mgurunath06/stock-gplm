@@ -141,10 +141,25 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
                          subject=rp.lane.key, level="ERROR")
             lane_results.append({"lane": rp.lane.key, "error": f"{type(exc).__name__}: {exc}"})
     summary["lanes"] = lane_results
+    failures = [r for r in lane_results if r.get("error")]
+    succeeded = len(lane_results) - len(failures)
+    summary["lane_counts"] = {"total": len(lane_results), "succeeded": succeeded, "failed": len(failures)}
+    summary["lane_failures"] = [{"lane": r.get("lane"), "error": r.get("error")} for r in failures]
+    summary["status"] = "FAILED" if failures and not succeeded else ("PARTIAL" if failures else "COMPLETED")
     summary["new_predictions"] = sum(r.get("predictions_new", 0) for r in lane_results)
     summary["new_evaluations"] = sum(r.get("evaluations_new", 0) for r in lane_results)
     summary["model_fits"] = sum(r.get("fits", 0) for r in lane_results)
     summary["device_stats"] = {k: round(v, 3) if isinstance(v, float) else v for k, v in backend.stats.items()}
+    trained = app.db.q("SELECT device, COUNT(DISTINCT model_kind || '|' || lane_key || '|' || horizon || '|' || step_label) "
+                       "fits FROM training_history WHERE run_id=? GROUP BY device ORDER BY device", (app.run_id,))
+    summary["compute_attribution"] = {
+        "selected_backend": backend.label,
+        "training_devices": trained,
+        "numerical_devices": (["cpu (NumPy: ingestion, features, inference and reporting)"] +
+                              ([backend.label] if backend.stats.get("gpu_calls", 0) else [])),
+        "gpu_calls": int(backend.stats.get("gpu_calls", 0)),
+        "note": "No training device is reported when this run fitted no models.",
+    }
     syms = list(datas)
     acc = accuracy_table(app.db, syms)
     fc = live_forecasts(app.db, syms)
@@ -159,8 +174,11 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
     backup = app.db.backup(s.backups_dir, keep=int(s.section("retention").get("keep_backups", 10)))
     summary["backup"] = str(backup)
     app.db.event("DAILY_REPORT", {"latest_session": latest, "files": files, "backup": str(backup),
+                                  "status": summary["status"], "lane_counts": summary["lane_counts"],
                                   "new_predictions": summary["new_predictions"],
-                                  "new_evaluations": summary["new_evaluations"]})
+                                  "new_evaluations": summary["new_evaluations"]},
+                 level="ERROR" if summary["status"] == "FAILED" else
+                       ("WARN" if summary["status"] == "PARTIAL" else "INFO"))
     return summary
 
 

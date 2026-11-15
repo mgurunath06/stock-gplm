@@ -31,6 +31,7 @@ session. Earlier ones are ``REPLAY``. Both are kept apart in every report.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
