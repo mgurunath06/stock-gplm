@@ -397,15 +397,19 @@ def _write_steps(out: Path, steps: Sequence[Mapping[str, Any]]) -> None:
 
 def format_step_table(steps: Sequence[Mapping[str, Any]]) -> list[str]:
     """Return the intentionally concise console table; detailed evidence stays in snapshot artifacts."""
-    lines = ["Prediction date/time             | Predicted | Confidence | Trade    | Actual | Gross ret | Correct?"]
+    fmt = "{:<18}   {:<10}   {:<11}   {:<6}   {:<8}   {:<7}   {}"
+    lines = [fmt.format("Time", "Prediction", "Probability", "Actual", "Return", "Correct", "Trade")]
     for step in steps:
-        confidence = "-" if step["displayed_confidence"] is None else f"{step['displayed_confidence']:.3f}"
-        actual = step["actual_direction"] or "-"
+        stamp = pd.Timestamp(step["prediction_timestamp"])
+        time = (stamp.strftime("%Y-%m-%d") if step.get("timeframe", "1d") in {"1d", "1w"}
+                else stamp.strftime("%Y-%m-%d %H:%M"))
+        conf = step["displayed_confidence"]
+        prob = "—" if conf is None else f"{conf:.0%}"  # calibrated, for the predicted side only
         gross = step.get("actual_gross_return")
-        ret = "-" if gross is None else f"{gross:+.3%}"
-        lines.append(f"{step['prediction_timestamp']:<32} | {step['predicted_direction']:<9} | "
-                     f"{confidence:<10} | {step['trade_decision']:<8} | {actual:<6} | {ret:<9} | "
-                     f"{step['correctness']}")
+        ret = "—" if gross is None else f"{gross:+.2%}"
+        correct = {"CORRECT": "YES", "INCORRECT": "NO"}.get(step["correctness"], "—")
+        lines.append(fmt.format(time, step["predicted_direction"], prob, step["actual_direction"] or "—",
+                                ret, correct, step["trade_decision"]))
     return lines
 
 

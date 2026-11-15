@@ -139,7 +139,7 @@ def test_walk_forward_freezes_before_revealing_and_resumes(monkeypatch: pytest.M
     assert first["evaluation"]["directional_accuracy_denominator"] == sum(
         s["correctness"] in {"CORRECT", "INCORRECT"} for s in first["steps"])
     table = mp.format_step_table(first["steps"])
-    assert len(table) == 3 and table[0].startswith("Prediction date") and "NO_TRADE" in "\n".join(table)
+    assert len(table) == 3 and table[0].startswith("Time") and "NO_TRADE" in "\n".join(table)
     second = mp.walk_forward(app, "SYN", start, end, "1d", 1, tmp_path / "wf", max_steps=2)
     assert second["newly_frozen"] == 0 and second["newly_revealed"] == 0
     assert db.one("SELECT COUNT(*) n FROM predictions")["n"] == 2
@@ -260,8 +260,8 @@ def test_totals_and_table_match_displayed_rows(monkeypatch: pytest.MonkeyPatch, 
     steps, e = run["steps"], run["evaluation"]
     table = mp.format_step_table(steps)
     assert len(table) == len(steps) + 1
-    assert table[0].split("|")[0].strip().startswith("Prediction date")
-    for header in ("Predicted", "Confidence", "Trade", "Actual", "Gross ret", "Correct?"):
+    assert table[0].startswith("Time")
+    for header in ("Prediction", "Probability", "Actual", "Return", "Correct", "Trade"):
         assert header in table[0]
     assert e["correct_directional"] == sum(s["correctness"] == "CORRECT" for s in steps)
     assert e["incorrect_directional"] == sum(s["correctness"] == "INCORRECT" for s in steps)
@@ -292,11 +292,14 @@ def test_classification_abstention_trade_and_missing_confidence_are_distinct() -
     assert (m["correct_directional"], m["incorrect_directional"], m["directional_accuracy_denominator"]) == (1, 1, 2)
     assert m["abstentions"] == 1 and m["trades"] == 1 and m["brier_denominator"] == 1
     assert m["total_compounded_trade_return"] == pytest.approx(0.008)
-    step = {"prediction_timestamp": "2025-08-01T10:00:00+00:00", "predicted_direction": "DOWN",
+    step = {"prediction_timestamp": "2025-08-01T15:30:00+05:30", "timeframe": "1d", "predicted_direction": "DOWN",
             "displayed_confidence": None, "trade_decision": "NO_TRADE", "actual_direction": "UP",
             "actual_gross_return": 0.021, "actual_net_return": 0.02, "correctness": "INCORRECT"}
     line = mp.format_step_table([step])[1]
-    assert "| -          |" in line and "NO_TRADE" in line and "INCORRECT" in line and "+2.100%" in line
+    assert line.split() == ["2025-08-01", "DOWN", "—", "UP", "+2.10%", "NO", "NO_TRADE"]
+    intraday = mp.format_step_table([{**step, "timeframe": "15m", "displayed_confidence": 0.67,
+                                      "prediction_timestamp": "2025-08-01T10:45:00+05:30"}])[1]
+    assert intraday.startswith("2025-08-01 10:45") and "67%" in intraday
 
 
 def test_legacy_prediction_gets_one_labelled_stable_reconstruction(monkeypatch: pytest.MonkeyPatch,
