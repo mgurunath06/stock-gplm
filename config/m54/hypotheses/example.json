@@ -1,0 +1,10 @@
+{
+  "contract": "stock-gplm.m54-hypotheses.v1",
+  "source": "example-user-proposal",
+  "note": "User or AI proposals use this format. They are tested by the same engine and count as tests.",
+  "hypotheses": [
+    {"conditions": [{"feature": "RSI(period=14).value", "op": "cross_above", "threshold": 50}]},
+    {"conditions": [{"feature": "EMA(period=20).distance", "op": "gt", "threshold": 0},
+                    {"feature": "RVOL(period=20,spike=2.0).value", "op": "gt", "threshold": 1.5}]}
+  ]
+}

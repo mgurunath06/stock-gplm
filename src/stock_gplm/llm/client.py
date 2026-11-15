@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping
 from .redaction import market_rows, redact
 
 CONFIG_CONTRACT = "stock-gplm.llm-config.v1"
+KINDS = frozenset({"ollama", "openai_compatible", "anthropic_compatible"})
 Transport = Callable[[str, Mapping[str, str], Mapping[str, Any], float], Mapping[str, Any]]
 
 
@@ -37,12 +38,13 @@ class UploadRefused(RuntimeError):
 @dataclass(frozen=True)
 class ProviderConfig:
     name: str
-    kind: str  # "ollama" or "openai_compatible"
+    kind: str  # "ollama", "openai_compatible" or "anthropic_compatible"
     base_url: str
     local: bool
     enabled: bool
     api_key_env: str | None
     models: Mapping[str, Mapping[str, float]]  # model -> usd per 1k input / output tokens
+    path: str | None = None  # request path override (e.g. "/v1/messages")
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,7 @@ def load_config(path: Path) -> LLMConfig:
         raise ValueError("unsupported LLM config contract")
     providers = {}
     for name, item in raw["providers"].items():
-        if item["kind"] not in {"ollama", "openai_compatible"}:
+        if item["kind"] not in KINDS:
             raise ValueError(f"unsupported provider kind for {name}")
         if not item["local"] and not item.get("api_key_env"):
             raise ValueError(f"remote provider {name} must name an api_key_env")
@@ -85,7 +87,7 @@ def load_config(path: Path) -> LLMConfig:
             raise ValueError("API keys belong in environment variables or a secret store, not config")
         providers[name] = ProviderConfig(
             name, item["kind"], item["base_url"].rstrip("/"), bool(item["local"]), bool(item["enabled"]),
-            item.get("api_key_env"), item.get("models", {}),
+            item.get("api_key_env"), item.get("models", {}), item.get("path"),
         )
     limits = raw["limits"]
     return LLMConfig(
@@ -155,14 +157,21 @@ class LLMClient:
             key = self.environ.get(spec.api_key_env)
             if not key:
                 raise LLMDisabled(f"environment variable {spec.api_key_env} is not set")
-            headers["Authorization"] = f"Bearer {key}"
+            if spec.kind == "anthropic_compatible":
+                headers["x-api-key"] = key
+                headers["anthropic-version"] = "2023-06-01"
+            else:
+                headers["Authorization"] = f"Bearer {key}"
         messages = [{"role": "user", "content": text}]
-        if spec.kind == "ollama":
-            url = f"{spec.base_url}/api/chat"
+        if spec.kind == "anthropic_compatible":
+            url = f"{spec.base_url}{spec.path or '/v1/messages'}"
+            body = {"model": model, "messages": messages, "max_tokens": cfg.max_output_tokens}
+        elif spec.kind == "ollama":
+            url = f"{spec.base_url}{spec.path or '/api/chat'}"
             body = {"model": model, "messages": messages, "stream": False,
                     "options": {"num_predict": cfg.max_output_tokens}}
         else:
-            url = f"{spec.base_url}/chat/completions"
+            url = f"{spec.base_url}{spec.path or '/chat/completions'}"
             body = {"model": model, "messages": messages, "max_tokens": cfg.max_output_tokens}
         try:
             reply = self.transport(url, headers, body, cfg.timeout_seconds)
@@ -170,7 +179,11 @@ class LLMClient:
             self._audit({**base, "outcome": f"ERROR {type(exc).__name__}", "input_tokens": 0,
                          "output_tokens": 0, "estimated_usd": 0.0})
             raise
-        if spec.kind == "ollama":
+        if spec.kind == "anthropic_compatible":
+            answer = "".join(part.get("text", "") for part in reply["content"] if part.get("type", "text") == "text")
+            usage = reply.get("usage", {})
+            used_in, used_out = int(usage.get("input_tokens", estimate_in)), int(usage.get("output_tokens", 0))
+        elif spec.kind == "ollama":
             answer = reply["message"]["content"]
             used_in, used_out = int(reply.get("prompt_eval_count", estimate_in)), int(reply.get("eval_count", 0))
         else:

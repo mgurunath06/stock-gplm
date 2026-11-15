@@ -1,0 +1,38 @@
+{
+  "contract": "stock-gplm.m54-discovery.v1",
+  "name": "daily-behaviour-discovery-v1",
+  "data": {
+    "raw_root": "../../../stock-gplm/data/raw/shoonya/NSE",
+    "m32_run": "../../../stock-gplm/reports/m32/26e41d003ff0c3265b3598a7f4b1ea1e51a5dde0a277603796972f7282167213",
+    "m32_run_id": "26e41d003ff0c3265b3598a7f4b1ea1e51a5dde0a277603796972f7282167213",
+    "split_plan_sha256": "5c0b0a9dd2260483eed8ba437b92e82697b5fc7537b08ee36e9ecdf787165dd7"
+  },
+  "segments": {
+    "discovery": ["2022-10-31", "2024-01-31"],
+    "validation": ["2024-02-01", "2024-07-31"],
+    "test": ["2024-08-01", "2024-12-31"]
+  },
+  "horizons": [1, 3, 5, 10, 20, 40, 60, 120],
+  "threshold_quantiles": [0.05, 0.1, 0.2, 0.3, 0.7, 0.8, 0.9, 0.95],
+  "target_atr": 1.0,
+  "seed": 54,
+  "criteria": {
+    "min_events_discovery": 8,
+    "screen_max_p": 0.10,
+    "min_neighbour_positive_fraction": 0.6,
+    "min_events_validation": 4,
+    "min_events_test": 3,
+    "fdr_q": 0.10
+  },
+  "costs": {
+    "commission_bps": 3.0,
+    "slippage_bps": 5.0,
+    "buy_statutory_bps": 12.41,
+    "sell_statutory_bps": 10.91,
+    "basis": "ASSUMPTION: M3.5 NSE equity-delivery statutory estimates plus 3 bps brokerage and 5 bps slippage per side; not broker-verified"
+  },
+  "quality": {"max_abs_gap": 0.20, "max_abs_daily_return": 0.20},
+  "regimes": {"trend_sma": 100},
+  "budgets": "budgets.json",
+  "search_space": "search-space.json"
+}

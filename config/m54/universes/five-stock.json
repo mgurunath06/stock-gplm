@@ -1,0 +1,7 @@
+{
+  "contract": "stock-gplm.m54-universe.v1",
+  "name": "five-stock",
+  "membership_basis": "EXPLICIT_LIST",
+  "note": "Hand-picked study list; not an index and not point-in-time membership.",
+  "symbols": ["RELIANCE", "HDFCBANK", "ICICIBANK", "INFY", "SBIN"]
+}
