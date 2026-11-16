@@ -202,7 +202,13 @@
     },
     "prediction": {
       "calibration_sessions": 80,
-      "minimum_calibration_outcomes": 30
+      "minimum_calibration_outcomes": 30,
+      "model": "logit",
+      "min_train_rows": 150,
+      "calibration_rows": 120,
+      "refit_every": 20,
+      "half_life_sessions": 250,
+      "logit": {"l2": 0.1, "epochs": 200, "lr": 0.05}
     }
   },
   "ai": {

@@ -20,7 +20,89 @@ from .stock_dna import CONTRACT as DNA_CONTRACT, discover_lane
 
 # v2: directional classification, calibration, actual direction and Brier use the gross price move;
 # configured costs apply only to the TRADE gate and trade P&L. v1 rows remain frozen and untouched.
-CONTRACT = "stock-gplm.m58-prediction.v2"
+# v3: the default forecaster is a multi-feature direction model (m58.prediction.model, default "logit")
+# fitted causally on every lane feature at each step, calibrated on its own earlier walk-forward
+# out-of-sample outputs. "stock_dna" keeps the v2 single-condition pattern vote. v1/v2 rows stay frozen.
+CONTRACT = "stock-gplm.m58-prediction.v3"
+MODEL_KINDS = ("logit", "mlp", "stock_dna")
+_MODEL_DEFAULTS: dict[str, Any] = {
+    "model": "logit", "min_train_rows": 150, "calibration_rows": 120, "refit_every": 20,
+    "half_life_sessions": 250, "seed": 58, "top_contributions": 10,
+    "logit": {"l2": 0.1, "epochs": 200, "lr": 0.05},
+    "mlp": {"hidden": [32, 16], "l2": 0.05, "lr": 0.01, "epochs": 120},
+}
+
+
+def _model_cfg(pcfg: Mapping[str, Any]) -> dict[str, Any]:
+    cfg = {**_MODEL_DEFAULTS, **{k: v for k, v in pcfg.items() if k in _MODEL_DEFAULTS}}
+    for sub in ("logit", "mlp"):
+        cfg[sub] = {**_MODEL_DEFAULTS[sub], **dict(pcfg.get(sub, {}))}
+    if cfg["model"] not in MODEL_KINDS:
+        raise ValueError(f"m58.prediction.model must be one of {MODEL_KINDS}, got {cfg['model']!r}")
+    return cfg
+
+
+def _labelled_rows(lane: Any, decision: int, horizon: int) -> tuple[np.ndarray, np.ndarray]:
+    """Rows whose gross label (open of the next bar to close h bars later) is known at the decision close."""
+    m = lane.market
+    rows = np.arange(0, max(0, decision - horizon + 1))
+    if not rows.size:
+        return rows, np.zeros(0)
+    gross = m.close[rows + horizon] / m.open[rows + 1] - 1
+    ok = np.isfinite(gross) & (np.isnan(lane.X[rows]).mean(axis=1) < 0.5) & ~np.asarray(m.no_signal)[rows]
+    return rows[ok], gross[ok].astype(float)
+
+
+def _model_forecast(lane: Any, decision: int, horizon: int, cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Causal multi-feature forecast. Calibration pairs are the model's own walk-forward OOS outputs:
+    each block of earlier rows is predicted by a model trained only on labels known before that block."""
+    from .compute import resolve
+    from .models import DirectionModel, recency_weights
+
+    m, kind = lane.market, str(cfg["model"])
+    backend = resolve("cpu")  # deterministic; frozen forecasts must not depend on device numerics
+    models_cfg = {"logit": cfg["logit"], "mlp": cfg["mlp"], "_epochs_full": int(cfg["mlp"]["epochs"]),
+                  "_epochs_update": int(cfg["mlp"]["epochs"])}
+    rows, gross = _labelled_rows(lane, decision, horizon)
+    y = (gross > 0).astype(float)
+    min_train = int(cfg["min_train_rows"])
+
+    def fit(pos: np.ndarray, at: int) -> Any:
+        model = DirectionModel(kind, horizon)
+        w = recency_weights(m.session_id[rows[pos]], int(m.session_id[at]), float(cfg["half_life_sessions"]))
+        model.fit(backend, lane.X[rows[pos]], y[pos], w, models_cfg, int(cfg["seed"]) + horizon, full=True)
+        return model
+
+    oos_p: list[float] = []
+    oos_pos: list[int] = []
+    block = max(1, int(cfg["refit_every"]))
+    for s in range(max(min_train, len(rows) - int(cfg["calibration_rows"])), len(rows), block):
+        train = np.flatnonzero(rows + horizon <= rows[s])  # labels known at the block's first decision
+        if len(train) < min_train:
+            continue
+        part = np.arange(s, min(s + block, len(rows)))
+        oos_p.extend(fit(train, int(rows[s])).predict(lane.X[rows[part]]).tolist())
+        oos_pos.extend(part.tolist())
+    if len(rows) < min_train:
+        return {"trained": False, "raw": 0.5, "support": [], "train_rows": int(len(rows)),
+                "cal_p": [], "cal_y": [], "cal_gross": []}
+    model = fit(np.arange(len(rows)), decision)
+    raw = float(model.predict(lane.X[[decision]])[0])
+    support: list[dict[str, Any]] = []
+    if kind == "logit" and model.prep is not None and model.params:
+        z = model.prep.apply(lane.X[[decision]])[0]
+        contrib = z * model.params[0][:, 0]
+        for j in np.argsort(-np.abs(contrib))[: int(cfg["top_contributions"])]:
+            col = int(model.prep.columns[j])
+            value = lane.X[decision, col]
+            support.append({"feature": lane.names[col], "current_value": float(value) if np.isfinite(value) else None,
+                            "standardised": float(z[j]), "coefficient": float(model.params[0][j, 0]),
+                            "contribution_logit": float(contrib[j]),
+                            "direction": "UP" if contrib[j] > 0 else "DOWN"})
+    idx = np.asarray(oos_pos, dtype=int)
+    return {"trained": True, "raw": raw, "support": support, "train_rows": int(len(rows)),
+            "features_used": int(len(model.prep.columns)) if model.prep is not None else 0,
+            "cal_p": oos_p, "cal_y": y[idx].astype(int).tolist(), "cal_gross": gross[idx].tolist()}
 
 
 def _as_of_cutoff_ns(as_of: str) -> int:
@@ -136,24 +218,43 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     if not len(eligible):
         raise ValueError(f"no completed {timeframe} candle at or before {as_of}")
     decision = int(eligible[-1])
-    dna_cfg = app.s.section("m58").get("stock_dna", {})
-    dna = discover_lane(lane, dna_cfg, [horizon])
-    patterns = [p for p in dna["patterns"] if p["status"] in {"VALIDATED", "EXPERIMENTAL"}]
-    cal_start = int(dna["calibration_start_index"])
-    cal_p, cal_y, cal_ret = [], [], []
-    cost = lane.costs.buy + lane.costs.sell
-    for row in range(cal_start, decision - horizon + 1):
-        p, support = _vote(patterns, lane, row)
-        if not support:
-            continue
-        gross = float(lane.market.close[row + horizon] / lane.market.open[row + 1] - 1)
-        if np.isfinite(gross):
-            cal_p.append(p); cal_y.append(int(gross > 0)); cal_ret.append(gross - cost)
     pcfg = app.s.section("m58").get("prediction", {})
+    mcfg = _model_cfg(pcfg)
+    cost = lane.costs.buy + lane.costs.sell
+    cal_p, cal_y, cal_ret = [], [], []
+    patterns: list[dict[str, Any]] = []
+    dna: dict[str, Any] | None = None
+    if mcfg["model"] == "stock_dna":
+        dna = discover_lane(lane, app.s.section("m58").get("stock_dna", {}), [horizon])
+        patterns = [p for p in dna["patterns"] if p["status"] in {"VALIDATED", "EXPERIMENTAL"}]
+        for row in range(int(dna["calibration_start_index"]), decision - horizon + 1):
+            p, fired = _vote(patterns, lane, row)
+            if not fired:
+                continue
+            gross = float(lane.market.close[row + horizon] / lane.market.open[row + 1] - 1)
+            if np.isfinite(gross):
+                cal_p.append(p); cal_y.append(int(gross > 0)); cal_ret.append(gross - cost)
+        raw_p, support = _vote(patterns, lane, decision)
+        has_signal = bool(support)
+        no_signal_reason = "no supporting Stock-DNA pattern fired"
+        model_info: dict[str, Any] = {"kind": "stock_dna", "dna_contract": DNA_CONTRACT,
+                                      "dna_counts": dna["counts"], "dna_patterns_considered": len(patterns)}
+        model_key = dna["feature_config_sha"]
+    else:
+        fc = _model_forecast(lane, decision, horizon, mcfg)
+        cal_p, cal_y = fc["cal_p"], fc["cal_y"]
+        cal_ret = [g - cost for g in fc["cal_gross"]]
+        raw_p, support, has_signal = fc["raw"], fc["support"], fc["trained"]
+        no_signal_reason = (f"insufficient training history ({fc['train_rows']} labelled rows < "
+                            f"{mcfg['min_train_rows']})")
+        model_info = {"kind": mcfg["model"], "train_rows": fc["train_rows"],
+                      "features_used": fc.get("features_used"), "config": mcfg}
+        model_key = sha({"model": mcfg, "features": lane.feature_config_sha})
     calibrator = PlattCalibrator(int(pcfg.get("minimum_calibration_outcomes", 30))).fit(cal_p, cal_y)
-    raw_p, support = _vote(patterns, lane, decision)
-    calibrated = calibrator.status.startswith("PLATT") and bool(support)
+    calibrated = calibrator.status.startswith("PLATT") and has_signal
     probability = float(calibrator.apply(np.array([raw_p]))[0]) if calibrated else None
+    abstention_cause = (None if calibrated else no_signal_reason if not has_signal else
+                        "insufficient untouched calibration evidence; no confidence exposed")
     min_p = float(app.s.section("prediction").get("min_probability", 0.56))
     direction = "UNCERTAIN" if probability is None or max(probability, 1 - probability) < min_p else \
         ("UP" if probability >= 0.5 else "DOWN")
@@ -174,7 +275,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     decision_session = str(lane.market.sessions[decision])
     natural = json.dumps({"contract": CONTRACT, "symbol": symbol, "timeframe": timeframe, "as_of": as_of,
                           "decision": decision_session, "target": target_session, "horizon": horizon,
-                          "data": lane.data_fingerprint, "dna": dna["feature_config_sha"]}, sort_keys=True)
+                          "data": lane.data_fingerprint, "model": model_key}, sort_keys=True)
     prediction_id = sha(natural)[:24]
     snapshot_cfg = app.s.section("feature_space").get("snapshot_indicators", {})
     if not snapshot_cfg:
@@ -184,9 +285,12 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     snapshot, snapshot_sha, snapshot_origin = _resolve_snapshot(app, prediction_id, snapshot)
     payload = {"contract": CONTRACT, "requested_as_of": as_of, "decision_session": decision_session,
                "target_session": target_session, "cutoff_enforcement": "all data windowed before lane construction",
-               "data_last_session": data.last_session, "dna_contract": DNA_CONTRACT,
-               "dna_counts": dna["counts"], "dna_patterns_considered": len(patterns),
-               "supporting_stock_dna": support[:20], "calibration_outcomes": len(cal_y),
+               "data_last_session": data.last_session, "model": model_info,
+               **({"dna_contract": DNA_CONTRACT, "dna_counts": dna["counts"],
+                   "dna_patterns_considered": len(patterns), "supporting_stock_dna": support[:20]}
+                  if dna is not None else {"supporting_features": support[:20]}),
+               "abstention_cause": abstention_cause if direction == "UNCERTAIN" else None,
+               "calibration_outcomes": len(cal_y),
                "direction_label": "gross price move (no costs)",
                "trade_gate": {"similar_confident_up_outcomes": int(len(similar)),
                               "minimum_outcomes": min_trade_n,
@@ -204,7 +308,8 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     inserted = app.db.add_prediction({
         "prediction_id": prediction_id, "natural_key": natural, "mode": "HISTORICAL_FROZEN",
         "replay_id": "m58-" + sha(natural)[:16], "symbol": symbol, "timeframe": timeframe,
-        "lane_key": lane.key, "source_kind": "STOCK_DNA", "source_id": "DNA_ENSEMBLE",
+        "lane_key": lane.key, "source_kind": "STOCK_DNA" if dna is not None else "DIRECTION_MODEL",
+        "source_id": "DNA_ENSEMBLE" if dna is not None else str(mcfg["model"]).upper(),
         "source_version": CONTRACT, "horizon_bars": horizon, "decision_label": decision_session,
         "decision_ns": int(lane.market.end_ns[decision]), "target_session": target_session, "direction": direction,
         "prob_raw": raw_p, "prob_calibrated": probability, "calibration": calibrator.status,
@@ -223,6 +328,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
               "action": "TRADE" if frozen["actionable"] else "NO_TRADE",
               "evidence_quality": frozen_payload.get("evidence_quality", "INSUFFICIENT_CALIBRATION"),
               "supporting_patterns": frozen_payload.get("supporting_stock_dna", [])[:10],
+              "supporting_features": frozen_payload.get("supporting_features", [])[:10],
               "data_fingerprint": frozen["data_fingerprint"], "feature_snapshot_sha256": snapshot_sha,
               "feature_snapshot_origin": snapshot_origin,
               "feature_snapshot_report": str(out / f"{prediction_id}.feature-snapshot.json")}
@@ -355,6 +461,8 @@ def _step(app: Any, prediction_id: str, creation_status: str, snapshot: Mapping[
     abstained = row["direction"] == "UNCERTAIN"
     if not abstained:
         abstention_reason = None
+    elif pp.get("abstention_cause"):
+        abstention_reason = str(pp["abstention_cause"])
     elif prob is None:
         abstention_reason = ("no supporting Stock-DNA pattern fired" if not pp.get("supporting_stock_dna") else
                              "insufficient untouched calibration evidence; no confidence exposed")

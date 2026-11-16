@@ -77,3 +77,21 @@ Costs apply only to the TRADE gate (confident calibrated UP plus positive mean l
 v1 predictions/evaluations remain frozen and untouched; evaluations now count only the current contract.
 Consequence: rerunning the August daily command creates 19 new v2 predictions (new IDs), not reuses.
 Tests: 18 M5.8 passed incl. cost-invariance regressions; app/m56/locking 32 passed, 1 skipped.
+
+## Fix: all-UNCERTAIN daily output (contract v3, 2026-11-15)
+
+Owner saw 19/19 UNCERTAIN for ICICIBANK Oct-2026 and HDFCBANK May-2026. Cause (from frozen payloads):
+Stock DNA found 0 VALIDATED / 2-6 EXPERIMENTAL single-extreme-feature patterns; on ~half the days none
+fired (probability "—"), and Platt calibration shrank the rest to 46-54%, below `min_probability` 0.56.
+
+Fix: `m58.prediction.model` (default `logit`; `mlp`, `stock_dna` selectable). Each step fits a
+recency-weighted L2 logistic model on every lane feature using only labels known at the decision close,
+and calibrates it on its own walk-forward OOS outputs (`calibration_rows` 120, refit every
+`refit_every` 20 rows, trained only on labels known before each block). CPU backend for deterministic
+frozen numerics. Payload carries `model`, `supporting_features` (top logit contributions) and
+`abstention_cause`. v1/v2 rows stay frozen; evaluation counts v3 only, so reruns create new IDs.
+
+Check run (scratch copy of state, not the owner DB): ICICIBANK 2026-10 daily -> 19/19 calibrated
+probabilities, 8 directional calls (4 correct), 11 UNCERTAIN, ~7 s. n is far too small to judge edge.
+Tests: `test_m58_prediction.py` + `test_m58_stock_dna.py` 15 passed (incl. causality under future-bar
+mutation and stock_dna selectability).

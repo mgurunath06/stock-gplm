@@ -168,7 +168,7 @@ def test_snapshot_is_frozen_declarative_and_reproducible(monkeypatch: pytest.Mon
     assert "EMA(period=3)" in frame["contextual_indicators"]
     assert frame["contextual_indicators"]["VWAP(session=true)"]["value"] is None
     assert "accepted minute bars" in frame["contextual_indicators"]["VWAP(session=true)"]["reason"]
-    assert snapshot["patterns"]["fired"] or snapshot["patterns"]["not_fired"]
+    assert set(snapshot["patterns"]) == {"fired", "not_fired"}  # empty unless model == stock_dna
     csv_text = (tmp_path / "wf" / "walk-forward-steps.csv").read_text(encoding="utf-8")
     assert "1d_EMA_3" in csv_text and "1d_VWAP_True" in csv_text
     second = mp.walk_forward(app, "SYN", start, end, "1d", 1, tmp_path / "wf", max_steps=1)
@@ -351,3 +351,46 @@ def test_directional_classification_ignores_costs_and_actual_uses_gross_move(
         assert s["actual_net_return"] == pytest.approx(s["actual_gross_return"] - 0.003932)
         if s["trade_decision"] == "TRADE":
             assert s["predicted_direction"] == "UP"
+
+
+class DnaSettings(SnapshotSettings):
+    def section(self, name: str):
+        out = super().section(name)
+        if name == "m58":
+            out = {**out, "prediction": {**out["prediction"], "model": "stock_dna"}}
+        return out
+
+
+def test_direction_model_forecasts_every_step_causally(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """v3: the default multi-feature model exposes a calibrated probability on every step (no pattern gaps),
+    and changing bars after the decision cannot change the forecast."""
+    data = _data()
+    d = [str(x) for x in data.daily["date"]]
+    app = _app(monkeypatch, tmp_path / "a", data)
+    run = mp.walk_forward(app, "SYN", d[490], d[499], "1d", 1, tmp_path / "a" / "wf", run_name="wf")
+    assert not run["errors"] and len(run["steps"]) == 10
+    assert all(s["calibrated_probability"] is not None for s in run["steps"])
+    row = app.db.one("SELECT source_kind, source_version, payload_json FROM predictions LIMIT 1")
+    assert row["source_kind"] == "DIRECTION_MODEL" and row["source_version"] == mp.CONTRACT
+    payload = json.loads(row["payload_json"])
+    assert payload["model"]["kind"] == "logit" and payload["supporting_features"]
+    first = run["steps"][0]["calibrated_probability"]
+    app.db.close()
+    mutated = data.daily.copy()
+    later = mutated.index[491:]
+    mutated.loc[later, ["open", "high", "low", "close"]] *= 1.5
+    future = SymbolData(data.symbol, mutated, data.minute, "m58-mutated", data.summary)
+    app2 = _app(monkeypatch, tmp_path / "b", future)
+    again = mp.predict(app2, "SYN", d[490], d[491], "1d", 1, tmp_path / "b" / "frozen")
+    assert again["probability"] == pytest.approx(first)
+    app2.db.close()
+
+
+def test_stock_dna_model_remains_selectable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    data = _data()
+    d = [str(x) for x in data.daily["date"]]
+    app = _app(monkeypatch, tmp_path, data, DnaSettings)
+    mp.predict(app, "SYN", d[498], d[499], "1d", 1, tmp_path / "frozen")
+    row = app.db.one("SELECT source_kind, payload_json FROM predictions")
+    assert row["source_kind"] == "STOCK_DNA" and "dna_counts" in json.loads(row["payload_json"])
+    app.db.close()
