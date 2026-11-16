@@ -185,7 +185,12 @@ def test_multitimeframe_alignment_excludes_incomplete_bar_and_vwap_is_causal(
     monkeypatch.setattr(mp, "Ingestor", FakeIngestor)
     db = AuditDB(tmp_path / "gplm.sqlite", tmp_path / "events", run_id="test-run")
     app = SimpleNamespace(s=SnapshotSettings(tmp_path), db=db)
-    frozen = mp.predict(app, "SYN", f"{current}T11:00:00+05:30", target, "15m", 1, tmp_path / "frozen")
+    # M5.9A: a 15m horizon=1 forecast cannot target the next day's session; the target is the next grid bar.
+    with pytest.raises(ValueError, match="TARGET_HORIZON_MISMATCH"):
+        mp.predict(app, "SYN", f"{current}T11:00:00+05:30", target, "15m", 1, tmp_path / "frozen")
+    assert db.one("SELECT COUNT(*) n FROM predictions")["n"] == 0
+    frozen = mp.predict(app, "SYN", f"{current}T11:00:00+05:30", None, "15m", 1, tmp_path / "frozen")
+    assert pd.Timestamp(frozen["target_session"]).strftime("%H:%M") == "11:00"
     snapshot = db.get_feature_snapshot(frozen["feature_snapshot_sha256"])
     assert snapshot is not None
     frames = snapshot["timeframes"]
@@ -266,11 +271,12 @@ def test_totals_and_table_match_displayed_rows(monkeypatch: pytest.MonkeyPatch, 
     assert e["correct_directional"] == sum(s["correctness"] == "CORRECT" for s in steps)
     assert e["incorrect_directional"] == sum(s["correctness"] == "INCORRECT" for s in steps)
     assert e["abstentions"] == sum(s["predicted_direction"] == "UNCERTAIN" for s in steps)
-    assert e["trades"] == sum(s["trade_decision"] == "TRADE" for s in steps)
+    assert e["trades"] == sum(s["trade_decision"] == "RESEARCH_TRADE" for s in steps)
+    assert not any(s["trade_decision"] == "TRADE" for s in steps)  # RESEARCH forecasts are never actionable
     assert e["brier_denominator"] == sum(s["calibrated_probability"] is not None for s in steps)
     totals = "\n".join(mp.format_run_totals(run))
     assert "not cumulative" in totals and f"completed {len(steps)}" in totals
-    assert f"executable trades {e['trades']}" in totals
+    assert f"research-gate trades {e['trades']} (not actionable)" in totals
     summary = json.loads((tmp_path / "wf" / "walk-forward-summary.json").read_text(encoding="utf-8"))
     assert len(summary["steps"]) == len(steps) and "feature_snapshot" not in summary["steps"][0]
     snap = app.db.get_feature_snapshot(steps[0]["feature_snapshot_sha256"])
@@ -333,24 +339,33 @@ class CostlySettings(SnapshotSettings):
         return super().section(name)
 
 
-def test_directional_classification_ignores_costs_and_actual_uses_gross_move(
+def test_actual_movement_uses_cost_aware_neutral_band_and_neutral_is_not_scored(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Regression: v1 made 'actual DOWN' out of small gross rises and skewed every call to DOWN."""
+    """v4 (M5.9A): a gross move inside the cost-aware neutral band is NEUTRAL (never DOWN), is not a
+    directional outcome and is not Brier-scored. v2's regression still holds: costs never turn a move
+    larger than the band into DOWN."""
     data = _data()
     d = [str(x) for x in data.daily["date"]]
-    runs = {}
-    for name, settings in (("free", SnapshotSettings), ("costly", CostlySettings)):
-        app = _app(monkeypatch, tmp_path / name, data, settings)
-        runs[name] = mp.walk_forward(app, "SYN", d[490], d[499], "1d", 1, tmp_path / name / "wf", run_name="wf")
-        app.db.close()
-    view = lambda r: [(s["predicted_direction"], s["calibrated_probability"], s["actual_direction"],
-                       s["correctness"]) for s in r["steps"]]
-    assert view(runs["free"]) == view(runs["costly"])
-    for s in runs["costly"]["steps"]:
-        assert s["actual_direction"] == ("UP" if s["actual_gross_return"] > 0 else "DOWN")
-        assert s["actual_net_return"] == pytest.approx(s["actual_gross_return"] - 0.003932)
-        if s["trade_decision"] == "TRADE":
+    app = _app(monkeypatch, tmp_path, data, CostlySettings)
+    run = mp.walk_forward(app, "SYN", d[490], d[499], "1d", 1, tmp_path / "wf", run_name="wf")
+    band = 0.003932
+    assert not run["errors"]
+    for s in run["steps"]:
+        g = s["actual_gross_return"]
+        assert s["actual_direction"] == ("UP" if g > band else "DOWN" if g < -band else "NEUTRAL")
+        assert s["actual_net_return"] == pytest.approx(g - band)
+        if s["actual_direction"] == "NEUTRAL":
+            assert s["correctness"] == "NOT_APPLICABLE"
+        if s["trade_decision"] == "RESEARCH_TRADE":
             assert s["predicted_direction"] == "UP"
+    e = run["evaluation"]
+    assert e["neutral_outcomes"] == sum(s["actual_direction"] == "NEUTRAL" for s in run["steps"])
+    assert e["directional_accuracy_denominator"] == sum(
+        s["actual_direction"] != "NEUTRAL" and s["predicted_direction"] != "UNCERTAIN" for s in run["steps"])
+    payload = json.loads(app.db.one("SELECT payload_json FROM predictions LIMIT 1")["payload_json"])
+    assert payload["neutral_band"]["mode"] == "cost_aware"
+    assert payload["neutral_band"]["threshold"] == pytest.approx(band)
+    app.db.close()
 
 
 class DnaSettings(SnapshotSettings):

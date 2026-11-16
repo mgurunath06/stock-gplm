@@ -15,7 +15,7 @@ HTF value is used before its source candle closed.
 Resampling never fills: a bucket missing source minutes is still built from what exists
 and is flagged ``incomplete`` so the engine suppresses signals on it. Off-session minutes
 were already dropped by the loader. Weekly bars group sessions by ISO week; no holiday is
-inferred.
+inferred, and a week is final only with registered session-calendar evidence (M5.9A).
 """
 from __future__ import annotations
 
@@ -73,7 +73,44 @@ def daily_bars(daily: pd.DataFrame) -> Bars:
     return Bars("1d", f.reset_index(drop=True), "daily candles (ShoonyaDailyV1)")
 
 
-def weekly_bars(daily: Bars) -> Bars:
+WEEK_COMPLETE = "COMPLETE"
+WEEK_PARTIAL = "PARTIAL"
+WEEK_CALENDAR_UNKNOWN = "CALENDAR_UNKNOWN"
+WEEK_MISSING_SESSION = "MISSING_EXPECTED_BAR"
+WEEK_CALENDAR_CONFLICT = "CALENDAR_CONFLICT"
+
+
+def _week_status(observed: Sequence[str], calendar: Any) -> tuple[str, str | None]:
+    """Completeness of one ISO week from registered session evidence (M5.9A).
+
+    Returns ``(status, last_expected_session)``. Only ``COMPLETE`` weeks are final. Without a calendar,
+    or when any day of the week is UNKNOWN, the week is ``CALENDAR_UNKNOWN``; Friday is never assumed.
+    """
+    if calendar is None:
+        return WEEK_CALENDAR_UNKNOWN, None
+    expected = calendar.week_sessions(observed[0])
+    if expected is None:
+        return WEEK_CALENDAR_UNKNOWN, None
+    seen = set(observed)
+    if seen - set(expected):
+        return WEEK_CALENDAR_CONFLICT, expected[-1] if expected else None
+    missing = [d for d in expected if d not in seen]
+    if not missing:
+        return WEEK_COMPLETE, expected[-1]
+    if all(d > max(observed) for d in missing):
+        return WEEK_PARTIAL, expected[-1]  # the week is still open (or its tail is not yet loaded)
+    return WEEK_MISSING_SESSION, expected[-1]
+
+
+def weekly_bars(daily: Bars, calendar: Any = None) -> Bars:
+    """ISO-week bars. A bar is final (``incomplete=False``) only when a registered session calendar
+    proves every session of its week is present; ``week_status`` records why otherwise.
+
+    ``avail_ns`` (when other timeframes may read the bar): with a calendar, the close of the week's
+    last expected session (holiday-shortened weeks become readable on their real last session);
+    without one, the legacy non-authoritative rule ``max(last session close, Friday 15:30 IST)`` is
+    kept for higher-timeframe feature alignment only -- such bars are never decision/target bars.
+    """
     if not len(daily):
         return Bars("1w", pd.DataFrame(), "resampled from 1d")
     f = daily.frame
@@ -83,13 +120,22 @@ def weekly_bars(daily: Bars) -> Bars:
     out = pd.DataFrame({"session": g["session"].last(), "open": g["open"].first(), "high": g["high"].max(),
                         "low": g["low"].min(), "close": g["close"].last(), "volume": g["volume"].sum(),
                         "end_ns": g["end_ns"].last(), "sessions_in_week": g["session"].count()})
-    # A weekly candle is closed only once its week is certainly over: the later of its last session's close and
-    # Friday 15:30 IST of that ISO week (no holiday calendar is inferred; a still-open final week is never read).
-    fri = [ist_ns((date.fromisoformat(s) + timedelta(days=4 - date.fromisoformat(s).weekday())).isoformat(), "15:30")
-           for s in out["session"]]
-    out["avail_ns"] = np.maximum(out["end_ns"].to_numpy(dtype=np.int64), np.array(fri, dtype=np.int64))
-    out["incomplete"] = False
-    return Bars("1w", out.reset_index(drop=True), "resampled from 1d (ISO week; no holiday inferred)")
+    members = g["session"].apply(list)
+    statuses, avail = [], []
+    for wk, last in zip(out.index, out["session"]):
+        status, last_expected = _week_status(members[wk], calendar)
+        statuses.append(status)
+        if last_expected is not None:
+            avail.append(max(ist_ns(last_expected, "15:30"), ist_ns(last, "15:30")))
+        else:
+            d = date.fromisoformat(last)
+            avail.append(max(ist_ns(last, "15:30"), ist_ns((d + timedelta(days=4 - d.weekday())).isoformat(), "15:30")))
+    out["avail_ns"] = np.array(avail, dtype=np.int64)
+    out["week_status"] = statuses
+    out["incomplete"] = out["week_status"] != WEEK_COMPLETE
+    src = (f"resampled from 1d (ISO week; registered calendar {getattr(calendar, 'source', '?')})" if calendar is not None
+           else "resampled from 1d (ISO week; no registered calendar: weeks are not final)")
+    return Bars("1w", out.reset_index(drop=True), src)
 
 
 def minute_frame(minute: pd.DataFrame) -> Bars:
@@ -139,7 +185,7 @@ def resample_intraday(one: Bars, timeframe: str) -> Bars:
 
 
 def build_all(daily: pd.DataFrame, minute: pd.DataFrame,
-              timeframes: Sequence[str] | None = None) -> dict[str, Bars]:
+              timeframes: Sequence[str] | None = None, calendar: Any = None) -> dict[str, Bars]:
     """Build configured lanes without filling absent source minutes.
 
     Any positive ``Nm`` or ``Nh`` duration can be requested. Durations are anchored at the 09:15
@@ -148,7 +194,7 @@ def build_all(daily: pd.DataFrame, minute: pd.DataFrame,
     """
     d = daily_bars(daily)
     one = minute_frame(minute)
-    lanes = {"1d": d, "1w": weekly_bars(d)}
+    lanes = {"1d": d, "1w": weekly_bars(d, calendar)}
     for tf in tuple(timeframes or INTRADAY_MINUTES):
         if tf in ("1d", "1w"):
             continue

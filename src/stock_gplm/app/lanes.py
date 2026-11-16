@@ -36,11 +36,13 @@ def load_space(path: Path | None = None) -> dict[str, Any]:
     return json.loads(Path(path or FEATURE_SPACE).read_text(encoding="utf-8"))
 
 
-def all_bars(data: SymbolData) -> dict[str, Bars]:
+def all_bars(data: SymbolData, calendar: Any = None) -> dict[str, Bars]:
+    """All lanes. ``calendar`` (a registered :class:`~stock_gplm.app.session_calendar.SessionCalendar`)
+    is the only evidence that can make a weekly bar final."""
     daily = data.daily[["date", "open", "high", "low", "close", "volume"]].copy()
     minute = data.minute[["start_ist", "session", "open", "high", "low", "close", "volume"]].copy() \
         if len(data.minute) else pd.DataFrame()
-    return build_all(daily, minute)
+    return build_all(daily, minute, calendar=calendar)
 
 
 def session_features(minute: pd.DataFrame) -> pd.DataFrame:

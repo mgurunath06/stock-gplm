@@ -11,19 +11,30 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from .contracts import (ABSTAIN_TOKEN, CALENDAR_UNKNOWN, DOWN, INCOMPLETE_SESSION, LEGACY_STATUS_MAP, MISSING_EXPECTED_BAR,
+                        NEUTRAL, OUTPUT_CONTRACT, RESEARCH, TARGET_HORIZON_MISMATCH, UP, NeutralBand, brier_up,
+                        classify_movement, direction_correct, neutral_band, opportunity_missing)
 from .db import sha, utc_now
 from .ingest import Ingestor, SymbolData, normalize_symbol, window_data
 from .lanes import all_bars, build_lane
 from .m58_snapshot import build_snapshot
 from .models import PlattCalibrator
+from .session_calendar import load_registered_calendar
 from .stock_dna import CONTRACT as DNA_CONTRACT, discover_lane
+from .targets import EOD_UNAVAILABLE, check_explicit_target, derive_target, eligible_bars_between, ns_label
 
 # v2: directional classification, calibration, actual direction and Brier use the gross price move;
 # configured costs apply only to the TRADE gate and trade P&L. v1 rows remain frozen and untouched.
 # v3: the default forecaster is a multi-feature direction model (m58.prediction.model, default "logit")
 # fitted causally on every lane feature at each step, calibrated on its own earlier walk-forward
 # out-of-sample outputs. "stock_dna" keeps the v2 single-condition pattern vote. v1/v2 rows stay frozen.
-CONTRACT = "stock-gplm.m58-prediction.v3"
+# v4 (M5.9A): the target is derived from the horizon over eligible completed bars (an explicit target must
+# match it exactly), weekly bars need registered session evidence, realized movement is UP/DOWN/NEUTRAL with
+# a versioned cost-aware neutral band (NEUTRAL is never DOWN and is excluded from directional accuracy and
+# Brier), abstention (UNCERTAIN) is a confidence state only, and a research forecast is never actionable:
+# it has no stop/target/invalidation. The research trade gate is kept as ``research_trade_gate_passed``.
+CONTRACT = "stock-gplm.m58-prediction.v4"
+LEGACY_CONTRACTS = ("stock-gplm.m58-prediction.v1", "stock-gplm.m58-prediction.v2", "stock-gplm.m58-prediction.v3")
 MODEL_KINDS = ("logit", "mlp", "stock_dna")
 _MODEL_DEFAULTS: dict[str, Any] = {
     "model": "logit", "min_train_rows": 150, "calibration_rows": 120, "refit_every": 20,
@@ -42,14 +53,16 @@ def _model_cfg(pcfg: Mapping[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def _labelled_rows(lane: Any, decision: int, horizon: int) -> tuple[np.ndarray, np.ndarray]:
-    """Rows whose gross label (open of the next bar to close h bars later) is known at the decision close."""
+def _labelled_rows(lane: Any, decision: int, horizon: int, band: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """Rows whose gross label (open of the next bar to close h bars later) is known at the decision close.
+    NEUTRAL rows (|gross| <= band) are excluded: the model and its calibration estimate P(UP | not NEUTRAL)."""
     m = lane.market
     rows = np.arange(0, max(0, decision - horizon + 1))
     if not rows.size:
         return rows, np.zeros(0)
     gross = m.close[rows + horizon] / m.open[rows + 1] - 1
     ok = np.isfinite(gross) & (np.isnan(lane.X[rows]).mean(axis=1) < 0.5) & ~np.asarray(m.no_signal)[rows]
+    ok &= np.abs(np.nan_to_num(gross)) > band
     return rows[ok], gross[ok].astype(float)
 
 
@@ -63,7 +76,7 @@ def _model_forecast(lane: Any, decision: int, horizon: int, cfg: Mapping[str, An
     backend = resolve("cpu")  # deterministic; frozen forecasts must not depend on device numerics
     models_cfg = {"logit": cfg["logit"], "mlp": cfg["mlp"], "_epochs_full": int(cfg["mlp"]["epochs"]),
                   "_epochs_update": int(cfg["mlp"]["epochs"])}
-    rows, gross = _labelled_rows(lane, decision, horizon)
+    rows, gross = _labelled_rows(lane, decision, horizon, float(cfg.get("_neutral_band", 0.0)))
     y = (gross > 0).astype(float)
     min_train = int(cfg["min_train_rows"])
 
@@ -185,14 +198,22 @@ def _resolve_snapshot(app: Any, prediction_id: str,
     return dict(computed), digest, SNAPSHOT_LEGACY
 
 
-def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: str, horizon: int,
+def _eod_policy(app: Any) -> str:
+    return str(app.s.section("prediction").get("intraday_end_of_session", EOD_UNAVAILABLE))
+
+
+def predict(app: Any, symbol: str, as_of: str, target_session: str | None, timeframe: str, horizon: int,
             out: Path) -> dict[str, Any]:
+    """Freeze one research forecast. ``target_session`` may be omitted (it is derived from ``horizon``);
+    when given it must equal the horizon-derived target exactly or nothing is frozen."""
     symbol = normalize_symbol(symbol)
     if horizon <= 0:
         raise ValueError("horizon must be positive")
-    if ("T" in target_session and _as_of_cutoff_ns(target_session) <= _as_of_cutoff_ns(as_of)) or \
-            ("T" not in target_session and target_session <= as_of[:10]):
+    if target_session is not None and (
+            ("T" in target_session and _as_of_cutoff_ns(target_session) <= _as_of_cutoff_ns(as_of)) or
+            ("T" not in target_session and target_session <= as_of[:10])):
         raise ValueError("target timestamp must be after the as-of cutoff")
+    calendar = load_registered_calendar(app.s)
     raw = Ingestor(app.s, app.db).ingest(symbol, use_minute=True)
     data = window_data(raw, end=as_of[:10])  # no later session can enter any feature
     cutoff_ns = _as_of_cutoff_ns(as_of)
@@ -204,7 +225,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
                               sha({"fp": data.fingerprint, "cutoff_ns": cutoff_ns})[:32],
                               {**data.summary, "prediction_cutoff_ns": cutoff_ns,
                                "minute_bars": len(minute)}, data.changed_files)
-    bars = all_bars(data)
+    bars = all_bars(data, calendar)
     if timeframe not in bars or not len(bars[timeframe]):
         raise ValueError(f"no accepted {timeframe} candles at or before {as_of}")
     lane = build_lane(data, timeframe, app.s.section("costs"), bars=bars,
@@ -216,11 +237,24 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     eligible = np.flatnonzero((clock.to_numpy(dtype=np.int64) <= cutoff_ns) &
                               ~source_frame["incomplete"].to_numpy(dtype=bool))
     if not len(eligible):
-        raise ValueError(f"no completed {timeframe} candle at or before {as_of}")
+        why = CALENDAR_UNKNOWN if timeframe == "1w" and calendar is None else INCOMPLETE_SESSION
+        raise ValueError(f"{why}: no completed {timeframe} candle at or before {as_of}")
     decision = int(eligible[-1])
+    decision_session = str(lane.market.sessions[decision])
+    decision_end_ns = int(lane.market.end_ns[decision])
+    # Exact target-horizon contract: derived before anything is frozen. Later bars are consulted only for
+    # their existence (research replay without a calendar), never for values.
+    observed = all_bars(raw, calendar).get(timeframe)
+    derived = derive_target(timeframe, decision_session, decision_end_ns, horizon, calendar=calendar,
+                            observed_frame=observed.frame if observed is not None else None,
+                            eod_policy=_eod_policy(app))
+    explicit_target = target_session
+    target_session = check_explicit_target(explicit_target, derived, horizon)
     pcfg = app.s.section("m58").get("prediction", {})
     mcfg = _model_cfg(pcfg)
     cost = lane.costs.buy + lane.costs.sell
+    band = neutral_band(app.s.section("prediction").get("neutral_band"), cost)
+    mcfg["_neutral_band"] = band.threshold
     cal_p, cal_y, cal_ret = [], [], []
     patterns: list[dict[str, Any]] = []
     dna: dict[str, Any] | None = None
@@ -232,7 +266,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
             if not fired:
                 continue
             gross = float(lane.market.close[row + horizon] / lane.market.open[row + 1] - 1)
-            if np.isfinite(gross):
+            if np.isfinite(gross) and abs(gross) > band.threshold:
                 cal_p.append(p); cal_y.append(int(gross > 0)); cal_ret.append(gross - cost)
         raw_p, support = _vote(patterns, lane, decision)
         has_signal = bool(support)
@@ -248,7 +282,8 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
         no_signal_reason = (f"insufficient training history ({fc['train_rows']} labelled rows < "
                             f"{mcfg['min_train_rows']})")
         model_info = {"kind": mcfg["model"], "train_rows": fc["train_rows"],
-                      "features_used": fc.get("features_used"), "config": mcfg}
+                      "features_used": fc.get("features_used"),
+                      "config": {k: v for k, v in mcfg.items() if not k.startswith("_")}}
         model_key = sha({"model": mcfg, "features": lane.feature_config_sha})
     calibrator = PlattCalibrator(int(pcfg.get("minimum_calibration_outcomes", 30))).fit(cal_p, cal_y)
     calibrated = calibrator.status.startswith("PLATT") and has_signal
@@ -272,7 +307,6 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
     expected = float(np.mean(comparable)) if calibrated and len(comparable) >= 20 else None
     interval = ([float(np.quantile(comparable, 0.1)), float(np.quantile(comparable, 0.9))]
                 if calibrated and len(comparable) >= 20 else None)
-    decision_session = str(lane.market.sessions[decision])
     natural = json.dumps({"contract": CONTRACT, "symbol": symbol, "timeframe": timeframe, "as_of": as_of,
                           "decision": decision_session, "target": target_session, "horizon": horizon,
                           "data": lane.data_fingerprint, "model": model_key}, sort_keys=True)
@@ -304,7 +338,24 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
                 if interval else None), "abstained": direction == "UNCERTAIN",
                "evidence_quality": "CALIBRATED" if calibrated else "INSUFFICIENT_CALIBRATION",
                "risk": ["research forecast, not investment advice", "daily delivery shorting is not modelled",
-                        "costs are configured assumptions"], "created_utc": utc_now()}
+                        "costs are configured assumptions"], "created_utc": utc_now(),
+               "status": RESEARCH, "output_contract": OUTPUT_CONTRACT,
+               "target_contract": {"decision_bar": decision_session, "decision_end_ns": decision_end_ns,
+                                   "declared_horizon": horizon, "derived_target": target_session,
+                                   "derivation": derived["derivation"],
+                                   "explicit_target_supplied": explicit_target is not None},
+               "neutral_band": band.to_dict(),
+               "confidence_status": "ABSTAIN" if direction == ABSTAIN_TOKEN else "CONFIDENT",
+               "predicted_movement": direction if direction in (UP, DOWN) else None,
+               "research_trade_gate_passed": bool(tradable),
+               "actionable": False,
+               "opportunity": {"complete": False, "missing": opportunity_missing(
+                   {"action": "BUY" if tradable else None, "entry": "open of the next bar", "invalidation": None,
+                    "stop": None, "target": None, "horizon": horizon, "probability": probability,
+                    "expected_return": expected, "model_version": None, "timestamp": decision_session,
+                    "freshness_status": None})},
+               "not_actionable_because": ["RESEARCH forecast: no approved model artifact, stop-loss, price target "
+                                          "or invalidation condition; never actionable"]}
     inserted = app.db.add_prediction({
         "prediction_id": prediction_id, "natural_key": natural, "mode": "HISTORICAL_FROZEN",
         "replay_id": "m58-" + sha(natural)[:16], "symbol": symbol, "timeframe": timeframe,
@@ -313,7 +364,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
         "source_version": CONTRACT, "horizon_bars": horizon, "decision_label": decision_session,
         "decision_ns": int(lane.market.end_ns[decision]), "target_session": target_session, "direction": direction,
         "prob_raw": raw_p, "prob_calibrated": probability, "calibration": calibrator.status,
-        "actionable": int(tradable), "entry_ref": float(lane.market.close[decision]),
+        "actionable": 0, "entry_ref": float(lane.market.close[decision]),
         "stop": None, "target": None, "cost_bps": cost * 1e4, "data_fingerprint": lane.data_fingerprint,
         "feature_config_sha": lane.feature_config_sha, "payload": payload})
     frozen = app.db.one("SELECT * FROM predictions WHERE prediction_id=?", (prediction_id,))
@@ -326,6 +377,11 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
               "expected_net_return": frozen_payload.get("expected_net_return"),
               "forecast_price_range": frozen_payload.get("forecast_price_range"),
               "action": "TRADE" if frozen["actionable"] else "NO_TRADE",
+              "output_status": LEGACY_STATUS_MAP.get(frozen["mode"], frozen["mode"]),
+              "research_trade_gate": ("PASS" if frozen_payload.get("research_trade_gate_passed",
+                                                                   bool(frozen["actionable"])) else "FAIL"),
+              "missing_action_fields": (frozen_payload.get("opportunity") or {}).get("missing"),
+              "horizon": horizon, "target_derivation": (frozen_payload.get("target_contract") or {}).get("derivation"),
               "evidence_quality": frozen_payload.get("evidence_quality", "INSUFFICIENT_CALIBRATION"),
               "supporting_patterns": frozen_payload.get("supporting_stock_dna", [])[:10],
               "supporting_features": frozen_payload.get("supporting_features", [])[:10],
@@ -339,57 +395,89 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str, timeframe: s
             "report": str(out / f"{prediction_id}.json")}
 
 
+def _frozen_band(payload: Mapping[str, Any]) -> NeutralBand:
+    nb = payload.get("neutral_band")
+    if nb:
+        return NeutralBand(float(nb["threshold"]), str(nb["mode"]), str(nb["version"]))
+    return NeutralBand(0.0, "legacy (pre-v4: zero band; FLAT -> NEUTRAL)", "legacy")
+
+
 def reveal(app: Any, prediction_id: str) -> dict[str, Any]:
+    """Score exactly the frozen target bar. The bar must be final, and the eligible bars actually held
+    between decision and target must equal the declared horizon; otherwise the outcome is recorded as
+    NOT_COMPARABLE (never re-targeted)."""
     pred = app.db.one("SELECT * FROM predictions WHERE prediction_id=?", (prediction_id,))
     if pred is None or pred["mode"] != "HISTORICAL_FROZEN":
         raise ValueError(f"frozen M5.8 prediction not found: {prediction_id}")
     existing = app.db.one("SELECT * FROM evaluations WHERE prediction_id=?", (prediction_id,))
     if existing is not None:
         return {"status": "ALREADY_REVEALED", "prediction_id": prediction_id, **existing}
+    pp = json.loads(pred["payload_json"])
+    calendar = load_registered_calendar(app.s)
     data = Ingestor(app.s, app.db).ingest(pred["symbol"], use_minute=True)
-    bars = all_bars(data)
+    bars = all_bars(data, calendar)
     lane = build_lane(data, pred["timeframe"], app.s.section("costs"), bars=bars,
                       cache_dir=app.s.cache_dir / "features")
     if lane is None:
         raise ValueError("prediction lane is unavailable")
+    frame = bars[pred["timeframe"]].frame
     target = str(pred["target_session"])
     idx = (np.flatnonzero(lane.market.end_ns == _as_of_cutoff_ns(target)) if "T" in target else
            np.flatnonzero(lane.market.sessions == target))
     if not len(idx):
-        raise ValueError(f"actual target session {target} is not available; reveal remains blocked")
+        raise ValueError(f"{MISSING_EXPECTED_BAR}: actual target {target} is not available; reveal remains blocked")
     t = int(idx[-1])
+    if bool(frame["incomplete"].iloc[t]):
+        raise ValueError(f"{INCOMPLETE_SESSION}: target bar {target} is not final; reveal remains blocked")
     decision_idx = np.flatnonzero(lane.market.end_ns == int(pred["decision_ns"]))
     if not len(decision_idx) or int(decision_idx[-1]) + 1 > t:
         raise ValueError("prediction decision/target sessions are not ordered in the accepted lane")
     entry = int(decision_idx[-1]) + 1
+    horizon = int(pred["horizon_bars"])
+    held = eligible_bars_between(frame, int(pred["decision_ns"]), int(lane.market.end_ns[t]))
+    band = _frozen_band(pp)
     gross = float(lane.market.close[t] / lane.market.open[entry] - 1)
     net = gross - lane.costs.buy - lane.costs.sell
-    actual = "UP" if gross > 0 else "DOWN" if gross < 0 else "FLAT"  # direction is cost-free
     direction = pred["direction"]
-    correct = None if direction == "UNCERTAIN" else int(direction == actual)
     prob = pred["prob_calibrated"]
-    brier = None if prob is None else (float(prob) - int(gross > 0)) ** 2
-    trade_net = net if pred["actionable"] and direction == "UP" else None
-    payload = {"actual_open": float(lane.market.open[entry]), "actual_close": float(lane.market.close[t]),
+    base = {"prediction_id": prediction_id, "outcome_label": target, "outcome_ns": int(lane.market.end_ns[t]),
+            "bars_held": held}
+    common = {"reveal_bar": target, "decision_bar": pred["decision_label"], "declared_horizon": horizon,
+              "bars_held": held, "evaluation_contract": CONTRACT, "prediction_contract": pred["source_version"],
+              "revealed_from_data_fingerprint": lane.data_fingerprint}
+    if held != horizon:
+        payload = {**common, "reason": TARGET_HORIZON_MISMATCH,
+                   "detail": f"{held} eligible bars between decision and target, declared horizon {horizon}"}
+        app.db.add_evaluation({**base, "realized_return": None, "up": None, "correct": None, "brier": None,
+                               "trade_net_return": None, "exit_reason": "NOT_COMPARABLE", "payload_json": payload})
+        return {"status": "NOT_COMPARABLE", "prediction_id": prediction_id, "target_session": target,
+                "reason": TARGET_HORIZON_MISMATCH, "bars_held": held, "horizon": horizon}
+    actual = classify_movement(gross, band)
+    correct = direction_correct(direction, actual)
+    brier = brier_up(prob, actual)
+    gate = bool(pp.get("research_trade_gate_passed", bool(pred["actionable"])))
+    trade_net = net if gate and direction == UP else None
+    payload = {**common, "actual_open": float(lane.market.open[entry]), "actual_close": float(lane.market.close[t]),
                "gross_return": gross, "net_return_after_configured_costs": net, "actual_direction": actual,
-               "frozen_prediction": {"direction": direction, "probability": prob},
-               "revealed_from_data_fingerprint": lane.data_fingerprint}
-    app.db.add_evaluation({"prediction_id": prediction_id, "outcome_label": target,
-                           "outcome_ns": int(lane.market.end_ns[t]), "realized_return": net,
-                           "up": int(gross > 0), "correct": correct, "brier": brier,
-                           "trade_net_return": trade_net, "exit_reason": "TARGET_SESSION_CLOSE",
-                           "bars_held": int(pred["horizon_bars"]), "payload_json": payload})
+               "movement": actual, "neutral_band": band.to_dict(),
+               "frozen_prediction": {"direction": direction, "probability": prob}}
+    app.db.add_evaluation({**base, "realized_return": net, "up": None if actual == NEUTRAL else int(actual == UP),
+                           "correct": correct, "brier": brier, "trade_net_return": trade_net,
+                           "exit_reason": "TARGET_SESSION_CLOSE", "payload_json": payload})
     return {"status": "REVEALED", "prediction_id": prediction_id, "target_session": target,
             "predicted_direction": direction, "actual_direction": actual, "correct": correct,
-            "probability": prob, "brier": brier, "gross_return": gross, "net_return": net,
+            "probability": prob, "brier": brier, "gross_return": gross, "net_return": net, "bars_held": held,
             "actual_open": payload["actual_open"], "actual_close": payload["actual_close"]}
 
 
 def _metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Directional accuracy and Brier use UP/DOWN outcomes only: NEUTRAL outcomes and abstentions
+    (UNCERTAIN) are counted separately and never scored as wrong or as DOWN."""
     revealed = [r for r in rows if r.get("realized_return") is not None]
-    directional = [r for r in revealed if r["direction"] != "UNCERTAIN" and r.get("correct") is not None]
+    directional = [r for r in revealed if r["direction"] != ABSTAIN_TOKEN and r.get("correct") is not None]
     probs = [r for r in revealed if r.get("prob_calibrated") is not None and r.get("brier") is not None]
     trades = [float(r["trade_net_return"]) for r in revealed if r.get("trade_net_return") is not None]
+    neutral = [r for r in revealed if r.get("up") is None and "up" in r]
     bins = []
     for lo in np.arange(0, 1, 0.1):
         group = [r for r in probs if lo <= float(r["prob_calibrated"]) < lo + 0.1]
@@ -402,10 +490,13 @@ def _metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "incorrect_directional": sum(int(r["correct"] == 0) for r in directional),
             "directional_predictions": len(directional), "directional_accuracy_denominator": len(directional),
             "directional_accuracy": float(np.mean([r["correct"] for r in directional])) if directional else None,
-            "abstentions": sum(r["direction"] == "UNCERTAIN" for r in rows),
-            "abstention_rate": float(np.mean([r["direction"] == "UNCERTAIN" for r in rows])) if rows else None,
+            "neutral_outcomes": len(neutral),
+            "not_comparable": sum(r.get("exit_reason") == "NOT_COMPARABLE" for r in rows),
+            "abstentions": sum(r["direction"] == ABSTAIN_TOKEN for r in rows),
+            "abstention_rate": float(np.mean([r["direction"] == ABSTAIN_TOKEN for r in rows])) if rows else None,
             "mean_brier": float(np.mean([r["brier"] for r in probs])) if probs else None,
             "brier_denominator": len(probs), "calibration_bins": bins, "trades": len(trades),
+            "trades_meaning": "research trade gate (not actionable opportunities)",
             "mean_trade_net_return": float(np.mean(trades)) if trades else None,
             "total_compounded_trade_return": float(np.prod(1 + np.asarray(trades)) - 1) if trades else None}
 
@@ -436,14 +527,18 @@ def evaluate(app: Any, symbol: str | None, out: Path, start: str | None = None, 
         else:
             where += f" AND p.prediction_id IN ({','.join('?' * len(prediction_ids))})"
             params.extend(prediction_ids)
-    rows = app.db.q("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, e.up FROM predictions p "
-                    "LEFT JOIN evaluations e ON e.prediction_id=p.prediction_id " + where + " ORDER BY p.decision_ns",
-                    params)
+    rows = app.db.q("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, e.up, e.exit_reason "
+                    "FROM predictions p LEFT JOIN evaluations e ON e.prediction_id=p.prediction_id " + where +
+                    " ORDER BY p.decision_ns", params)
+    legacy = app.db.one("SELECT COUNT(*) n FROM predictions WHERE mode='HISTORICAL_FROZEN' AND source_version IN "
+                        f"({','.join('?' * len(LEGACY_CONTRACTS))})", LEGACY_CONTRACTS)
     mode = ("NAMED_RUN" if run_name or prediction_ids is not None else
             "FILTERED" if any((start, end, timeframe, horizon is not None)) else "CUMULATIVE")
     result = {"contract": CONTRACT, "mode": mode, "run_name": run_name,
               "filters": {"symbol": symbol, "start": start, "end": end,
-                          "timeframe": timeframe, "horizon": horizon}, **_metrics(rows)}
+                          "timeframe": timeframe, "horizon": horizon}, **_metrics(rows),
+              "legacy_non_comparable_predictions": int(legacy["n"]) if legacy else 0,
+              "legacy_note": "rows frozen under earlier M5.8 contracts are kept unchanged and excluded (non-comparable)"}
     out.mkdir(parents=True, exist_ok=True)
     (out / "prediction-evaluation.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return {**result, "report": str(out / "prediction-evaluation.json")}
@@ -451,8 +546,8 @@ def evaluate(app: Any, symbol: str | None, out: Path, start: str | None = None, 
 
 def _step(app: Any, prediction_id: str, creation_status: str, snapshot: Mapping[str, Any],
           snapshot_origin: str = SNAPSHOT_FROZEN) -> dict[str, Any]:
-    row = app.db.one("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, e.up, "
-                     "e.payload_json evaluation_payload FROM predictions p LEFT JOIN evaluations e "
+    row = app.db.one("SELECT p.*, e.correct, e.brier, e.trade_net_return, e.realized_return, e.up, e.exit_reason, "
+                     "e.bars_held, e.payload_json evaluation_payload FROM predictions p LEFT JOIN evaluations e "
                      "ON e.prediction_id=p.prediction_id WHERE p.prediction_id=?", (prediction_id,))
     assert row is not None
     pp = json.loads(row["payload_json"])
@@ -468,7 +563,10 @@ def _step(app: Any, prediction_id: str, creation_status: str, snapshot: Mapping[
                              "insufficient untouched calibration evidence; no confidence exposed")
     else:
         abstention_reason = "calibrated confidence below the configured minimum probability"
+    gate = bool(pp.get("research_trade_gate_passed", bool(row["actionable"])))
     trade_reason = ("eligible under the configured research policy" if row["actionable"] else
+                    "research trade gate passed; not actionable (no stop, target or invalidation; RESEARCH status)"
+                    if gate else
                     f"abstained: {abstention_reason}" if abstained else
                     "short execution is not modelled" if row["direction"] == "DOWN" else
                     "directional classification is not an executable trade")
@@ -480,11 +578,14 @@ def _step(app: Any, prediction_id: str, creation_status: str, snapshot: Mapping[
             "predicted_direction": row["direction"], "calibrated_probability": prob,
             "displayed_confidence": max(float(prob), 1 - float(prob)) if prob is not None else None,
             "abstained": abstained, "abstention_reason": abstention_reason,
-            "trade_decision": "TRADE" if row["actionable"] else "NO_TRADE",
+            "trade_decision": "TRADE" if row["actionable"] else "RESEARCH_TRADE" if gate else "NO_TRADE",
+            "output_status": pp.get("status", LEGACY_STATUS_MAP.get(row["mode"], row["mode"])),
+            "bars_held": row.get("bars_held"), "target_derivation": (pp.get("target_contract") or {}).get("derivation"),
             "trade_reason": trade_reason,
             "actual_direction": ep.get("actual_direction"), "actual_gross_return": ep.get("gross_return"),
             "actual_net_return": row["realized_return"], "actual_trade_net_return": row["trade_net_return"],
-            "correctness": ("NOT_APPLICABLE" if row["correct"] is None else
+            "correctness": ("NOT_COMPARABLE" if row.get("exit_reason") == "NOT_COMPARABLE" else
+                            "NOT_APPLICABLE" if row["correct"] is None else
                             "CORRECT" if row["correct"] else "INCORRECT"),
             "prediction_status": "NEWLY_CREATED" if creation_status == "FROZEN" else "REUSED",
             "feature_snapshot_sha256": snapshot["snapshot_sha256"], "feature_snapshot_origin": snapshot_origin,
@@ -553,11 +654,13 @@ def format_run_totals(result: Mapping[str, Any]) -> list[str]:
         f"revealed outcomes {e['revealed']}",
         f"  directional classifications: correct {e['correct_directional']}, incorrect "
         f"{e['incorrect_directional']}, accuracy {_fmt(e['directional_accuracy'], '.3f')} "
-        f"(n={e['directional_accuracy_denominator']}); abstentions (UNCERTAIN) {e['abstentions']}",
+        f"(n={e['directional_accuracy_denominator']}); abstentions (UNCERTAIN) {e['abstentions']}; "
+        f"NEUTRAL outcomes {e.get('neutral_outcomes', 0)}; not comparable {e.get('not_comparable', 0)}",
         f"  Brier score {_fmt(e['mean_brier'], '.4f')} (n={e['brier_denominator']}; calibrated probabilities only)",
-        f"  executable trades {e['trades']}; mean net trade return {_fmt(e['mean_trade_net_return'], '+.3%')}; "
+        f"  research-gate trades {e['trades']} (not actionable); mean net trade return "
+        f"{_fmt(e['mean_trade_net_return'], '+.3%')}; "
         f"compounded net trade return {_fmt(e['total_compounded_trade_return'], '+.3%')}",
-        "  Directional classifications are not trades; only TRADE rows are executable under the research policy.",
+        "  Directional classifications are not trades. RESEARCH forecasts are never actionable (status RESEARCH).",
     ]
 
 
@@ -588,24 +691,27 @@ def walk_forward(app: Any, symbol: str, start: str, end: str, timeframe: str, ho
     if horizon <= 0:
         raise ValueError("horizon must be positive")
     data = Ingestor(app.s, app.db).ingest(symbol, use_minute=True)
-    if timeframe == "1d":
-        sessions = [str(x) for x in data.daily["date"].tolist()]
-        plan = [(sessions[i], sessions[i + horizon]) for i in range(len(sessions) - horizon)
-                if start <= sessions[i] <= end]
-    else:
-        frame = all_bars(data).get(timeframe)
-        if frame is None or not len(frame):
-            raise ValueError(f"no accepted {timeframe} candles for the requested walk-forward")
-        f = frame.frame
-        eligible = np.flatnonzero(~f["incomplete"].to_numpy(dtype=bool))
-        plan = []
-        for pos, row in enumerate(eligible[:-horizon] if horizon else eligible):
-            target_row = eligible[pos + horizon]
-            session = str(f["session"].iloc[row])
-            if start <= session <= end:
-                as_of = pd.Timestamp(int(f["end_ns"].iloc[row]), unit="ns", tz="UTC").tz_convert("Asia/Kolkata").isoformat()
-                target = pd.Timestamp(int(f["end_ns"].iloc[target_row]), unit="ns", tz="UTC").tz_convert("Asia/Kolkata").isoformat()
-                plan.append((as_of, target))
+    calendar = load_registered_calendar(app.s)
+    frame = all_bars(data, calendar).get(timeframe)
+    if frame is None or not len(frame):
+        raise ValueError(f"no accepted {timeframe} candles for the requested walk-forward")
+    f = frame.frame
+    ends = f["end_ns"].to_numpy(dtype=np.int64)
+    plan: list[tuple[str, str]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in np.flatnonzero(~f["incomplete"].to_numpy(dtype=bool)):
+        session = str(f["session"].iloc[row])
+        if not start <= session <= end:
+            continue
+        as_of = session if timeframe == "1d" else ns_label(int(ends[row]))
+        d = derive_target(timeframe, session, int(ends[row]), horizon, calendar=calendar, observed_frame=f,
+                          eod_policy=_eod_policy(app))
+        if d["status"] != "DERIVED":
+            skipped.append({"as_of": as_of, "reason": d["reason"]})
+        elif int(d["target_end_ns"]) > int(ends[-1]):
+            skipped.append({"as_of": as_of, "reason": "TARGET_NOT_YET_IN_DATA", "target": d["target"]})
+        else:
+            plan.append((as_of, str(d["target"])))
     if max_steps is not None:
         plan = plan[:max_steps]
     done = frozen = revealed = 0
@@ -634,7 +740,7 @@ def walk_forward(app: Any, symbol: str, start: str, end: str, timeframe: str, ho
               "planned": len(plan),
               "steps_done": done, "newly_frozen": frozen, "newly_revealed": revealed,
               "reused_predictions": done - frozen, "revealed_outcomes": summary["revealed"],
-              "errors": errors, "steps": displayed, "evaluation": summary,
+              "errors": errors, "skipped": skipped, "steps": displayed, "evaluation": summary,
               "steps_json": str(out / "walk-forward-steps.json"),
               "steps_csv": str(out / "walk-forward-steps.csv")}
     (out / "walk-forward-summary.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n",

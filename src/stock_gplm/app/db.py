@@ -31,7 +31,9 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence, TextIO
 
 from stock_gplm import locking
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# v2 (M5.9A, additive): append-only ``model_approvals``. No existing table or row is changed; a v1
+# database is upgraded in place by creating the new table and recording a SCHEMA_MIGRATED event.
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -118,6 +120,13 @@ CREATE TABLE IF NOT EXISTS m56_method_runs (
   method_run_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, method TEXT NOT NULL, symbol TEXT,
   timeframe TEXT, status TEXT NOT NULL, device TEXT NOT NULL, checkpoint_key TEXT,
   generated INTEGER NOT NULL, evaluated INTEGER NOT NULL, detail_json TEXT NOT NULL, created_utc TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS model_approvals (
+  model_id TEXT NOT NULL, artifact_sha256 TEXT NOT NULL, approved_by TEXT NOT NULL, approved_utc TEXT NOT NULL,
+  scope_json TEXT NOT NULL, evidence_json TEXT NOT NULL, run_id TEXT, PRIMARY KEY(model_id, artifact_sha256));
+CREATE TRIGGER IF NOT EXISTS model_approvals_no_update BEFORE UPDATE ON model_approvals
+  BEGIN SELECT RAISE(ABORT, 'model approvals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_approvals_no_delete BEFORE DELETE ON model_approvals
+  BEGIN SELECT RAISE(ABORT, 'model approvals are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS predictions_no_update BEFORE UPDATE ON predictions
   BEGIN SELECT RAISE(ABORT, 'predictions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS predictions_no_delete BEFORE DELETE ON predictions
@@ -274,12 +283,19 @@ class AuditDB:
             cur = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if cur is None:
                 self.conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+            elif int(cur[0]) == 1 and SCHEMA_VERSION == 2:
+                # additive migration: the v2 table was created above by the idempotent schema script
+                self.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
+                self._migrated_from = 1
             elif int(cur[0]) != SCHEMA_VERSION:
                 raise RuntimeError(f"database schema {cur[0]} != supported {SCHEMA_VERSION}")
             self.conn.commit()
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=60000")
         self.run_id = run_id
+        if getattr(self, "_migrated_from", None):
+            self.event("SCHEMA_MIGRATED", {"from": self._migrated_from, "to": SCHEMA_VERSION,
+                                           "change": "added append-only model_approvals (M5.9A); no rows rewritten"})
 
     def close(self) -> None:
         self.conn.close()
@@ -413,9 +429,45 @@ class AuditDB:
         values.setdefault("created_utc", utc_now())
         values["payload_json"] = jdump(values.get("payload_json") or values.get("payload") or {})
         values.setdefault("prediction_id", sha(values["natural_key"])[:24])
+        if int(values.get("actionable") or 0):
+            from .contracts import validate_actionable_row
+
+            missing = validate_actionable_row(values, json.loads(values["payload_json"]))
+            if missing:
+                raise ValueError(f"actionable prediction rejected: missing mandatory fields {missing}")
         with self.tx() as c:
             n = c.execute(f"INSERT OR IGNORE INTO predictions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                           [_clean(values.get(k)) for k in cols]).rowcount
+        return bool(n)
+
+    def model_approval(self, model_id: str | None, artifact_sha256: str | None) -> dict[str, Any] | None:
+        """Recorded approval of one immutable model artifact, or None. Fail-closed: a model kind such as
+        ``logit``, a null id or a digest that does not match the recorded artifact is never approved."""
+        if not model_id or not artifact_sha256:
+            return None
+        row = self.one("SELECT * FROM model_approvals WHERE model_id=? AND artifact_sha256=?",
+                       (model_id, artifact_sha256))
+        if row is None:
+            return None
+        art = self.one("SELECT sha256 FROM models WHERE model_id=?", (model_id,))
+        return row if art is not None and art["sha256"] == artifact_sha256 else None
+
+    def record_model_approval(self, model_id: str, artifact_sha256: str, approved_by: str,
+                              evidence: Mapping[str, Any], scope: Mapping[str, Any] | None = None) -> bool:
+        """Append an owner approval for one stored, immutable model artifact. Evidence is required; the
+        program never calls this on its own."""
+        if not approved_by.strip() or not evidence:
+            raise ValueError("approval needs an approver and recorded evidence")
+        art = self.one("SELECT sha256 FROM models WHERE model_id=?", (model_id,))
+        if art is None or art["sha256"] != artifact_sha256:
+            raise ValueError(f"model artifact {model_id} with sha256 {artifact_sha256} is not a stored artifact")
+        with self.tx() as c:
+            n = c.execute("INSERT OR IGNORE INTO model_approvals VALUES (?,?,?,?,?,?,?)",
+                          (model_id, artifact_sha256, approved_by, utc_now(), jdump(scope or {}), jdump(evidence),
+                           self.run_id)).rowcount
+        if n:
+            self.event("MODEL_APPROVED", {"model_id": model_id, "artifact_sha256": artifact_sha256,
+                                          "approved_by": approved_by}, subject=model_id)
         return bool(n)
 
     def add_evaluation(self, row: Mapping[str, Any]) -> bool:
@@ -434,7 +486,7 @@ class AuditDB:
     def export_table(self, table: str, fmt: str, where: str = "", params: Sequence[Any] = ()) -> str:
         allowed = {"runs", "events", "data_files", "data_issues", "candle_cache", "strategies", "models", "champions",
                    "training_history", "predictions", "evaluations", "api_calls", "checkpoints", "m56_catalogues",
-                   "m56_coverage", "m56_results", "m56_method_runs", "feature_snapshots"}
+                   "m56_coverage", "m56_results", "m56_method_runs", "feature_snapshots", "model_approvals"}
         if table not in allowed:
             raise ValueError(f"unknown table {table}")
         rows = self.q(f"SELECT * FROM {table} {where}", params)

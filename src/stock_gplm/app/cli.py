@@ -1001,7 +1001,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr = add("predict", cmd_predict, "freeze a point-in-time Stock-DNA historical prediction")
     pr.add_argument("--stock", required=True)
     pr.add_argument("--as-of", required=True, help="inclusive cutoff YYYY-MM-DD")
-    pr.add_argument("--target", required=True, help="target session YYYY-MM-DD")
+    pr.add_argument("--target", help="optional target (YYYY-MM-DD or ISO timestamp); must equal the horizon-derived "
+                    "target exactly, otherwise nothing is frozen (M5.9A). Omit to derive it.")
     pr.add_argument("--timeframe", default="1d")
     pr.add_argument("--horizon", type=int, default=1)
     pr.add_argument("--out")
