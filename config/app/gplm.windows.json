@@ -1,0 +1,227 @@
+{
+    "contract":  "stock-gplm.app-config.v1",
+    "note":  "Stock GPLM research application. Relative paths resolve against this file\u0027s directory. GPLM_HOME overrides \u0027home\u0027. Every output is research evidence, not investment advice.",
+    "home":  "H:\\Guru\\Learning\\StockGLPM\\state",
+    "access":  {
+                   "basis":  "OWNER_AUTHORIZED_FULL_LOCAL",
+                   "authorized_on":  "2026-11-15",
+                   "authority":  "Owner directive \u0027STOCK GPLM - FINAL PRODUCT DELIVERY DIRECTIVE\u0027: the research application reads all locally available daily and minute candles, including 2026.",
+                   "m32_records":  "Preserved unchanged. The M3.2 cutoff (2025-10-21) governs only M3.x experiment records, not this workflow."
+               },
+    "data":  {
+                 "daily_root":  "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\shoonya\\NSE",
+                 "minute_roots":  [
+                                      "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\shoonya\\NSE\\minute",
+                                      "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\shoonya-minute\\NSE"
+                                  ],
+                 "real_raw_tree":  "H:\\Guru\\Learning\\StockGLPM\\data\\raw",
+                 "session_first_bar":  "09:15",
+                 "session_last_bar":  "15:29",
+                 "closing_phase_start":  "15:20"
+             },
+    "refresh":  {
+                    "enabled":  false,
+                    "command":  null,
+                    "provider":  "local-collector",
+                    "note":  "Ingestion reads local files only. To refresh before \u0027gplm daily --refresh\u0027, set enabled=true and command to an argument list for your own collector (for example the existing Oracle/Shoonya job). The command, its purpose, exit code and duration are logged; GPLM never handles provider credentials."
+                },
+    "timeframes":  {
+                       "daily_lane":  "1d",
+                       "intraday_lanes":  [
+                                              "15m"
+                                          ],
+                       "intraday_min_sessions":  60,
+                       "all_supported":  [
+                                             "1m",
+                                             "5m",
+                                             "15m",
+                                             "30m",
+                                             "60m",
+                                             "1d",
+                                             "1w"
+                                         ]
+                   },
+    "horizons":  {
+                     "1d":  [
+                                1,
+                                5,
+                                10,
+                                20,
+                                60,
+                                120,
+                                250
+                            ],
+                     "15m":  [
+                                 4,
+                                 8
+                             ],
+                     "5m":  [
+                                6,
+                                12
+                            ],
+                     "60m":  [
+                                 2,
+                                 4
+                             ],
+                     "min_independent_labels":  12,
+                     "labels":  {
+                                    "1":  "next session",
+                                    "5":  "1-7 days",
+                                    "10":  "7-15 days",
+                                    "20":  "15-30 days",
+                                    "60":  "1-3 months",
+                                    "120":  "3-6 months",
+                                    "250":  "6-12 months"
+                                }
+                 },
+    "rolling":  {
+                    "start":  "2026-08-13",
+                    "half_life_sessions":  250,
+                    "min_train_rows":  150,
+                    "mlp_retrain_every":  5,
+                    "mlp_epochs_full":  80,
+                    "mlp_epochs_update":  15,
+                    "rediscover_every":  10,
+                    "calibration_min_outcomes":  30,
+                    "champion_window":  60,
+                    "champion_min_outcomes":  25,
+                    "champion_margin_brier":  0.002,
+                    "champion_p":  0.05
+                },
+    "models":  {
+                   "kinds":  [
+                                 "baseline",
+                                 "logit",
+                                 "mlp"
+                             ],
+                   "logit":  {
+                                 "l2":  0.01,
+                                 "epochs":  300,
+                                 "lr":  0.05
+                             },
+                   "mlp":  {
+                               "hidden":  [
+                                              32,
+                                              16
+                                          ],
+                               "dropout":  0.0,
+                               "l2":  0.01,
+                               "lr":  0.003,
+                               "batch_rows":  65536
+                           },
+                   "seed":  55
+               },
+    "candidates":  {
+                       "quantiles":  [
+                                         0.1,
+                                         0.2,
+                                         0.8,
+                                         0.9
+                                     ],
+                       "max_pairs":  600,
+                       "top_singles_for_pairs":  40,
+                       "min_trades":  12,
+                       "fdr_q":  0.1,
+                       "max_selected":  5,
+                       "exit":  {
+                                    "stop_atr":  1.5,
+                                    "target_atr":  2.5,
+                                    "trail_atr":  null
+                                }
+                   },
+    "prediction":  {
+                       "min_probability":  0.56,
+                       "stop_atr":  1.5,
+                       "target_atr":  2.5,
+                       "min_rolling_outcomes":  20,
+                       "allow_short_intraday":  false
+                   },
+    "costs":  {
+                  "delivery":  {
+                                   "commission_bps":  3.0,
+                                   "slippage_bps":  5.0,
+                                   "buy_statutory_bps":  12.41,
+                                   "sell_statutory_bps":  10.91,
+                                   "basis":  "ASSUMPTION: NSE equity-delivery statutory estimates plus 3 bps brokerage and 5 bps slippage per side; not broker-verified"
+                               },
+                  "intraday":  {
+                                   "commission_bps":  3.0,
+                                   "slippage_bps":  5.0,
+                                   "buy_statutory_bps":  0.7,
+                                   "sell_statutory_bps":  2.9,
+                                   "basis":  "ASSUMPTION: NSE equity-intraday statutory estimates plus 3 bps brokerage and 5 bps slippage per side; not broker-verified"
+                               }
+              },
+    "discovery":  {
+                      "engine_config":  "H:\\Guru\\Learning\\StockGLPM\\app\\config\\m54\\unified-default.json",
+                      "default_budget":  "standard"
+                  },
+    "m56":  {
+    "development_end": "2025-10-20",
+    "development_end_note": "Last session before the M3.2 locked holdout (starts 2025-10-21). M5.6 never builds lanes from later rows; raise only with a recorded governance decision.",
+                 "contract":  "stock-gplm.m56-policy.v1",
+                 "reference_catalogue":  "H:\\Guru\\Learning\\StockGLPM\\app\\config\\strategies\\reference-300-strategies.txt",
+                 "reference_is_minimum_not_ceiling":  true,
+                 "walk_forward_folds":  4,
+                 "min_oos_trades":  20,
+                 "fdr_q":  0.05,
+                 "max_drawdown":  0.3,
+                 "workers":  1,
+                 "tree_horizon_bars":  1,
+                 "tree_max_depth":  4,
+                 "tree_min_leaf":  30,
+                 "tree_max_candidates":  30,
+                 "tree_max_train_rows":  100000,
+                 "boosting_estimators":  80,
+                 "boosting_top_features":  20,
+                 "classification_policy":  ["REFERENCE", "DISCOVERED", "EXPERIMENTAL", "VALIDATED", "REJECTED"],
+                 "locked_test_policy":  "score once only after validation promotion gates pass"
+              },
+    "ai":  {
+               "enabled":  false,
+               "allow_remote":  false,
+               "monthly_usd_limit":  5.0,
+               "per_run_usd_limit":  1.0,
+               "max_hypotheses":  10,
+               "providers":  {
+                                 "anthropic":  {
+                                                   "kind":  "anthropic",
+                                                   "base_url":  "https://api.anthropic.com",
+                                                   "path":  "/v1/messages",
+                                                   "api_key_env":  "ANTHROPIC_API_KEY",
+                                                   "model":  "claude-sonnet-5-5",
+                                                   "local":  false,
+                                                   "usd_per_1k_input":  null,
+                                                   "usd_per_1k_output":  null
+                                               },
+                                 "openai":  {
+                                                "kind":  "openai_compatible",
+                                                "base_url":  "https://api.openai.com",
+                                                "path":  "/v1/chat/completions",
+                                                "api_key_env":  "OPENAI_API_KEY",
+                                                "model":  "",
+                                                "local":  false,
+                                                "usd_per_1k_input":  null,
+                                                "usd_per_1k_output":  null
+                                            },
+                                 "ollama":  {
+                                                "kind":  "ollama",
+                                                "base_url":  "http://127.0.0.1:11434",
+                                                "path":  "/api/chat",
+                                                "api_key_env":  null,
+                                                "model":  "llama3.1",
+                                                "local":  true,
+                                                "usd_per_1k_input":  0.0,
+                                                "usd_per_1k_output":  0.0
+                                            }
+                             },
+               "note":  "AI output is a hypothesis in the strategy schema, validated and backtested like any other; it is never executed as code. Only the feature catalogue and the symbol name are sent; no candles, private strategies or keys. Prices are null (unknown) until you set them; cost is then recorded as UNKNOWN rather than invented."
+           },
+    "dashboard":  {
+                      "host":  "127.0.0.1",
+                      "port":  8765
+                  },
+    "retention":  {
+                      "keep_backups":  10
+                  }
+}
