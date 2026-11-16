@@ -290,3 +290,19 @@ def test_expected_session_requires_calendar_or_explicit_as_of() -> None:
     assert expected_completed_session(cal, None, ist) == ("2026-03-12", True)  # Monday morning -> Thursday
     eve = pd.Timestamp("2026-03-16 16:00", tz="Asia/Kolkata").to_pydatetime()
     assert expected_completed_session(cal, None, eve) == ("2026-03-16", True)
+
+
+def test_owner_verifier_flags_ungated_live_and_passes_clean_db(tmp_path: Path) -> None:
+    from stock_gplm.app.m59a_verify import verify
+
+    db = AuditDB(tmp_path / "a.sqlite", tmp_path / "ev", run_id="t")
+    assert db.add_prediction(_row(natural_key="legacy-live", actionable=0, payload={}))
+    db.close()
+    clean = verify(tmp_path / "a.sqlite")
+    assert clean["ok"] and clean["info"]["legacy_live_rows"] == 1
+    db = AuditDB(tmp_path / "a.sqlite", tmp_path / "ev", run_id="t")
+    assert db.add_prediction(_row(natural_key="bad", actionable=0,
+                                  payload={"engine": "gplm-rolling.v2", "status": "SHADOW"}))
+    db.close()
+    bad = verify(tmp_path / "a.sqlite")
+    assert not bad["ok"] and bad["violations"]["stale_or_ungated_live"] == 1

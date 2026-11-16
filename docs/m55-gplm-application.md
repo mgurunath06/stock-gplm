@@ -97,8 +97,9 @@ automatically and the takeover is logged).
 ## 4. What the forecasts contain
 
 Each candidate lists symbol, source (model kind, discovered rule or library strategy with version),
-prediction time (the decision bar's close), intended session (`NEXT_SESSION_AFTER_<date>` plus a
-next-weekday estimate — no holiday calendar is inferred), direction, entry rule (buy at the next open;
+prediction time (the decision bar's close), the horizon-derived target bar (M5.9A: session grid or
+registered calendar; `UNAVAILABLE:<reason>` when it cannot be established — weekdays are never assumed),
+its output status (`LIVE` / `SHADOW` / `NO_TRADE` / `UNAVAILABLE`, see `docs/m59a-prediction-contracts.md`), direction, entry rule (buy at the next open;
 reference close shown), ATR-based stop and target, holding horizon, risk/reward and expected R-multiple,
 calibrated confidence and its calibration status, historical and rolling-20 out-of-sample accuracy,
 round-trip cost assumption, market conditions (RSI, ADX, ATR, distance to EMA50, weekly RSI), the strongest
@@ -123,8 +124,10 @@ flagged. Rules need FDR survival and a positive sequential record. Otherwise the
   validation).
 * **Trading performance** — simulated trade returns after cost assumptions for predictions that were
   actionable when issued.
-* **Live forward performance** — evaluated predictions whose mode is `LIVE` (issued after the latest
-  completed session, before the outcome existed anywhere locally).
+* **Live forward performance** — evaluated predictions whose mode is `LIVE`. Since M5.9A `LIVE` needs fresh
+  data, a recorded approval of the immutable model artifact, the full opportunity contract and every gate;
+  latest-bar forecasts that fail any of these are stored as `SHADOW` with reasons. Pre-M5.9A `LIVE` rows are
+  shown as `LEGACY_UNVERIFIED_LIVE`.
 
 ## 6. How the learning loop works
 
