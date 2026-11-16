@@ -98,6 +98,10 @@ bar" (used for simulated trade evaluation); it is never shown as current.
 
 ## 7. Model approval (minimal, fail-closed)
 
+> **M5.9B update:** approval, revocation, expiry, the artifact registry, calendar/universe registries, the
+> strategy lifecycle and the canonical `live_decision` gate are specified in `docs/m59b-governance.md`.
+> The text below describes the M5.9A state.
+
 Schema v2 adds append-only `model_approvals(model_id, artifact_sha256, approved_by, approved_utc,
 scope_json, evidence_json, run_id)`. `AuditDB.model_approval(id, sha)` returns an approval only when the
 id, the digest and the stored artifact all match; a kind string such as `logit` is never approved.
