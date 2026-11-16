@@ -5,9 +5,13 @@ checksum-bound payload plus manifest imported with :func:`stock_gplm.m2.referenc
 Nothing is inferred from weekdays: a date the calendar does not list is ``UNKNOWN``, and every
 question whose answer needs an ``UNKNOWN`` date returns ``None`` so callers abstain.
 
-Configure with ``"calendar": {"payload": "<path>", "manifest": "<path>"}`` in the app config.
-Without it, weekly bars are never final, staleness needs an explicit ``--as-of`` session, and no
-output can be ``LIVE`` (reason ``CALENDAR_UNKNOWN``).
+M5.9B: the **active calendar of the governance registry** (``gplm calendar register/activate``; an
+owner-supplied local file, see :mod:`.governance`) takes precedence and is the only calendar that can
+support ``LIVE`` (its ``calendar_id`` is LIVE evidence). The legacy M2 configuration
+(``"calendar": {"payload": "<path>", "manifest": "<path>"}``) is still honoured for research when no
+registry calendar is active, but it carries no ``calendar_id`` and therefore can never yield ``LIVE``.
+Without any calendar, weekly bars are never final, staleness needs an explicit ``--as-of`` session, and
+no output can be ``LIVE`` (reason ``CALENDAR_UNKNOWN``).
 """
 from __future__ import annotations
 
@@ -22,10 +26,35 @@ SESSION_CLOSE = time(15, 30)
 class SessionCalendar:
     """Read-only view over a registered :class:`~stock_gplm.m2.models.NSETradingCalendar`."""
 
-    def __init__(self, calendar: Any, source: str):
+    def __init__(self, calendar: Any, source: str, calendar_id: str | None = None,
+                 close_times: Mapping[str, str] | None = None):
         self.calendar = calendar
         self.source = source
+        self.calendar_id = calendar_id  # set only for an active governance-registry calendar
         self._status = {d.date: d.status for d in calendar.days}
+        self._close = dict(close_times or {})
+        self.coverage = (min(self._status), max(self._status)) if self._status else (None, None)
+
+    @classmethod
+    def from_registry(cls, calendar_id: str, days: Mapping[str, Mapping[str, Any]], sha256: str) -> "SessionCalendar":
+        """Build from a registered (validated, hash-bound) governance calendar's day table."""
+        from types import SimpleNamespace
+
+        status_map = {"OPEN": "TRADING_SESSION", "SPECIAL": "SPECIAL_SESSION", "PARTIAL": "SPECIAL_SESSION",
+                      "CLOSED": "CLOSED"}
+        rows = tuple(SimpleNamespace(date=d, status=status_map[v["status"]]) for d, v in sorted(days.items()))
+        closes = {d: str(v["close"]) for d, v in days.items() if v.get("close")}
+        return cls(SimpleNamespace(days=rows), f"registry:{calendar_id}@{sha256[:12]}", calendar_id, closes)
+
+    def close_time(self, day: str | date) -> time:
+        """Registered session close (exchange local time); the standard close for the legacy M2 calendar."""
+        key = day.isoformat() if isinstance(day, date) else str(day)[:10]
+        c = self._close.get(key)
+        return time.fromisoformat(c) if c else SESSION_CLOSE
+
+    def covers(self, *days: str | None) -> bool:
+        """True when every given date is listed (inside coverage); a None date is not covered."""
+        return all(d is not None and self.status(str(d)[:10]) != "UNKNOWN" for d in days)
 
     @classmethod
     def from_statuses(cls, statuses: Mapping[str, str], *, source: str, as_of_date: str) -> "SessionCalendar":
@@ -88,9 +117,16 @@ class SessionCalendar:
         return self.sessions_between(monday, monday + timedelta(days=6))
 
 
-def load_registered_calendar(settings: Any) -> SessionCalendar | None:
-    """Load the configured registered calendar. Absent config -> None (callers abstain).
-    A configured but invalid/corrupt calendar raises: broken evidence is never silently ignored."""
+def load_registered_calendar(settings: Any, db: Any = None, exchange: str = "NSE") -> SessionCalendar | None:
+    """The active governance-registry calendar when ``db`` has one; otherwise the configured legacy M2
+    calendar; otherwise None (callers abstain). A configured but invalid/corrupt calendar raises: broken
+    evidence is never silently ignored, and nothing is inferred from weekdays."""
+    if db is not None:
+        from .governance import active_calendar
+
+        active = active_calendar(db, exchange)
+        if active is not None:
+            return active
     try:
         cfg = settings.section("calendar") or {}
     except Exception:  # settings objects without sections
@@ -127,7 +163,7 @@ def expected_completed_session(calendar: SessionCalendar | None, as_of: str | No
     s = calendar.is_session(today)
     if s is None:
         return None, False
-    if s and now.time() >= SESSION_CLOSE:
+    if s and now.time() >= calendar.close_time(today):
         return today, True
     prev = calendar.previous_session(today)
     return prev, prev is not None

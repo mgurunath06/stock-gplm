@@ -213,7 +213,7 @@ def predict(app: Any, symbol: str, as_of: str, target_session: str | None, timef
             ("T" in target_session and _as_of_cutoff_ns(target_session) <= _as_of_cutoff_ns(as_of)) or
             ("T" not in target_session and target_session <= as_of[:10])):
         raise ValueError("target timestamp must be after the as-of cutoff")
-    calendar = load_registered_calendar(app.s)
+    calendar = load_registered_calendar(app.s, app.db)
     raw = Ingestor(app.s, app.db).ingest(symbol, use_minute=True)
     data = window_data(raw, end=as_of[:10])  # no later session can enter any feature
     cutoff_ns = _as_of_cutoff_ns(as_of)
@@ -413,7 +413,7 @@ def reveal(app: Any, prediction_id: str) -> dict[str, Any]:
     if existing is not None:
         return {"status": "ALREADY_REVEALED", "prediction_id": prediction_id, **existing}
     pp = json.loads(pred["payload_json"])
-    calendar = load_registered_calendar(app.s)
+    calendar = load_registered_calendar(app.s, app.db)
     data = Ingestor(app.s, app.db).ingest(pred["symbol"], use_minute=True)
     bars = all_bars(data, calendar)
     lane = build_lane(data, pred["timeframe"], app.s.section("costs"), bars=bars,
@@ -691,7 +691,7 @@ def walk_forward(app: Any, symbol: str, start: str, end: str, timeframe: str, ho
     if horizon <= 0:
         raise ValueError("horizon must be positive")
     data = Ingestor(app.s, app.db).ingest(symbol, use_minute=True)
-    calendar = load_registered_calendar(app.s)
+    calendar = load_registered_calendar(app.s, app.db)
     frame = all_bars(data, calendar).get(timeframe)
     if frame is None or not len(frame):
         raise ValueError(f"no accepted {timeframe} candles for the requested walk-forward")

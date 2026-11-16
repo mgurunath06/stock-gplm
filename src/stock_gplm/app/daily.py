@@ -33,6 +33,7 @@ from .library import Library, seed_templates
 from .report import accuracy_table, live_forecasts, write_daily
 from .rolling import LaneReplay
 from .session_calendar import expected_completed_session, load_registered_calendar
+from .governance import cost_policy_version, universe_membership
 from .settings import REPO
 from .targets import grid_position
 
@@ -124,7 +125,7 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
         prog.update(stock=sym, note="incremental ingest")
         d = ing.ingest(sym)
         datas[d.symbol] = d
-    calendar = load_registered_calendar(s)
+    calendar = load_registered_calendar(s, app.db)
     clock = None if as_of else (now or now_ist())
     expected, confirmed = expected_completed_session(calendar, as_of, clock)
     fresh = {sym: symbol_freshness(app, sym, d.last_session, expected, confirmed) for sym, d in datas.items()}
@@ -171,7 +172,7 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
         hz = list(horizons) if horizons else list(s.section("horizons").get(tf, [1, 5, 10, 20]))
         rule_h = [h for h in hz if h <= 20] if tf == "1d" else hz
         ctx = {"freshness": intraday_freshness(fresh[sym], lane, clock), "calendar": calendar,
-               "universe_eligible": True}
+               "universe": universe_membership(app.db, sym), "cost_policy_version": cost_policy_version(s.section("costs"))}
         rp = LaneReplay(app.db, lane, hz, cfg, backend, prog, s.models_dir, lib, bars, rule_horizons=rule_h,
                         max_steps=max_steps, end_session=as_of[:10] if as_of else None, live_context=ctx)
         lane_objs.append(rp)
