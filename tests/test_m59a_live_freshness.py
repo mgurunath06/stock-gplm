@@ -80,10 +80,29 @@ def test_freshness_is_absolute_one_mixed_all_stale_and_historical() -> None:
                                 quarantined=True).status == C.QUARANTINED_INPUT
 
 
+def _insert_raw(db: AuditDB, row: dict) -> None:
+    """Store a legacy/tampered row directly, bypassing AuditDB.add_prediction (whose M5.9B guard refuses
+    mode='LIVE' without an eligible canonical live_decision). Simulates rows written before the guard."""
+    from stock_gplm.app.db import jdump, sha, utc_now
+
+    values = dict(row)
+    payload = values.pop("payload", {})
+    values.setdefault("prediction_id", sha(values["natural_key"])[:24])
+    values.setdefault("run_id", "t")
+    values.setdefault("created_utc", utc_now())
+    values["payload_json"] = jdump(payload)
+    cols = list(values)
+    db.conn.execute(f"INSERT INTO predictions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                    [values[c] for c in cols])
+    db.conn.commit()
+
+
 def _pred(db: AuditDB, key: str, sym: str, label: str, mode: str, payload: dict, actionable: int = 0) -> None:
     opp = {"entry": "next open", "invalidation": "below stop", "expected_return": 0.01, "model_version": "m@sha",
            "freshness_status": "FRESH"}
-    db.add_prediction({"natural_key": key, "mode": mode, "symbol": sym, "timeframe": "1d", "lane_key": f"{sym}|1d",
+    store = _insert_raw if mode == "LIVE" else db.add_prediction  # M5.9B guard: simulated pre-guard LIVE rows
+    store_args = (db,) if mode == "LIVE" else ()
+    store(*store_args, {"natural_key": key, "mode": mode, "symbol": sym, "timeframe": "1d", "lane_key": f"{sym}|1d",
                        "source_kind": "MODEL", "source_id": "logit", "source_version": "rp", "horizon_bars": 1,
                        "decision_label": label, "decision_ns": ist_ns(label, "15:30"), "direction": "LONG",
                        "prob_calibrated": 0.6, "actionable": actionable, "entry_ref": 100.0, "stop": 98.0,

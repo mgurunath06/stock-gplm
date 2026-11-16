@@ -31,9 +31,12 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence, TextIO
 
 from stock_gplm import locking
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # v2 (M5.9A, additive): append-only ``model_approvals``. No existing table or row is changed; a v1
 # database is upgraded in place by creating the new table and recording a SCHEMA_MIGRATED event.
+# v3 (M5.9B, additive): append-only governance registries -- exchange calendars, immutable model
+# artifacts and revocations, strategy lifecycle events and the live-alert universe. New tables only;
+# a v1/v2 database is upgraded in place and no existing row is rewritten.
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -127,6 +130,69 @@ CREATE TRIGGER IF NOT EXISTS model_approvals_no_update BEFORE UPDATE ON model_ap
   BEGIN SELECT RAISE(ABORT, 'model approvals are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS model_approvals_no_delete BEFORE DELETE ON model_approvals
   BEGIN SELECT RAISE(ABORT, 'model approvals are append-only'); END;
+CREATE TABLE IF NOT EXISTS calendar_registrations (
+  calendar_id TEXT PRIMARY KEY, exchange TEXT NOT NULL, source_filename TEXT NOT NULL, sha256 TEXT NOT NULL,
+  registered_utc TEXT NOT NULL, coverage_start TEXT NOT NULL, coverage_end TEXT NOT NULL,
+  schema_version TEXT NOT NULL, timezone TEXT NOT NULL, days_json TEXT NOT NULL, registered_by TEXT NOT NULL,
+  run_id TEXT);
+CREATE TABLE IF NOT EXISTS calendar_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, calendar_id TEXT NOT NULL, exchange TEXT NOT NULL, action TEXT NOT NULL,
+  actor TEXT NOT NULL, note TEXT, ts_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS model_artifacts (
+  model_id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE, family TEXT NOT NULL, scope_json TEXT NOT NULL,
+  timeframe TEXT NOT NULL, horizon INTEGER NOT NULL, feature_schema TEXT NOT NULL, training_cutoff TEXT NOT NULL,
+  neutral_band_version TEXT NOT NULL, cost_policy_version TEXT NOT NULL, code_contract_version TEXT NOT NULL,
+  created_utc TEXT NOT NULL, registered_utc TEXT NOT NULL, stored_path TEXT NOT NULL, source_path TEXT NOT NULL,
+  evidence_json TEXT NOT NULL, registered_by TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS model_revocations (
+  model_id TEXT NOT NULL, artifact_sha256 TEXT NOT NULL, revoked_by TEXT NOT NULL, revoked_utc TEXT NOT NULL,
+  reason TEXT NOT NULL, run_id TEXT, PRIMARY KEY(model_id, artifact_sha256));
+CREATE TABLE IF NOT EXISTS strategy_lifecycle (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, strategy_id TEXT NOT NULL, version INTEGER NOT NULL, stage TEXT NOT NULL,
+  actor TEXT NOT NULL, evidence_json TEXT NOT NULL, note TEXT, ts_utc TEXT NOT NULL, run_id TEXT);
+CREATE INDEX IF NOT EXISTS strategy_lifecycle_sv ON strategy_lifecycle(strategy_id, version);
+CREATE TABLE IF NOT EXISTS universe_registrations (
+  universe_id TEXT PRIMARY KEY, name TEXT NOT NULL, source_filename TEXT NOT NULL, sha256 TEXT NOT NULL,
+  membership_as_of TEXT NOT NULL, symbols_json TEXT NOT NULL, symbol_count INTEGER NOT NULL,
+  schema_version TEXT NOT NULL, registered_utc TEXT NOT NULL, registered_by TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS universe_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, universe_id TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL,
+  note TEXT, ts_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS universe_supplements (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL,
+  reason TEXT NOT NULL, ts_utc TEXT NOT NULL, run_id TEXT);
+CREATE TRIGGER IF NOT EXISTS calendar_registrations_no_update BEFORE UPDATE ON calendar_registrations
+  BEGIN SELECT RAISE(ABORT, 'calendar_registrations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS calendar_registrations_no_delete BEFORE DELETE ON calendar_registrations
+  BEGIN SELECT RAISE(ABORT, 'calendar_registrations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS calendar_events_no_update BEFORE UPDATE ON calendar_events
+  BEGIN SELECT RAISE(ABORT, 'calendar_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS calendar_events_no_delete BEFORE DELETE ON calendar_events
+  BEGIN SELECT RAISE(ABORT, 'calendar_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_artifacts_no_update BEFORE UPDATE ON model_artifacts
+  BEGIN SELECT RAISE(ABORT, 'model_artifacts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_artifacts_no_delete BEFORE DELETE ON model_artifacts
+  BEGIN SELECT RAISE(ABORT, 'model_artifacts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_revocations_no_update BEFORE UPDATE ON model_revocations
+  BEGIN SELECT RAISE(ABORT, 'model_revocations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_revocations_no_delete BEFORE DELETE ON model_revocations
+  BEGIN SELECT RAISE(ABORT, 'model_revocations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_lifecycle_no_update BEFORE UPDATE ON strategy_lifecycle
+  BEGIN SELECT RAISE(ABORT, 'strategy_lifecycle is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_lifecycle_no_delete BEFORE DELETE ON strategy_lifecycle
+  BEGIN SELECT RAISE(ABORT, 'strategy_lifecycle is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_registrations_no_update BEFORE UPDATE ON universe_registrations
+  BEGIN SELECT RAISE(ABORT, 'universe_registrations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_registrations_no_delete BEFORE DELETE ON universe_registrations
+  BEGIN SELECT RAISE(ABORT, 'universe_registrations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_events_no_update BEFORE UPDATE ON universe_events
+  BEGIN SELECT RAISE(ABORT, 'universe_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_events_no_delete BEFORE DELETE ON universe_events
+  BEGIN SELECT RAISE(ABORT, 'universe_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_supplements_no_update BEFORE UPDATE ON universe_supplements
+  BEGIN SELECT RAISE(ABORT, 'universe_supplements is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS universe_supplements_no_delete BEFORE DELETE ON universe_supplements
+  BEGIN SELECT RAISE(ABORT, 'universe_supplements is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS predictions_no_update BEFORE UPDATE ON predictions
   BEGIN SELECT RAISE(ABORT, 'predictions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS predictions_no_delete BEFORE DELETE ON predictions
@@ -283,10 +349,10 @@ class AuditDB:
             cur = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if cur is None:
                 self.conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
-            elif int(cur[0]) == 1 and SCHEMA_VERSION == 2:
-                # additive migration: the v2 table was created above by the idempotent schema script
+            elif int(cur[0]) in (1, 2) and SCHEMA_VERSION == 3:
+                # additive migration: the v2/v3 tables were created above by the idempotent schema script
                 self.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
-                self._migrated_from = 1
+                self._migrated_from = int(cur[0])
             elif int(cur[0]) != SCHEMA_VERSION:
                 raise RuntimeError(f"database schema {cur[0]} != supported {SCHEMA_VERSION}")
             self.conn.commit()
@@ -295,7 +361,8 @@ class AuditDB:
         self.run_id = run_id
         if getattr(self, "_migrated_from", None):
             self.event("SCHEMA_MIGRATED", {"from": self._migrated_from, "to": SCHEMA_VERSION,
-                                           "change": "added append-only model_approvals (M5.9A); no rows rewritten"})
+                                           "change": "added append-only model_approvals (M5.9A) and governance registries "
+                                                     "(M5.9B); no rows rewritten"})
 
     def close(self) -> None:
         self.conn.close()
@@ -435,22 +502,40 @@ class AuditDB:
             missing = validate_actionable_row(values, json.loads(values["payload_json"]))
             if missing:
                 raise ValueError(f"actionable prediction rejected: missing mandatory fields {missing}")
+        if values.get("mode") == "LIVE":
+            # M5.9B: a LIVE row is written only with the canonical gate's eligible decision (contracts.live_decision).
+            decision = json.loads(values["payload_json"]).get("live_decision") or {}
+            if not (decision.get("eligible") is True and decision.get("status") == "LIVE"
+                    and int(values.get("actionable") or 0)):
+                raise ValueError("LIVE prediction rejected: no eligible canonical live_decision in the payload")
         with self.tx() as c:
             n = c.execute(f"INSERT OR IGNORE INTO predictions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                           [_clean(values.get(k)) for k in cols]).rowcount
         return bool(n)
 
-    def model_approval(self, model_id: str | None, artifact_sha256: str | None) -> dict[str, Any] | None:
-        """Recorded approval of one immutable model artifact, or None. Fail-closed: a model kind such as
-        ``logit``, a null id or a digest that does not match the recorded artifact is never approved."""
+    def model_approval(self, model_id: str | None, artifact_sha256: str | None,
+                       at_utc: str | None = None) -> dict[str, Any] | None:
+        """Current approval of one immutable model artifact, or None. Fail-closed: a model kind such as
+        ``logit``, a null id, a digest that does not match the recorded artifact (``models`` or the M5.9B
+        ``model_artifacts`` registry), a revoked artifact or an expired approval is never approved.
+        The returned row carries ``approval_id`` (``approval:<rowid>`` of the append-only table)."""
         if not model_id or not artifact_sha256:
             return None
-        row = self.one("SELECT * FROM model_approvals WHERE model_id=? AND artifact_sha256=?",
+        row = self.one("SELECT rowid AS _rowid, * FROM model_approvals WHERE model_id=? AND artifact_sha256=?",
                        (model_id, artifact_sha256))
         if row is None:
             return None
-        art = self.one("SELECT sha256 FROM models WHERE model_id=?", (model_id,))
-        return row if art is not None and art["sha256"] == artifact_sha256 else None
+        art = self.one("SELECT sha256 FROM models WHERE model_id=?", (model_id,)) or             self.one("SELECT sha256 FROM model_artifacts WHERE model_id=?", (model_id,))
+        if art is None or art["sha256"] != artifact_sha256:
+            return None
+        if self.one("SELECT 1 FROM model_revocations WHERE model_id=? AND artifact_sha256=?",
+                    (model_id, artifact_sha256)) is not None:
+            return None
+        expires = (json.loads(row["scope_json"] or "{}") or {}).get("expires_utc")
+        if expires and str(expires) <= (at_utc or utc_now()):
+            return None
+        row["approval_id"] = f"approval:{row.pop('_rowid')}"
+        return row
 
     def record_model_approval(self, model_id: str, artifact_sha256: str, approved_by: str,
                               evidence: Mapping[str, Any], scope: Mapping[str, Any] | None = None) -> bool:
@@ -486,7 +571,9 @@ class AuditDB:
     def export_table(self, table: str, fmt: str, where: str = "", params: Sequence[Any] = ()) -> str:
         allowed = {"runs", "events", "data_files", "data_issues", "candle_cache", "strategies", "models", "champions",
                    "training_history", "predictions", "evaluations", "api_calls", "checkpoints", "m56_catalogues",
-                   "m56_coverage", "m56_results", "m56_method_runs", "feature_snapshots", "model_approvals"}
+                   "m56_coverage", "m56_results", "m56_method_runs", "feature_snapshots", "model_approvals",
+                   "calendar_registrations", "calendar_events", "model_artifacts", "model_revocations",
+                   "strategy_lifecycle", "universe_registrations", "universe_events", "universe_supplements"}
         if table not in allowed:
             raise ValueError(f"unknown table {table}")
         rows = self.q(f"SELECT * FROM {table} {where}", params)

@@ -210,7 +210,8 @@ def test_neutral_is_not_down_and_uncertain_is_not_neutral() -> None:
 
 # ----------------------------------------------------------------------------- E/F. LIVE gate and actionable schema
 def _row(**kw):
-    base = {"natural_key": "k", "mode": "LIVE", "symbol": "A", "timeframe": "1d", "lane_key": "A|1d",
+    # M5.9B: default mode SHADOW -- AuditDB refuses mode='LIVE' without an eligible canonical live_decision.
+    base = {"natural_key": "k", "mode": "SHADOW", "symbol": "A", "timeframe": "1d", "lane_key": "A|1d",
             "source_kind": "MODEL", "source_id": "logit", "source_version": "v", "horizon_bars": 1,
             "decision_label": "2026-03-12", "decision_ns": 1, "direction": "LONG", "prob_calibrated": 0.6,
             "actionable": 1, "entry_ref": 100.0, "stop": 98.0, "target": 104.0,
@@ -219,6 +220,23 @@ def _row(**kw):
                                         "freshness_status": "FRESH"}}}
     base.update(kw)
     return base
+
+
+def _insert_raw(db: AuditDB, row: dict) -> None:
+    """Store a legacy/tampered row directly, bypassing AuditDB.add_prediction (whose M5.9B guard refuses
+    mode='LIVE' without an eligible canonical live_decision). Simulates rows written before the guard."""
+    from stock_gplm.app.db import jdump, sha, utc_now
+
+    values = dict(row)
+    payload = values.pop("payload", {})
+    values.setdefault("prediction_id", sha(values["natural_key"])[:24])
+    values.setdefault("run_id", "t")
+    values.setdefault("created_utc", utc_now())
+    values["payload_json"] = jdump(payload)
+    cols = list(values)
+    db.conn.execute(f"INSERT INTO predictions ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                    [values[c] for c in cols])
+    db.conn.commit()
 
 
 def test_actionable_rows_require_the_full_opportunity_contract(tmp_path: Path) -> None:
@@ -242,9 +260,13 @@ def test_unapproved_adaptive_refit_cannot_become_live(tmp_path: Path) -> None:
     kind_only = C.live_gate(latest_eligible_bar=True, freshness=fresh, model_approval={"model_id": "logit"})
     assert kind_only.status == C.SHADOW
     approved = {"model_id": "rp|logit|h1|2026-03-12", "artifact_sha256": "a" * 64}
-    assert C.live_gate(latest_eligible_bar=True, freshness=fresh, model_approval=approved).status == C.LIVE
+    # M5.9B: the wrapper fails closed -- an adaptive refit is never LIVE, even when approved.
+    adaptive = C.live_gate(latest_eligible_bar=True, freshness=fresh, model_approval=approved)
+    assert adaptive.status == C.SHADOW and C.ADAPTIVE_MODEL in adaptive.reasons
+    full = {"calendar_id": "cal-nse-x", "universe_eligible": True, "adaptive_model": False}
+    assert C.live_gate(latest_eligible_bar=True, freshness=fresh, model_approval=approved, **full).status == C.LIVE
     assert C.live_gate(latest_eligible_bar=True, freshness=fresh, model_approval=approved,
-                       missing_fields=["stop"]).status == C.NO_TRADE
+                       missing_fields=["stop"], **full).status == C.NO_TRADE
     stale = C.evaluate_freshness("2026-03-11", "2026-03-12", calendar_confirmed=True)
     assert C.live_gate(latest_eligible_bar=True, freshness=stale, model_approval=approved).status == C.UNAVAILABLE
     # DB approval lookup is fail-closed: kind strings, unknown ids and digest mismatches are never approved.
@@ -272,7 +294,7 @@ def test_schema_v1_database_is_migrated_additively(tmp_path: Path) -> None:
     db.conn.commit()
     db.close()
     db = AuditDB(tmp_path / "a.sqlite", tmp_path / "ev", run_id="t2")
-    assert db.one("SELECT value FROM meta WHERE key='schema_version'")["value"] == "2"
+    assert db.one("SELECT value FROM meta WHERE key='schema_version'")["value"] == "3"  # M5.9B: v3 additive
     assert db.one("SELECT COUNT(*) n FROM predictions")["n"] == 1
     assert db.one("SELECT kind FROM events WHERE kind='SCHEMA_MIGRATED'") is not None
     assert db.verify_chain()["ok"]
@@ -296,13 +318,13 @@ def test_owner_verifier_flags_ungated_live_and_passes_clean_db(tmp_path: Path) -
     from stock_gplm.app.m59a_verify import verify
 
     db = AuditDB(tmp_path / "a.sqlite", tmp_path / "ev", run_id="t")
-    assert db.add_prediction(_row(natural_key="legacy-live", actionable=0, payload={}))
+    _insert_raw(db, _row(natural_key="legacy-live", mode="LIVE", actionable=0, payload={}))
     db.close()
     clean = verify(tmp_path / "a.sqlite")
     assert clean["ok"] and clean["info"]["legacy_live_rows"] == 1
     db = AuditDB(tmp_path / "a.sqlite", tmp_path / "ev", run_id="t")
-    assert db.add_prediction(_row(natural_key="bad", actionable=0,
-                                  payload={"engine": "gplm-rolling.v2", "status": "SHADOW"}))
+    _insert_raw(db, _row(natural_key="bad", mode="LIVE", actionable=0,
+                         payload={"engine": "gplm-rolling.v2", "status": "SHADOW"}))
     db.close()
     bad = verify(tmp_path / "a.sqlite")
     assert not bad["ok"] and bad["violations"]["stale_or_ungated_live"] == 1

@@ -115,6 +115,8 @@ def brier_up(prob_up: float | None, movement: str | None) -> float | None:
 
 
 # ----------------------------------------------------------------------------- actionable contract
+ACTION_DIRECTIONS = ("LONG", "SHORT", "BUY", "SELL")
+ACTIONABLE_FRESHNESS = ("FRESH", "HISTORICAL_REPLAY")  # LIVE needs FRESH; REPLAY rows are simulated history
 ACTIONABLE_FIELDS = ("action", "entry", "invalidation", "stop", "target", "horizon", "probability",
                      "expected_return", "model_version", "timestamp", "freshness_status")
 
@@ -140,7 +142,13 @@ def validate_actionable_row(row: Mapping[str, Any], payload: Mapping[str, Any]) 
               "expected_return": opp.get("expected_return"), "model_version": opp.get("model_version"),
               "timestamp": row.get("decision_label"), "freshness_status": opp.get("freshness_status"),
               "strategy_version": row.get("source_version")}
-    return opportunity_missing(fields, strategy_involved=row.get("source_kind") in {"STRATEGY", "RULE"})
+    missing = opportunity_missing(fields, strategy_involved=row.get("source_kind") in {"STRATEGY", "RULE"})
+    # M5.9B: the action must be a trade direction and the freshness a state that permits action.
+    if "action" not in missing and str(fields["action"]).upper() not in ACTION_DIRECTIONS:
+        missing.append("action")
+    if "freshness_status" not in missing and fields["freshness_status"] not in ACTIONABLE_FRESHNESS:
+        missing.append("freshness_status")
+    return missing
 
 
 # ----------------------------------------------------------------------------- freshness
@@ -181,7 +189,132 @@ def evaluate_freshness(last_session: str | None, expected_session: str | None, *
     return Freshness(status, expected_session, last_session, reasons)
 
 
-# ----------------------------------------------------------------------------- LIVE gate
+# ----------------------------------------------------------------------------- LIVE gate (canonical, M5.9B)
+LIVE_DECISION_CONTRACT = "stock-gplm.live-decision.m59b.v1"
+# additional stable reason codes (M5.9B)
+CALENDAR_NOT_REGISTERED = "CALENDAR_NOT_REGISTERED"
+MODEL_REVOKED = "MODEL_REVOKED"
+MODEL_EXPIRED = "MODEL_EXPIRED"
+MODEL_HASH_MISMATCH = "MODEL_HASH_MISMATCH"
+MODEL_SCHEMA_INCOMPATIBLE = "MODEL_SCHEMA_INCOMPATIBLE"
+ADAPTIVE_MODEL = "ADAPTIVE_MODEL_NOT_LIVE"
+STRATEGY_RETIRED = "STRATEGY_RETIRED"
+VERSION_UNKNOWN = "VERSION_UNKNOWN"
+MODEL_ONLY, STRATEGY_TRIGGERED = "MODEL_ONLY", "STRATEGY_TRIGGERED"
+
+
+@dataclass
+class LiveDecision:
+    """The one canonical LIVE eligibility decision. ``evidence`` lists the ids the decision relied on."""
+
+    eligible: bool
+    status: str
+    reasons: list[str]
+    evidence: dict[str, Any]
+    prediction_class: str
+
+    @property
+    def actionable(self) -> bool:
+        return self.eligible
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"eligible": self.eligible, "status": self.status, "reasons": list(self.reasons),
+                "evidence": dict(self.evidence), "prediction_class": self.prediction_class,
+                "contract": LIVE_DECISION_CONTRACT}
+
+
+def live_decision(*, latest_eligible_bar: bool, freshness: Freshness | None,
+                  calendar_id: str | None, calendar_covers: bool,
+                  model: Mapping[str, Any] | None, adaptive_model: bool = False, model_required: bool = True,
+                  strategy_driven: bool = False, strategy: Mapping[str, Any] | None = None,
+                  universe: Mapping[str, Any] | None = None, opportunity_missing_fields: Iterable[str] = (),
+                  cost_policy_version: str | None = None, neutral_band_version: str | None = None,
+                  gate_blockers: Iterable[str] = ()) -> LiveDecision:
+    """The canonical LIVE eligibility decision. ``LIVE`` only when **every** condition holds; missing
+    evidence fails closed. The most fundamental failure decides the status:
+
+    ``UNAVAILABLE`` (stale/incomplete/quarantined inputs; calendar unknown or decision/target outside the
+    active calendar's coverage) > ``REPLAY`` (not the latest eligible bar) > ``SHADOW`` (no registered
+    calendar id, adaptive model, no current approval of the exact hash-verified, schema-compatible
+    immutable artifact, revoked/expired artifact, unapproved/retired strategy) > ``NO_TRADE`` (universe,
+    opportunity contract, unknown cost/neutral-band versions, action gates) > ``LIVE``.
+
+    ``model``: ``{"model_id", "artifact_sha256", "approval_id", "revoked", "expired", "hash_verified",
+    "schema_compatible"}`` (from the artifact registry); ``strategy``: ``{"strategy_id", "version", "stage"}``;
+    ``universe``: ``{"eligible", "universe_id", "basis"}``. ``strategy_driven`` False classifies the output as
+    ``MODEL_ONLY`` (informational model forecast, never presented as a strategy-triggered trade).
+    ``model_required`` may be False only for a strategy-driven output with no model (a declarative rule);
+    the approved strategy is then the governing evidence.
+    """
+    missing, blockers = list(opportunity_missing_fields), list(gate_blockers)
+    cls = STRATEGY_TRIGGERED if strategy_driven else MODEL_ONLY
+    m = dict(model or {})
+    ev: dict[str, Any] = {
+        "calendar_id": calendar_id, "model_id": m.get("model_id"), "artifact_sha256": m.get("artifact_sha256"),
+        "approval_id": m.get("approval_id"),
+        "strategy": f"{strategy.get('strategy_id')}@{strategy.get('version')}" if strategy else None,
+        "strategy_stage": (strategy or {}).get("stage"), "strategy_lifecycle_seq": (strategy or {}).get("seq"),
+        "universe_id": (universe or {}).get("universe_id"), "universe_basis": (universe or {}).get("basis"),
+        "freshness": freshness.status if freshness else None,
+        "cost_policy_version": cost_policy_version, "neutral_band_version": neutral_band_version}
+
+    def out(status: str, reasons: list[str]) -> LiveDecision:
+        return LiveDecision(status == LIVE, status, reasons, ev, cls)
+
+    # 1. inputs
+    if freshness is None or not freshness.fresh:
+        return out(UNAVAILABLE, list(freshness.reasons if freshness else [CALENDAR_UNKNOWN]))
+    if not calendar_covers:
+        return out(UNAVAILABLE, [CALENDAR_UNKNOWN])
+    if not latest_eligible_bar:
+        return out(REPLAY, [NOT_LATEST_BAR])
+    # 2. approvals and immutable evidence
+    shadow: list[str] = []
+    if not calendar_id:
+        shadow.append(CALENDAR_NOT_REGISTERED)
+    if adaptive_model:
+        shadow.append(ADAPTIVE_MODEL)
+    if not model_required and not strategy_driven:
+        model_required = True  # a model-only output always needs its approved artifact
+    if not model_required and not m:
+        pass
+    elif not m.get("model_id") or not m.get("artifact_sha256"):
+        shadow.append(MODEL_NOT_APPROVED)
+    else:
+        if m.get("revoked"):
+            shadow.append(MODEL_REVOKED)
+        if m.get("expired"):
+            shadow.append(MODEL_EXPIRED)
+        if m.get("hash_verified") is not True:
+            shadow.append(MODEL_HASH_MISMATCH)
+        if m.get("schema_compatible") is not True:
+            shadow.append(MODEL_SCHEMA_INCOMPATIBLE)
+        if not m.get("approval_id") and not (m.get("revoked") or m.get("expired")):
+            shadow.append(MODEL_NOT_APPROVED)
+    if strategy_driven:
+        stage = (strategy or {}).get("stage")
+        if stage == "RETIRED":
+            shadow.append(STRATEGY_RETIRED)
+        elif stage != "APPROVED":
+            shadow.append(STRATEGY_NOT_APPROVED)
+    opp = [f"{OPPORTUNITY_INCOMPLETE}:{','.join(missing)}"] if missing else []
+    if shadow:
+        return out(SHADOW, shadow + opp)
+    # 3. action-level conditions
+    reasons: list[str] = []
+    if not universe or universe.get("eligible") is not True or not universe.get("universe_id"):
+        reasons.append(UNIVERSE_NOT_ELIGIBLE)
+    reasons += opp
+    for name, ver in (("cost_policy", cost_policy_version), ("neutral_band", neutral_band_version)):
+        if not ver:
+            reasons.append(f"{VERSION_UNKNOWN}:{name}")
+    if blockers:
+        reasons.append(GATES_FAILED)
+    if reasons:
+        return out(NO_TRADE, reasons + blockers)
+    return out(LIVE, [])
+
+
 @dataclass
 class LiveCheck:
     status: str
@@ -194,33 +327,50 @@ class LiveCheck:
 
 
 def live_gate(*, latest_eligible_bar: bool, freshness: Freshness | None, model_approval: Mapping[str, Any] | None,
-              strategy_involved: bool = False, strategy_approved: bool = False, universe_eligible: bool = True,
-              missing_fields: Iterable[str] = (), gate_blockers: Iterable[str] = ()) -> LiveCheck:
-    """Classify a latest-bar output. LIVE only when *every* requirement holds; otherwise the most
-    fundamental failure decides: UNAVAILABLE (inputs) > REPLAY (not latest) > SHADOW (approval) > NO_TRADE."""
-    missing, blockers = list(missing_fields), list(gate_blockers)
-    if freshness is None or not freshness.fresh:
-        return LiveCheck(UNAVAILABLE, list(freshness.reasons if freshness else [CALENDAR_UNKNOWN]), False)
-    if not latest_eligible_bar:
-        return LiveCheck(REPLAY, [NOT_LATEST_BAR], False)
-    reasons: list[str] = []
-    if not model_approval or not model_approval.get("model_id") or not model_approval.get("artifact_sha256"):
-        reasons.append(MODEL_NOT_APPROVED)
-    if strategy_involved and not strategy_approved:
-        reasons.append(STRATEGY_NOT_APPROVED)
-    if reasons:
-        return LiveCheck(SHADOW, reasons + ([f"{OPPORTUNITY_INCOMPLETE}:{','.join(missing)}"] if missing else []), False)
-    if not universe_eligible:
-        reasons.append(UNIVERSE_NOT_ELIGIBLE)
-    if missing:
-        reasons.append(f"{OPPORTUNITY_INCOMPLETE}:{','.join(missing)}")
-    if blockers:
-        reasons.append(GATES_FAILED)
-    if reasons:
-        return LiveCheck(NO_TRADE, reasons + blockers, False)
-    return LiveCheck(LIVE, [], True)
+              strategy_involved: bool = False, strategy_approved: bool = False, universe_eligible: bool = False,
+              missing_fields: Iterable[str] = (), gate_blockers: Iterable[str] = (),
+              calendar_id: str | None = None, adaptive_model: bool = True) -> LiveCheck:
+    """M5.9A compatibility wrapper that delegates to :func:`live_decision` (the canonical gate). Its
+    defaults fail closed (M5.9B): without a registered calendar id, an eligible universe and a
+    non-adaptive registered artifact the result is never LIVE."""
+    appr = dict(model_approval or {})
+    has_artifact = bool(appr.get("model_id") and appr.get("artifact_sha256"))
+    model = ({"model_id": appr.get("model_id"), "artifact_sha256": appr.get("artifact_sha256"),
+              "approval_id": appr.get("approval_id") or ("caller-asserted" if has_artifact else None),
+              "hash_verified": True, "schema_compatible": True} if appr else None)
+    d = live_decision(latest_eligible_bar=latest_eligible_bar, freshness=freshness, calendar_id=calendar_id,
+                      calendar_covers=True, model=model, adaptive_model=adaptive_model,
+                      strategy_driven=strategy_involved,
+                      strategy={"stage": "APPROVED" if strategy_approved else None} if strategy_involved else None,
+                      universe={"eligible": True, "universe_id": "caller-asserted"} if universe_eligible else None,
+                      opportunity_missing_fields=missing_fields, cost_policy_version="caller-asserted",
+                      neutral_band_version=NEUTRAL_BAND_VERSION, gate_blockers=gate_blockers)
+    return LiveCheck(d.status, d.reasons, d.actionable)
+
+
+# ----------------------------------------------------------------------------- shared status of stored rows
+KNOWN_MODES = ("HISTORICAL_FROZEN", "REPLAY", "SHADOW", "LIVE")
+
+
+def shared_status(mode: str | None, payload: Mapping[str, Any] | None) -> str:
+    """Read any stored prediction row as one shared status. Rows are never rewritten.
+
+    ``payload.status`` (M5.9A+) wins when it is a known status; otherwise the legacy mapping applies:
+    ``HISTORICAL_FROZEN`` -> RESEARCH, ``REPLAY`` -> REPLAY, pre-M5.9A ``LIVE`` -> ``LEGACY_UNVERIFIED_LIVE``,
+    ``SHADOW`` without a status -> SHADOW; anything else -> ``UNKNOWN_STATUS``."""
+    st = (payload or {}).get("status")
+    if st in STATUSES:
+        return str(st)
+    if st is not None:
+        return "UNKNOWN_STATUS"
+    if mode in LEGACY_STATUS_MAP:
+        return LEGACY_STATUS_MAP[str(mode)]
+    if mode == "SHADOW":
+        return SHADOW
+    return "UNKNOWN_STATUS"
 
 
 __all__ = [n for n in dir() if n.isupper() or n in {
     "NeutralBand", "neutral_band", "classify_movement", "direction_correct", "brier_up", "opportunity_missing",
-    "validate_actionable_row", "Freshness", "evaluate_freshness", "LiveCheck", "live_gate"}]
+    "validate_actionable_row", "Freshness", "evaluate_freshness", "LiveCheck", "live_gate", "LiveDecision",
+    "live_decision", "shared_status"}]
