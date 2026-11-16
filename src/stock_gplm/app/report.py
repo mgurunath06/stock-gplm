@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import CLASSIFICATION
+from .contracts import LEGACY_STATUS_MAP, LIVE, MISSING_EXPECTED_BAR, NO_TRADE, SHADOW, STALE_DATA, UNAVAILABLE
 from .db import AuditDB, utc_now
 
 
@@ -66,16 +67,39 @@ def accuracy_table(db: AuditDB, symbols: Sequence[str] | None = None) -> list[di
     return rows
 
 
+def _row_status(r: Mapping[str, Any], p: Mapping[str, Any]) -> str:
+    if "status" in p:
+        return str(p["status"])
+    return LEGACY_STATUS_MAP.get(r["mode"], r["mode"])  # pre-M5.9A rows never passed the LIVE gate
+
+
 def live_forecasts(db: AuditDB, symbols: Sequence[str], session: str | None = None) -> list[dict[str, Any]]:
+    """Latest-bar outputs per symbol for the requested exchange ``session`` (M5.9A).
+
+    With ``session`` only outputs whose decision bar belongs to that session are shown; an older stored
+    forecast is reported as UNAVAILABLE / STALE_DATA, never re-labelled as current. Only rows that passed
+    the LIVE gate (``mode='LIVE'`` and status LIVE) can be listed as actionable; legacy ``mode='LIVE'`` rows
+    written before M5.9A are shown as LEGACY_UNVERIFIED_LIVE and are never actionable."""
     out = []
+    latest_modes = "mode IN ('LIVE','SHADOW')"
     for sym in symbols:
-        last = db.one("SELECT MAX(decision_ns) d FROM predictions WHERE symbol=? AND mode='LIVE'", (sym,))
+        newest = db.one(f"SELECT MAX(decision_ns) d FROM predictions WHERE symbol=? AND {latest_modes}", (sym,))
+        if session:
+            last = db.one(f"SELECT MAX(decision_ns) d FROM predictions WHERE symbol=? AND {latest_modes} AND "
+                          "substr(decision_label,1,10)=?", (sym, session[:10]))
+        else:
+            last = newest
         if not last or last["d"] is None:
-            out.append({"symbol": sym, "status": "NO_LIVE_FORECAST", "candidates": [], "actionable": [],
-                        "decision_label": None, "no_trade_reason": "no live forecast yet (run gplm daily)"})
+            had = newest is not None and newest["d"] is not None
+            reason = (f"{STALE_DATA}: no forecast for the requested session {session}; the newest stored forecast "
+                      f"is older and is not shown as current" if had and session else
+                      f"{MISSING_EXPECTED_BAR}: no forecast yet (run gplm daily)")
+            out.append({"symbol": sym, "status": UNAVAILABLE, "reason_code": STALE_DATA if had and session else
+                        MISSING_EXPECTED_BAR, "candidates": [], "actionable": [], "decision_label": None,
+                        "requested_session": session, "no_trade_reason": reason})
             continue
-        rows = db.q("SELECT * FROM predictions WHERE symbol=? AND mode='LIVE' AND decision_ns=? ORDER BY actionable DESC, "
-                    "COALESCE(prob_calibrated, prob_raw) DESC", (sym, last["d"]))
+        rows = db.q(f"SELECT * FROM predictions WHERE symbol=? AND {latest_modes} AND decision_ns=? ORDER BY "
+                    "actionable DESC, COALESCE(prob_calibrated, prob_raw) DESC", (sym, last["d"]))
         cands = []
         for r in rows:
             p = json.loads(r["payload_json"])
@@ -89,13 +113,21 @@ def live_forecasts(db: AuditDB, symbols: Sequence[str], session: str | None = No
                           "market_conditions": p.get("market_conditions"), "reasons": p.get("reasons"),
                           "not_actionable_because": p.get("not_actionable_because"),
                           "risk_warnings": p.get("risk_warnings"), "entry_rule": p.get("entry_rule"),
-                          "target_session_estimate": p.get("target_session_estimate"),
-                          "train_acc_last_fit": p.get("train_acc_last_fit")})
-        act = [c for c in cands if c["actionable"]]
+                          "train_acc_last_fit": p.get("train_acc_last_fit"), "mode": r["mode"],
+                          "status": _row_status(r, p), "status_reasons": p.get("status_reasons", []),
+                          "freshness": p.get("freshness"), "target_contract": p.get("target_contract")})
+        act = [c for c in cands if c["mode"] == "LIVE" and c["status"] == LIVE and c["actionable"]]
+        for c in cands:
+            if c not in act:
+                c["actionable"] = 0  # display: only LIVE-gated rows are actionable
+        statuses = {c["status"] for c in cands}
+        status = (LIVE if act else UNAVAILABLE if statuses == {UNAVAILABLE} else SHADOW if SHADOW in statuses
+                  else "LEGACY_UNVERIFIED_LIVE" if "LEGACY_UNVERIFIED_LIVE" in statuses else NO_TRADE)
+        reasons = sorted({x for c in cands for x in c["status_reasons"]})
         out.append({"symbol": sym, "decision_label": rows[0]["decision_label"] if rows else None,
-                    "status": "CANDIDATES" if act else "NO_TRADE",
-                    "no_trade_reason": None if act else "no prediction passed every gate (champion model, calibrated "
-                    "probability, rolling outcomes, positive expected R, long-only delivery)",
+                    "requested_session": session, "status": status, "status_reasons": reasons,
+                    "no_trade_reason": None if act else f"{status}: " + (", ".join(reasons) or
+                                                                         "no prediction passed every gate"),
                     "actionable": act, "candidates": cands})
     return out
 
@@ -150,10 +182,10 @@ def write_daily(out_dir: Path, summary: Mapping[str, Any], accuracy: Sequence[Ma
     counts = summary.get("lane_counts", {})
     parts.append(f"<div class='card'><b>Run status: <span class='{status_class}'>{html.escape(status)}</span></b> "
                  f"&mdash; {counts.get('succeeded', 0)} lanes succeeded, {counts.get('failed', 0)} failed.</div>")
-    parts.append("<h2>Accepted next-session decisions</h2>")
+    parts.append("<h2>Latest-bar forecasts (LIVE only when every M5.9A gate passed)</h2>")
     for f in forecasts:
         status = f["status"]
-        cls = "ok" if status == "CANDIDATES" else "warn"
+        cls = "ok" if status == LIVE else "warn"
         parts.append(f"<div class='card'><b>{html.escape(f['symbol'])}</b> <span class='{cls}'>{status}</span> "
                      f"<span class='mut'>decision bar {html.escape(str(f.get('decision_label')))}</span>")
         if f.get("no_trade_reason"):

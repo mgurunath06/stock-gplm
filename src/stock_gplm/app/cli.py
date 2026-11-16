@@ -485,7 +485,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         syms = _symbols(args, app)
         hz = [int(x) for x in args.horizons.split(",")] if args.horizons else None
         res = run_daily(app, syms, be, intraday=not args.no_intraday, start=args.start, max_steps=args.max_steps,
-                        horizons=hz)
+                        horizons=hz, as_of=args.as_of)
         _print_daily(res, args)
         return res
 
@@ -527,7 +527,8 @@ def cmd_daily(args: argparse.Namespace) -> int:
         from .daily import run_daily
 
         syms = _symbols(args, app)
-        res = run_daily(app, syms, be, do_refresh=args.refresh, intraday=not args.no_intraday, max_steps=args.max_steps)
+        res = run_daily(app, syms, be, do_refresh=args.refresh, intraday=not args.no_intraday, max_steps=args.max_steps,
+                        as_of=args.as_of)
         _print_daily(res, args)
         return res
 
@@ -705,7 +706,7 @@ def cmd_predictions(args: argparse.Namespace) -> int:
         if args.mode == "live":
             from .report import live_forecasts
 
-            fc = live_forecasts(app.db, syms)
+            fc = live_forecasts(app.db, syms, session=getattr(args, "session", None))
             if args.json:
                 _p(json.dumps(fc, indent=2, default=str))
             else:
@@ -1060,12 +1061,15 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-steps", type=int, help="process at most this many sessions per lane (then stop; resumable)")
     r.add_argument("--horizons", help="override horizons, e.g. 1,5,10")
     r.add_argument("--no-intraday", action="store_true")
+    r.add_argument("--as-of", help="historical as-of session YYYY-MM-DD (replay stops there; never LIVE)")
     dl = add("daily", cmd_daily, "evening workflow: ingest, evaluate, retrain, forecast, report")
     stocks(dl)
     device(dl)
     dl.add_argument("--refresh", action="store_true", help="run the configured local data refresh first")
     dl.add_argument("--no-intraday", action="store_true")
     dl.add_argument("--max-steps", type=int)
+    dl.add_argument("--as-of", help="requested exchange session YYYY-MM-DD (freshness reference; a past session "
+                                    "replays historically and is never LIVE)")
     db_ = add("dashboard", cmd_dashboard, "serve the local dashboard")
     db_.add_argument("--host")
     db_.add_argument("--port", type=int)
@@ -1095,6 +1099,8 @@ def build_parser() -> argparse.ArgumentParser:
     pr = add("predictions", cmd_predictions, "show live forecasts or replay predictions")
     stocks(pr)
     pr.add_argument("--mode", choices=["live", "replay"], default="live")
+    pr.add_argument("--session", help="requested exchange session YYYY-MM-DD; older stored forecasts are "
+                                      "reported UNAVAILABLE (STALE_DATA), never as current")
     pr.add_argument("--limit", type=int, default=50)
     ai = add("ai", cmd_ai, "optional AI strategy hypotheses (disabled by default)")
     ai.add_argument("action", choices=["status", "generate"])

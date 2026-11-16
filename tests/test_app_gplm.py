@@ -260,9 +260,13 @@ def test_replay_predictions_precede_outcomes_and_resume_is_exact(world: dict, tm
     rows = db_full.q("SELECT p.decision_ns, p.horizon_bars, e.outcome_ns FROM predictions p JOIN evaluations e "
                      "ON e.prediction_id=p.prediction_id WHERE e.outcome_ns IS NOT NULL")
     assert rows and all(r["outcome_ns"] > r["decision_ns"] for r in rows)
-    live = db_full.q("SELECT * FROM predictions WHERE mode='LIVE'")
-    assert live and all(r["decision_ns"] == int(lane.market.end_ns[-1]) for r in live)
-    assert not db_full.q("SELECT 1 FROM predictions p JOIN evaluations e ON e.prediction_id=p.prediction_id WHERE p.mode='LIVE'")
+    # M5.9A: without a fresh-data context and an approved model artifact, the latest bar is SHADOW, never LIVE.
+    assert not db_full.q("SELECT 1 FROM predictions WHERE mode='LIVE'")
+    latest = db_full.q("SELECT * FROM predictions WHERE mode='SHADOW'")
+    assert latest and all(r["decision_ns"] == int(lane.market.end_ns[-1]) for r in latest)
+    assert all(r["actionable"] == 0 and json.loads(r["payload_json"])["status"] in ("UNAVAILABLE", "SHADOW")
+               for r in latest)
+    assert not db_full.q("SELECT 1 FROM predictions p JOIN evaluations e ON e.prediction_id=p.prediction_id WHERE p.mode='SHADOW'")
     # interrupted run (two chunks) gives the identical predictions
     _replay(world, tmp_path / "chunked", max_steps=4)
     second, db_c, _ = _replay(world, tmp_path / "chunked")
@@ -283,7 +287,9 @@ def test_intraday_replay_runs_on_minute_lane(world: dict, tmp_path: Path) -> Non
     assert n > 100
     bad = db.q("SELECT p.decision_label, e.outcome_label FROM predictions p JOIN evaluations e ON "
                "e.prediction_id=p.prediction_id WHERE p.source_kind='MODEL' AND substr(p.decision_label,1,10) != "
-               "substr(e.outcome_label,1,10)")
+               "substr(e.outcome_label,1,10) AND e.outcome_label NOT LIKE 'NOT_%'")
+    # Bars whose session data is truncated are predicted on the session grid but never scored.
+    assert not db.q("SELECT 1 FROM evaluations WHERE outcome_label LIKE 'NOT_%' AND correct IS NOT NULL")
     assert not bad, "intraday model outcomes must finish inside their session"
 
 
@@ -379,8 +385,9 @@ def test_daily_cli_twice_is_idempotent_and_dashboard_serves(world: dict, tmp_pat
     n1 = db.one("SELECT COUNT(*) n FROM predictions")["n"]
     e1 = db.one("SELECT COUNT(*) n FROM evaluations")["n"]
     f1 = db.one("SELECT COUNT(*) n FROM training_history")["n"]
-    live = db.q("SELECT DISTINCT symbol FROM predictions WHERE mode='LIVE'")
-    assert n1 > 0 and e1 > 0 and len(live) == 2
+    latest = db.q("SELECT DISTINCT symbol FROM predictions WHERE mode='SHADOW'")
+    assert n1 > 0 and e1 > 0 and len(latest) == 2
+    assert not db.q("SELECT 1 FROM predictions WHERE mode='LIVE'"), "no approved model and no calendar: never LIVE"
     assert db.one("SELECT COUNT(*) n FROM api_calls")["n"] == 0, "API-disabled run makes no external calls"
     db.close()
     assert cli.main(["daily", "--stocks", "AAA,BBB", "--device", "cpu", *args]) == 0
@@ -530,7 +537,7 @@ def test_daily_incremental_new_session_processes_only_new_work(world: dict, tmp_
     assert cli.main(["daily", "--stocks", "AAA", "--device", "cpu", *args]) == 0
     db = AuditDB(home / "gplm.sqlite", readonly=True)
     before = {k: db.one(f"SELECT COUNT(*) n FROM {k}")["n"] for k in ("predictions", "evaluations", "data_files")}
-    live_before = db.one("SELECT MAX(decision_label) d FROM predictions WHERE mode='LIVE'")["d"]
+    live_before = db.one("SELECT MAX(decision_label) d FROM predictions WHERE mode='SHADOW'")["d"]
     db.close()
     for p in stash.iterdir():  # the evening's new file is published
         shutil.move(str(p), raw / "minute" / "NSE" / "AAA-EQ" / p.name)
@@ -539,7 +546,7 @@ def test_daily_incremental_new_session_processes_only_new_work(world: dict, tmp_
     after = {k: db.one(f"SELECT COUNT(*) n FROM {k}")["n"] for k in ("predictions", "evaluations", "data_files")}
     assert after["data_files"] == before["data_files"] + 1
     assert after["predictions"] > before["predictions"] and after["evaluations"] > before["evaluations"]
-    assert db.one("SELECT MAX(decision_label) d FROM predictions WHERE mode='LIVE'")["d"] == held > live_before
+    assert db.one("SELECT MAX(decision_label) d FROM predictions WHERE mode='SHADOW'")["d"] == held > live_before
     changed = db.q("SELECT payload_json FROM events WHERE kind IN ('DATA_FILE_NEW','DATA_FILE_CHANGED') AND run_id="
                    "(SELECT run_id FROM runs ORDER BY started_utc DESC LIMIT 1)")
     assert len(changed) == 1 and held in changed[0]["payload_json"]

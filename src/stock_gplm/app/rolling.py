@@ -26,8 +26,13 @@ lane (symbol x timeframe), in order:
    session without repeating completed work. Predictions carry natural keys, so a repeat inserts
    nothing.
 
-The final bar of a lane (the latest completed session) is the **live** forecast for the next
-session. Earlier ones are ``REPLAY``. Both are kept apart in every report.
+M5.9A output contract (engine ``gplm-rolling.v2``): a prediction on a historical bar is ``REPLAY``.
+Only the latest *eligible completed* bar can be a current forecast, and it is ``LIVE`` only when the
+absolute freshness check passed, the model artifact has a recorded owner approval (adaptive refits
+never do), the opportunity contract is complete and every gate passed; otherwise it is stored as
+``SHADOW`` with its ``status`` (SHADOW / NO_TRADE / UNAVAILABLE) and reasons. The target is the
+horizon-derived bar, and outcomes are UP / DOWN / NEUTRAL against a versioned neutral band.
+The engine version is part of the replay identity, so v1 replays are never resumed with v2 semantics.
 """
 from __future__ import annotations
 
@@ -36,7 +41,6 @@ import json
 import math
 import time
 from dataclasses import dataclass
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -45,13 +49,17 @@ import numpy as np
 from ..m54.backtest import ExitPolicy, simulate
 from .candidates import Rule, search
 from .compute import Backend
+from .contracts import (END_OF_SESSION, LIVE, NEUTRAL, OPPORTUNITY_INCOMPLETE, OUTPUT_CONTRACT, REPLAY, SHADOW,
+                        TARGET_HORIZON_MISMATCH, UNAVAILABLE, UP, DOWN, Freshness, brier_up, classify_movement,
+                        direction_correct, live_gate, neutral_band, opportunity_missing)
 from .db import AuditDB, sha, utc_now
 from .lanes import Lane
 from .library import Library, scoped, strategy_features, strategy_mask
 from .models import DirectionModel, PlattCalibrator, recency_weights
 from .progress import Progress
+from .targets import EOD_UNAVAILABLE, derive_target, grid_position
 
-ENGINE_VERSION = "gplm-rolling.v1"
+ENGINE_VERSION = "gplm-rolling.v2"
 
 
 class LookaheadError(AssertionError):
@@ -92,21 +100,38 @@ class Pending:
     direction: str
     actionable: bool
     exit: dict[str, Any]
+    target: str | None = None
 
 
-def _next_weekday(d: str) -> str:
-    x = date.fromisoformat(d) + timedelta(days=1)
-    while x.weekday() >= 5:
-        x += timedelta(days=1)
-    return x.isoformat()
+def _grid_left(lane: Lane) -> np.ndarray:
+    """Intraday: grid bars left in the session after each bar (session grid, not data presence)."""
+    m = lane.market
+    if not lane.intraday:
+        return np.zeros(len(m), dtype=np.int64)
+    return np.array([grid_position(int(m.end_ns[i]), str(m.sessions[i]), lane.timeframe)[1] for i in range(len(m))],
+                    dtype=np.int64)
 
 
 class LaneReplay:
     def __init__(self, db: AuditDB, lane: Lane, horizons: Sequence[int], cfg: Mapping[str, Any], backend: Backend,
                  progress: Progress, models_dir: Path, library: Library | None = None,
                  bars_all: Mapping[str, Any] | None = None, rule_horizons: Sequence[int] | None = None,
-                 end_session: str | None = None, max_steps: int | None = None):
+                 end_session: str | None = None, max_steps: int | None = None,
+                 live_context: Mapping[str, Any] | None = None):
+        """``live_context``: ``freshness`` (:class:`~.contracts.Freshness` for this symbol against the
+        requested session), ``calendar`` (registered session calendar or None), ``universe_eligible``.
+        Without it no output can be LIVE."""
         self.db, self.lane, self.backend, self.progress = db, lane, backend, progress
+        self.live_context = dict(live_context or {})
+        self.freshness: Freshness | None = self.live_context.get("freshness")
+        self.calendar = self.live_context.get("calendar")
+        self.grid_left = _grid_left(lane)
+        inc = lane.bars.frame["incomplete"].to_numpy(dtype=bool) if len(lane.bars.frame) else np.zeros(0, dtype=bool)
+        ok = np.flatnonzero(~inc)
+        self.latest_idx = int(ok[-1]) if len(ok) else -1  # latest eligible completed bar
+        self.band = neutral_band(cfg.get("prediction", {}).get("neutral_band"), lane.costs.buy + lane.costs.sell)
+        self.live_outputs: list[dict[str, Any]] = []
+        self._targets: dict[tuple[int, int], dict[str, Any]] = {}
         self.cfg = cfg
         self.r = cfg["rolling"]
         self.models_cfg = dict(cfg["models"])
@@ -163,7 +188,10 @@ class LaneReplay:
                 break
             idx = np.nonzero(sess == s)[0]
             if self.lane.intraday:
-                idx = idx[idx < m.session_last[idx]]  # need a next bar inside the session
+                # A decision needs a next bar on the *session grid*. The latest completed bar of a session in
+                # progress therefore stays a decision bar; the session's final grid bar does not (policy
+                # ``unavailable``: models are trained on in-session labels only).
+                idx = idx[self.grid_left[idx] >= 1]
             out.append((s, idx))
         return out
 
@@ -176,6 +204,8 @@ class LaneReplay:
         mid = f"{replay_id}|{kind}|h{h}|{label}"
         path = self._model_path(replay_id, kind, h, label)
         digest = model.save(path)
+        self.model_digests = getattr(self, "model_digests", {})
+        self.model_digests[mid] = digest
         self.db.conn.execute("INSERT OR IGNORE INTO models VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                              (mid, self.lane.key, kind, h, utc_now(), label, model.train_rows, str(path), digest,
                               self.backend.name, self.lane.feature_config_sha, self.lane.data_fingerprint,
@@ -289,9 +319,31 @@ class LaneReplay:
         stats["in_sample_strategy_signals_skipped"] = self.in_sample_skipped
         summary = {"lane": lane.key, "replay_id": replay_id, "horizons": self.horizons, "skipped_horizons": self.skipped,
                    "steps_total": len(steps), "first_session": steps[0][0] if steps else None,
-                   "last_session": steps[-1][0] if steps else None, **stats, "oos": self._oos_summary(replay_id)}
+                   "last_session": steps[-1][0] if steps else None, **stats, "oos": self._oos_summary(replay_id),
+                   "latest_bar": self._latest_summary()}
         self.db.event("REPLAY_LANE_DONE", summary, subject=lane.key)
         return summary
+
+    def _latest_summary(self) -> dict[str, Any]:
+        """What the latest eligible completed bar produced (or why nothing could be produced)."""
+        m = self.lane.market
+        if self.latest_idx < 0:
+            return {"bar": None, "status": UNAVAILABLE, "reasons": ["MISSING_EXPECTED_BAR"]}
+        statuses: dict[str, int] = {}
+        for o in self.live_outputs:
+            statuses[o["status"]] = statuses.get(o["status"], 0) + 1
+        out: dict[str, Any] = {"bar": self.lane.label(self.latest_idx), "statuses": statuses,
+                               "freshness": self.freshness.to_dict() if self.freshness else None}
+        if self.lane.intraday and self.grid_left[self.latest_idx] < 1:
+            out.update(status=UNAVAILABLE, reasons=[END_OF_SESSION],
+                       note="final completed bar of the session; next-session forecasts are not produced "
+                            "(policy 'unavailable': models are trained on in-session labels)")
+        elif not statuses:
+            out.update(status=UNAVAILABLE, reasons=["NO_FORECAST_ON_LATEST_BAR"])
+        else:
+            out["status"] = LIVE if statuses.get(LIVE) else SHADOW if statuses.get(SHADOW) else \
+                max(statuses, key=lambda k: statuses[k])
+        return out
 
     def _gpu_mem(self) -> str | None:
         mem = self.backend.memory()
@@ -309,17 +361,18 @@ class LaneReplay:
             rows = rows[np.isnan(lane.X[rows]).mean(axis=1) < 0.5]
             rows = rows[~m.no_signal[rows]]
         y_ret = self.guard.labels(rows, h, cutoff_idx) if rows.size else np.zeros(0)
-        ok = np.isfinite(y_ret)
+        gross_lab = y_ret + self.guard.cost
+        ok = np.isfinite(y_ret) & (np.abs(np.nan_to_num(gross_lab)) > self.band.threshold)  # NEUTRAL rows excluded
         rows, y_ret = rows[ok], y_ret[ok]
         out = {"fits": 0, "new": 0}
         if rows.size < int(self.r["min_train_rows"]):
             return out
         assert int(m.end_ns[rows.max() + h]) <= int(m.end_ns[cutoff_idx])  # explicit leak check
-        y = (y_ret > 0).astype(float)
+        y = (y_ret + self.guard.cost > self.band.threshold).astype(float)  # UP vs DOWN (gross beyond the band)
         w = recency_weights(m.session_id[rows], int(m.session_id[cutoff_idx]), float(self.r["half_life_sessions"]))
         X = lane.X[rows]
-        if lane.intraday:  # an intraday h-bar prediction must finish inside its session
-            dec = dec[m.session_last[dec] >= dec + h]
+        if lane.intraday:  # an intraday h-bar prediction must finish inside its session (session grid)
+            dec = dec[self.grid_left[dec] >= h]
             if dec.size == 0:
                 return out
         Xd = lane.X[dec]
@@ -346,7 +399,7 @@ class LaneReplay:
             model.trained_label = lane.label(cutoff_idx)
             out["fits"] += 1
             model_id = self._save_one(model, kind, h, replay_id, model.trained_label)
-            info = {**info, "model_id": model_id}
+            info = {**info, "model_id": model_id, "artifact_sha256": self.model_digests.get(model_id)}
             for ep, loss, acc in (hist or [(0, info.get("loss"), info.get("train_acc"))]):
                 self.db.conn.execute("INSERT INTO training_history (run_id, lane_key, model_kind, horizon, step_label, "
                                      "epoch, loss, train_acc, rows, device, seconds, ts_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -372,14 +425,54 @@ class LaneReplay:
                                                           logit_contrib[i] if kind != "baseline" else [])
         return out
 
+    def _target(self, t: int, h: int) -> dict[str, Any]:
+        key = (t, h)
+        if key not in self._targets:
+            m = self.lane.market
+            self._targets[key] = derive_target(self.lane.timeframe, str(m.sessions[t]), int(m.end_ns[t]), h,
+                                               calendar=self.calendar, observed_frame=self.lane.bars.frame,
+                                               eod_policy=EOD_UNAVAILABLE)
+        return self._targets[key]
+
+    def _classify(self, t: int, *, approval: Mapping[str, Any] | None, missing: Sequence[str],
+                  blockers: Sequence[str], target: Mapping[str, Any], model_required: bool = True,
+                  strategy_involved: bool = False) -> tuple[str, str, list[str], bool]:
+        """(mode, status, reasons, actionable) under the M5.9A contract."""
+        if t != self.latest_idx:
+            return "REPLAY", REPLAY, [], not blockers and not missing
+        fresh = self.freshness
+        if target["status"] != "DERIVED":
+            fresh = Freshness(str(target["reason"]), getattr(fresh, "expected_session", None),
+                              getattr(fresh, "last_session", None), [str(target["reason"])])
+        check = live_gate(latest_eligible_bar=True, freshness=fresh,
+                          model_approval=approval if model_required else {"model_id": "n/a", "artifact_sha256": "n/a"},
+                          strategy_involved=strategy_involved, strategy_approved=False,
+                          universe_eligible=bool(self.live_context.get("universe_eligible", True)),
+                          missing_fields=missing, gate_blockers=blockers)
+        return ("LIVE" if check.status == LIVE else "SHADOW"), check.status, check.reasons, check.actionable
+
+    def _opportunity(self, t: int, h: int, direction: str, p: float | None, stop: float | None, tgt: float | None,
+                     model_version: str | None, strategy_version: str | None = None) -> dict[str, Any]:
+        m = self.lane.market
+        close = float(m.close[t])
+        exp = None
+        if p is not None and stop is not None and tgt is not None and close > 0:
+            exp = float(p * (tgt - close) / close - (1 - p) * (close - stop) / close)
+        fresh = (self.freshness.status if self.freshness is not None else "UNKNOWN") if t == self.latest_idx \
+            else "HISTORICAL_REPLAY"
+        opp = {"action": "BUY" if direction == "LONG" else None, "entry": "buy at the open of the next bar",
+               "invalidation": f"exit if price trades at or below the stop {stop:.4f}" if stop is not None else None,
+               "stop": stop, "target": tgt, "horizon": h, "probability": p, "expected_return": exp,
+               "model_version": model_version, "strategy_version": strategy_version,
+               "timestamp": self.lane.label(t), "freshness_status": fresh}
+        return opp
+
     def _emit_model_prediction(self, kind: str, h: int, t: int, p_raw: float, p_cal: float, cal_status: str,
                                champion: str, info: Mapping[str, Any], hist_acc: Mapping[str, Any], session: str,
                                replay_id: str, pending: list[Pending], contrib: list[dict[str, Any]]) -> int:
         lane, m = self.lane, self.lane.market
-        live = t == len(m) - 1
-        target = str(m.sessions[t + 1]) if not live else f"NEXT_SESSION_AFTER_{m.sessions[t]}"
-        if lane.intraday and not live:
-            target = str(m.sessions[t + 1])
+        tgt_info = self._target(t, h)
+        target = str(tgt_info["target"]) if tgt_info["status"] == "DERIVED" else f"UNAVAILABLE:{tgt_info['reason']}"
         pc = self.pred_cfg
         min_p = float(pc["min_probability"])
         direction = "LONG" if p_cal >= 0.5 else ("SHORT" if lane.intraday and pc.get("allow_short_intraday") else "AVOID")
@@ -408,37 +501,55 @@ class LaneReplay:
             blockers.append("expected R-multiple after the stop/target geometry is not positive")
         if m.no_signal[t]:
             blockers.append("bar flagged (incomplete or near a price discontinuity)")
-        actionable = not blockers
+        if tgt_info["status"] != "DERIVED":
+            blockers.append(f"no eligible target bar ({tgt_info['reason']})")
+        model_id, digest = info.get("model_id"), info.get("artifact_sha256")
+        approval = self.db.model_approval(model_id, digest) if t == self.latest_idx else None
+        opp = self._opportunity(t, h, direction, p_cal, stop, target_px,
+                                f"{model_id}@{digest}" if model_id and digest else None)
+        missing = opportunity_missing(opp)
+        mode, status, status_reasons, actionable = self._classify(t, approval=approval, missing=missing,
+                                                                  blockers=blockers, target=tgt_info)
         if actionable:
             reasons.append(f"champion {kind} calibrated P(up)={p_cal:.3f} >= {min_p}; rolling OOS accuracy "
                            f"{hist_acc.get('acc')} over {hist_acc.get('n')} outcomes")
+        not_actionable = list(blockers) + ([f"{OPPORTUNITY_INCOMPLETE}: missing {missing}"] if missing else []) + \
+            ([f"{status}: {', '.join(status_reasons)}"] if not actionable and status not in (REPLAY,) else [])
         natural = f"{replay_id}|MODEL|{kind}|h{h}|{int(m.end_ns[t])}"
         payload = {"decision_bar": lane.label(t), "entry_rule": "buy at the open of the next bar (market-on-open)",
                    "reference_close": close, "atr14": atr, "expected_rr": tgt_mult / stop_mult,
                    "expected_r_multiple": edge, "train_acc_last_fit": info.get("train_acc"),
-                   "model_id": info.get("model_id"), "trained_through": self.lane.label(int(self._cutoff_for(t))),
+                   "model_id": model_id, "model_artifact_sha256": digest,
+                   "model_approval": "APPROVED" if approval else "NOT_APPROVED (adaptive refit; no recorded approval)",
+                   "trained_through": self.lane.label(int(self._cutoff_for(t))),
                    "step_session": session,
                    "train_rows": info.get("rows"),
                    "historical_oos": hist_acc,
-                   "supporting_indicators": contrib, "reasons": reasons, "not_actionable_because": blockers,
+                   "supporting_indicators": contrib, "reasons": reasons, "not_actionable_because": not_actionable,
                    "market_conditions": self._conditions(t), "horizon_label": self._h_label(h),
                    "data_last_session": str(m.sessions[-1]), "data_source_of_decision_bar": str(lane.source[t])
                    if t < len(lane.source) else None, "engine": ENGINE_VERSION,
                    "risk_warnings": ["research output, not investment advice", "costs are assumptions, not broker-verified",
                                      "corporate actions are UNKNOWN; large gaps are flagged, not adjusted"],
-                   "target_session_note": "estimated as the next weekday; no holiday calendar is used" if live else None,
-                   "target_session_estimate": _next_weekday(str(m.sessions[t])) if live and not lane.intraday else None}
+                   "status": status, "status_reasons": status_reasons, "output_contract": OUTPUT_CONTRACT,
+                   "freshness": self.freshness.to_dict() if (self.freshness and t == self.latest_idx) else None,
+                   "target_contract": {"decision_bar": lane.label(t), "declared_horizon": h, "derived_target": target,
+                                       "derivation": tgt_info["derivation"]},
+                   "neutral_band": self.band.to_dict(), "opportunity": opp}
         new = self.db.add_prediction({
-            "natural_key": natural, "mode": "LIVE" if live else "REPLAY", "replay_id": replay_id, "symbol": lane.symbol,
+            "natural_key": natural, "mode": mode, "replay_id": replay_id, "symbol": lane.symbol,
             "timeframe": lane.timeframe, "lane_key": lane.key, "source_kind": "MODEL", "source_id": kind,
             "source_version": replay_id, "horizon_bars": h, "decision_label": lane.label(t), "decision_ns": int(m.end_ns[t]),
             "target_session": target, "direction": direction, "prob_raw": p_raw, "prob_calibrated": p_cal,
             "calibration": cal_status, "actionable": int(actionable), "entry_ref": close, "stop": stop, "target": target_px,
             "cost_bps": cost_bps, "data_fingerprint": lane.data_fingerprint, "feature_config_sha": lane.feature_config_sha,
             "payload": payload})
+        if t == self.latest_idx:
+            self.live_outputs.append({"source": f"MODEL:{kind}:h{h}", "status": status, "reasons": status_reasons})
         if new:
             pending.append(Pending(sha(natural)[:24], "MODEL", kind, h, t, p_cal, direction, actionable,
-                                   {"max_hold_bars": h, "stop_atr": stop_mult, "target_atr": tgt_mult, "trail_atr": None}))
+                                   {"max_hold_bars": h, "stop_atr": stop_mult, "target_atr": tgt_mult, "trail_atr": None},
+                                   target))
         return int(new)
 
     def _conditions(self, t: int) -> dict[str, Any]:
@@ -500,7 +611,10 @@ class LaneReplay:
                     # in-sample evidence presented as out-of-sample, so it is skipped and counted.
                     self.in_sample_skipped += 1
                     continue
-                live = t == len(m) - 1
+                h_sig = int(ex["max_hold_bars"])
+                tgt_info = self._target(t, h_sig)
+                target_label = (str(tgt_info["target"]) if tgt_info["status"] == "DERIVED"
+                                else f"UNAVAILABLE:{tgt_info['reason']}")
                 close = float(m.close[t])
                 atr = float(m.natr[t] * close) if math.isfinite(m.natr[t]) else float("nan")
                 stop = close - ex["stop_atr"] * atr if ex.get("stop_atr") and math.isfinite(atr) else None
@@ -513,25 +627,44 @@ class LaneReplay:
                     blockers.append(f"only {acc.get('n', 0)} sequential outcomes for this rule")
                 elif (acc.get("mean_trade_net") or 0) <= 0:
                     blockers.append("sequential out-of-sample mean trade return is not positive")
+                if tgt_info["status"] != "DERIVED":
+                    blockers.append(f"no eligible target bar ({tgt_info['reason']})")
+                opp = self._opportunity(t, h_sig, "LONG", p, stop, tgt, None, f"{sid}@{ver}")
+                opp["model_version"] = f"{kind}:{sid}@{ver}"
+                missing = opportunity_missing(opp, strategy_involved=True)
+                mode, status, status_reasons, actionable = self._classify(
+                    t, approval=None, missing=missing, blockers=blockers, target=tgt_info, model_required=False,
+                    strategy_involved=True)
+                if t == self.latest_idx:
+                    self.live_outputs.append({"source": f"{kind}:{sid}", "status": status, "reasons": status_reasons})
                 natural = f"{replay_id}|{kind}|{sid}@{ver}|h{ex['max_hold_bars']}|{int(m.end_ns[t])}"
                 ok = self.db.add_prediction({
-                    "natural_key": natural, "mode": "LIVE" if live else "REPLAY", "replay_id": replay_id,
+                    "natural_key": natural, "mode": mode, "replay_id": replay_id,
                     "symbol": lane.symbol, "timeframe": lane.timeframe, "lane_key": lane.key, "source_kind": kind,
                     "source_id": sid, "source_version": ver, "horizon_bars": int(ex["max_hold_bars"]),
                     "decision_label": lane.label(t), "decision_ns": int(m.end_ns[t]),
-                    "target_session": str(m.sessions[t + 1]) if not live else f"NEXT_SESSION_AFTER_{m.sessions[t]}",
+                    "target_session": target_label,
                     "direction": "LONG", "prob_raw": p, "prob_calibrated": None,
                     "calibration": "NOT_APPLICABLE (rule/strategy; in-sample win rate shown as raw)",
-                    "actionable": int(not blockers), "entry_ref": close, "stop": stop, "target": tgt,
+                    "actionable": int(actionable), "entry_ref": close, "stop": stop, "target": tgt,
                     "cost_bps": (lane.costs.buy + lane.costs.sell) * 1e4, "data_fingerprint": lane.data_fingerprint,
                     "feature_config_sha": lane.feature_config_sha,
                     "payload": {**info, "tier": tier, "decision_bar": lane.label(t), "exit": ex,
                                 "entry_rule": "buy at the open of the next bar", "historical_oos": acc,
-                                "not_actionable_because": blockers, "market_conditions": self._conditions(t),
-                                "data_last_session": str(m.sessions[-1])}})
+                                "not_actionable_because": blockers + (
+                                    [f"{OPPORTUNITY_INCOMPLETE}: missing {missing}"] if missing else []) + (
+                                    [f"{status}: {', '.join(status_reasons)}"] if not actionable and status != REPLAY
+                                    else []),
+                                "market_conditions": self._conditions(t),
+                                "data_last_session": str(m.sessions[-1]), "engine": ENGINE_VERSION,
+                                "status": status, "status_reasons": status_reasons, "output_contract": OUTPUT_CONTRACT,
+                                "target_contract": {"decision_bar": lane.label(t), "declared_horizon": h_sig,
+                                                    "derived_target": target_label,
+                                                    "derivation": tgt_info["derivation"]},
+                                "opportunity": opp}})
                 if ok:
-                    pending.append(Pending(sha(natural)[:24], kind, sid, int(ex["max_hold_bars"]), int(t), p, "LONG",
-                                           not blockers, dict(ex)))
+                    pending.append(Pending(sha(natural)[:24], kind, sid, h_sig, int(t), p, "LONG",
+                                           actionable, dict(ex), target_label))
                     new += 1
         return new
 
@@ -550,7 +683,7 @@ class LaneReplay:
                                          "target_atr": self.pred_cfg["target_atr"], "trail_atr": None}
             out.append(Pending(r["prediction_id"], r["source_kind"], r["source_id"], int(r["horizon_bars"]), t,
                                r["prob_calibrated"] if r["prob_calibrated"] is not None else r["prob_raw"],
-                               r["direction"], bool(r["actionable"]), ex))
+                               r["direction"], bool(r["actionable"]), ex, r["target_session"]))
         return out
 
     def _replay_hint(self) -> str:
@@ -569,13 +702,23 @@ class LaneReplay:
                 keep.append(p)
                 continue
             policy = ExitPolicy.from_dict(p.exit)
+            if p.source_kind == "MODEL" and p.target and not p.target.startswith("UNAVAILABLE") \
+                    and p.t + h < len(m) and not self._same_bar(p.t + h, p.target):
+                # The bar h positions later is not the frozen target (missing bar / data revision): never re-target.
+                self.db.add_evaluation({"prediction_id": p.prediction_id, "outcome_label": "NOT_COMPARABLE",
+                                        "exit_reason": "NOT_COMPARABLE",
+                                        "payload_json": {"reason": TARGET_HORIZON_MISMATCH, "frozen_target": p.target,
+                                                         "bar_at_horizon": self.lane.label(p.t + h)}})
+                continue
             trade = self.guard.trade(p.t, policy, last_known, self.lane.costs)
+            movement = None
             if p.source_kind == "MODEL":
                 if self.lane.intraday and m.session_id[p.t + h] != m.session_id[p.t]:
                     realized = None
                 else:
                     realized = float(self.guard.labels(np.array([p.t]), h, last_known)[0])
-                up = None if realized is None else int(realized > 0)
+                movement = None if realized is None else classify_movement(realized + self.guard.cost, self.band)
+                up = None if movement in (None, NEUTRAL) else int(movement == UP)
             else:
                 realized = trade["net_return"] if trade else None
                 up = None if realized is None else int(realized > 0)
@@ -585,10 +728,13 @@ class LaneReplay:
                                                                    "a session"}})
                 continue
             prob = p.p
-            correct = None
-            if up is not None:
-                correct = int((prob is not None and prob >= 0.5) == bool(up)) if p.source_kind == "MODEL" else up
-            brier = (prob - up) ** 2 if (prob is not None and up is not None) else None
+            if p.source_kind == "MODEL":
+                predicted = None if prob is None else (UP if prob >= 0.5 else DOWN)
+                correct = direction_correct(predicted, movement) if predicted else None
+                brier = brier_up(prob, movement)
+            else:
+                correct = up
+                brier = (prob - up) ** 2 if (prob is not None and up is not None) else None
             self.db.add_evaluation({
                 "prediction_id": p.prediction_id, "outcome_label": self.lane.label(min(need, len(m) - 1)),
                 "outcome_ns": int(m.end_ns[min(need, len(m) - 1)]), "realized_return": realized, "up": up,
@@ -599,10 +745,19 @@ class LaneReplay:
                                                                  "gross_return", "net_return", "mfe", "mae")} if trade else None,
                                  "evaluated_at_replay_bar": self.lane.label(last_known),
                                  "label_definition": "close[t+h]/open[t+1]-1 minus round-trip cost" if p.source_kind == "MODEL"
-                                 else "simulated trade net return"}})
+                                 else "simulated trade net return",
+                                 "movement": movement, "neutral_band": self.band.to_dict(),
+                                 "frozen_target": p.target, "declared_horizon": h, "engine": ENGINE_VERSION}})
             done += 1
         pending[:] = keep
         return done
+
+    def _same_bar(self, i: int, label: str) -> bool:
+        m = self.lane.market
+        if "T" in label:
+            from .targets import label_ns
+            return int(m.end_ns[i]) == label_ns(label)
+        return str(m.sessions[i]) == label[:10]
 
     def _calibration_data(self, replay_id: str, h: int, cutoff_ns: int) -> list[tuple[str, float, int]]:
         rows = self.db.q("SELECT p.source_id, p.prob_raw, e.up FROM predictions p JOIN evaluations e ON "

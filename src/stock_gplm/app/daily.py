@@ -3,10 +3,13 @@
 1. Optionally refresh data (only when ``refresh.enabled`` and ``--refresh``; the configured local
    collector command is run and logged; GPLM never handles provider credentials).
 2. Ingest new or changed local files (unchanged files are not parsed again).
-3. Detect the latest completed session across the requested stocks.
+3. Establish the expected completed exchange session (``--as-of`` or the registered calendar) and
+   check every symbol's freshness against it absolutely -- never against the newest symbol in the
+   batch. A stale, incomplete, quarantined or calendar-unknown symbol can never produce LIVE output.
 4. Advance every lane's rolling replay to that session: evaluate earlier forecasts whose outcomes
    are now observable, update/retrain models, re-search rules, compare challengers with the
-   accepted champion, and issue the next-session (LIVE) forecasts.
+   accepted champion, and issue the latest-bar forecasts (LIVE only when every M5.9A gate passes;
+   otherwise SHADOW / NO_TRADE / UNAVAILABLE with reasons).
 5. Write the report (HTML, CSV, JSON), back up the database and print a short summary.
 
 Re-running with unchanged data inserts no predictions, evaluations, fits or API calls: every step
@@ -22,13 +25,16 @@ from typing import Any, Sequence
 
 from .compute import Backend
 from .context import App
+from .contracts import STALE_DATA, Freshness, evaluate_freshness
 from .db import utc_now
 from .ingest import Ingestor, normalize_symbol
 from .lanes import all_bars, build_lane
 from .library import Library, seed_templates
 from .report import accuracy_table, live_forecasts, write_daily
 from .rolling import LaneReplay
+from .session_calendar import expected_completed_session, load_registered_calendar
 from .settings import REPO
+from .targets import grid_position
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -63,9 +69,44 @@ def ensure_templates(app: App) -> None:
         seed_templates(Library(app.s.strategies_dir, app.db), tdir)
 
 
+def symbol_freshness(app: App, symbol: str, last_session: str | None, expected: str | None,
+                     confirmed: bool) -> Freshness:
+    """Absolute freshness of one symbol. An ERROR data issue on the last session quarantines it."""
+    quarantined = bool(last_session) and app.db.one(
+        "SELECT 1 FROM data_issues WHERE symbol=? AND severity='ERROR' AND instr(period, ?) > 0 LIMIT 1",
+        (symbol, last_session)) is not None
+    return evaluate_freshness(last_session, expected, calendar_confirmed=confirmed, quarantined=quarantined)
+
+
+def intraday_freshness(base: Freshness, lane: Any, now: datetime | None) -> Freshness:
+    """Within a session in progress the latest completed grid bar is the expected bar: if the lane's latest
+    eligible bar ends earlier, the lane is STALE_DATA even though the session date matches."""
+    if not base.fresh or now is None or not lane.intraday or not len(lane.market):
+        return base
+    m = lane.market
+    inc = lane.bars.frame["incomplete"].to_numpy(dtype=bool)
+    ok = [i for i in range(len(m)) if not inc[i]]
+    if not ok:
+        return Freshness("MISSING_EXPECTED_BAR", base.expected_session, base.last_session, ["MISSING_EXPECTED_BAR"])
+    last = ok[-1]
+    today = now.date().isoformat()
+    if str(m.sessions[last]) != today:
+        return base
+    from ..m54.timeframes import timeframe_minutes
+    now_ns = int(now.timestamp() * 1e9)
+    _, left = grid_position(int(m.end_ns[last]), today, lane.timeframe)
+    n_ns = timeframe_minutes(lane.timeframe) * 60_000_000_000
+    if left >= 1 and now_ns >= int(m.end_ns[last]) + n_ns:
+        return Freshness(STALE_DATA, base.expected_session, base.last_session, [STALE_DATA])
+    return base
+
+
 def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh: bool = False,
               intraday: bool = True, start: str | None = None, max_steps: int | None = None,
-              horizons: Sequence[int] | None = None) -> dict[str, Any]:
+              horizons: Sequence[int] | None = None, as_of: str | None = None,
+              now: datetime | None = None) -> dict[str, Any]:
+    """``as_of``: the requested exchange session (historical replay when the data runs past it). Without it
+    the expected session comes from the registered calendar and the current IST time."""
     s = app.s
     prog = app.progress
     cfg = dict(s.raw)
@@ -83,9 +124,17 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
         prog.update(stock=sym, note="incremental ingest")
         d = ing.ingest(sym)
         datas[d.symbol] = d
-    latest = max((d.last_session for d in datas.values() if d.last_session), default=None)
+    calendar = load_registered_calendar(s)
+    clock = None if as_of else (now or now_ist())
+    expected, confirmed = expected_completed_session(calendar, as_of, clock)
+    fresh = {sym: symbol_freshness(app, sym, d.last_session, expected, confirmed) for sym, d in datas.items()}
+    latest = expected or max((d.last_session for d in datas.values() if d.last_session), default=None)
     summary["latest_session"] = latest
-    summary["data"] = {sym: {"last_session": d.last_session, "stale": d.last_session != latest,
+    summary["expected_session"] = {"session": expected, "calendar_confirmed": confirmed,
+                                   "source": "--as-of" if as_of else ("registered calendar" if calendar else None),
+                                   "calendar": calendar.source if calendar else None}
+    summary["data"] = {sym: {"last_session": d.last_session, "stale": not fresh[sym].fresh,
+                             "freshness": fresh[sym].to_dict(),
                              "changed_files": d.changed_files, "first": d.summary.get("first"),
                              "minute_sessions": d.summary.get("minute_sessions_used"),
                              "minute_last": d.summary.get("minute_last"),
@@ -94,12 +143,14 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
                        for sym, d in datas.items()}
     for sym, info in summary["data"].items():
         if info["stale"]:
-            prog.warn(f"{sym}: latest session {info['last_session']} is older than {latest}")
-            app.db.event("DATA_STALE", {"symbol": sym, **info, "latest": latest}, subject=sym, level="WARN")
+            prog.warn(f"{sym}: {info['freshness']['status']} (last session {info['last_session']}, "
+                      f"expected {expected}); no LIVE output")
+            app.db.event("DATA_STALE", {"symbol": sym, **info, "expected_session": expected}, subject=sym,
+                         level="WARN")
     tf_cfg = s.section("timeframes")
     plan = []
     for sym, d in datas.items():
-        bars = all_bars(d)
+        bars = all_bars(d, calendar)
         lanes = [tf_cfg.get("daily_lane", "1d")]
         if intraday:
             for tf in tf_cfg.get("intraday_lanes", []):
@@ -119,8 +170,10 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
             continue
         hz = list(horizons) if horizons else list(s.section("horizons").get(tf, [1, 5, 10, 20]))
         rule_h = [h for h in hz if h <= 20] if tf == "1d" else hz
+        ctx = {"freshness": intraday_freshness(fresh[sym], lane, clock), "calendar": calendar,
+               "universe_eligible": True}
         rp = LaneReplay(app.db, lane, hz, cfg, backend, prog, s.models_dir, lib, bars, rule_horizons=rule_h,
-                        max_steps=max_steps)
+                        max_steps=max_steps, end_session=as_of[:10] if as_of else None, live_context=ctx)
         lane_objs.append(rp)
     total_steps = 0
     for rp in lane_objs:
@@ -162,7 +215,7 @@ def run_daily(app: App, symbols: Sequence[str], backend: Backend, *, do_refresh:
     }
     syms = list(datas)
     acc = accuracy_table(app.db, syms)
-    fc = live_forecasts(app.db, syms)
+    fc = live_forecasts(app.db, syms, session=expected)
     summary["forecast_status"] = {f["symbol"]: f["status"] for f in fc}
     summary["warnings"] = prog.state.get("warnings", 0)
     summary["errors"] = prog.state.get("errors", 0)
