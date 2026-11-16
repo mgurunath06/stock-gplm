@@ -13,6 +13,11 @@ Everyday commands::
     gplm strategies list | show ID | export --id ID | copy ID | edit ID --set exit.max_hold_bars=7 | activate ID | history ID
     gplm audit --run RUN_ID | --prediction PRED_ID | --verify | --export predictions --format csv | --backup
     gplm predictions --stocks RELIANCE --mode live
+    gplm calendar validate|register --file nse-2026.csv | list | show|activate|deactivate --calendar-id ID --by NAME
+    gplm model register --file M.npz|--from-model-id ID --scope-symbols RELIANCE --by NAME | inspect|approve|revoke
+    gplm model predict --stock RELIANCE --model-id fm-... [--as-of YYYY-MM-DD]
+    gplm universe register --file nifty200.csv --name nifty200 --as-of DATE --by NAME | activate | list | check
+    gplm strategies lifecycle ID --version N | advance ID --version N --to VALIDATED --evidence REF --by NAME
     gplm ai status | ai generate --provider ollama --stock RELIANCE --timeframe 1d
 
 ``gplm research ...`` passes through to the M5.4 engine CLI (fixture, report, library, stop, ...).
@@ -548,6 +553,21 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
 def cmd_strategies(args: argparse.Namespace) -> int:
     from .library import Library, StrategyError, summarize, validate
 
+    if args.action in ("lifecycle", "advance"):
+        from .governance import advance_strategy, strategy_state
+
+        sid = args.id or args.target
+        if not sid or not args.version:
+            raise SystemExit("give the strategy id and --version N")
+        if args.action == "lifecycle":
+            return _gov_read(args, lambda app: strategy_state(app.db, sid, args.version))
+
+        def adv(app: Any) -> dict[str, Any]:
+            res = advance_strategy(app.db, sid, args.version, args.to or "", _actor(args, app), args.evidence, args.note)
+            _p(json.dumps(res, indent=2, default=str))
+            return {"status": "COMPLETED"}
+
+        return _run(args, "strategy-lifecycle", adv)
     if args.action in ("list", "show", "export", "history", "validate"):
         if args.action == "validate":
             try:
@@ -917,6 +937,132 @@ def cmd_symbols(args: argparse.Namespace) -> int:
     return 0
 
 
+def _actor(args: argparse.Namespace, app: Any) -> str:
+    """Owner identity for governance actions: ``--by`` or config ``governance.approver``; never guessed."""
+    who = getattr(args, "by", None) or (app.s.section("governance") or {}).get("approver")
+    if not who or not str(who).strip():
+        raise SystemExit("give --by NAME (or set governance.approver in the config); approvals are never anonymous")
+    return str(who).strip()
+
+
+def _gov_read(args: argparse.Namespace, fn: Any) -> int:
+    """Read-only governance query (no lock, no run record)."""
+    import sqlite3
+
+    from .governance import GovernanceError
+
+    app = _app(args, readonly=True)
+    try:
+        _p(json.dumps(fn(app), indent=2, default=str))
+        return 0
+    except sqlite3.OperationalError as exc:
+        _p(f"ERROR: {exc} (the database predates schema v3; run any governance write command to migrate it)")
+        return 1
+    except GovernanceError as exc:
+        _p(f"ERROR: {exc}")
+        return 1
+    finally:
+        app.close()
+
+
+def cmd_calendar(args: argparse.Namespace) -> int:
+    from . import governance as G
+
+    if args.action == "validate":
+        parsed = G.parse_calendar(Path(args.file).read_text(encoding="utf-8-sig"))
+        days = parsed.days
+        _p(json.dumps({"ok": parsed.ok, "errors": parsed.errors, "exchange": parsed.exchange,
+                       "timezone": parsed.timezone, "coverage": [min(days), max(days)] if days else None,
+                       "sessions": sum(1 for v in days.values() if v["status"] != "CLOSED")}, indent=2))
+        return 0 if parsed.ok else 1
+    if args.action == "list":
+        return _gov_read(args, lambda app: [{k: v for k, v in r.items() if k != "events"} for r in G.list_calendars(app.db)])
+    if args.action == "show":
+        return _gov_read(args, lambda app: G.calendar_record(app.db, args.calendar_id))
+
+    def work(app: Any) -> dict[str, Any]:
+        if args.action == "register":
+            res = G.register_calendar(app.db, Path(args.file), _actor(args, app))
+        else:
+            res = G.set_calendar_active(app.db, args.calendar_id, args.action == "activate", _actor(args, app), args.note)
+        _p(json.dumps({k: v for k, v in res.items() if k != "events"}, indent=2, default=str))
+        return {"status": "COMPLETED", "calendar_id": res["calendar_id"]}
+
+    return _run(args, "calendar", work)
+
+
+def cmd_model(args: argparse.Namespace) -> int:
+    from . import governance as G
+
+    if args.action == "list":
+        return _gov_read(args, lambda app: G.list_models(app.db))
+    if args.action == "inspect":
+        return _gov_read(args, lambda app: {**G.model_record(app.db, args.model_id),
+                                            "file_check": G.verify_model_file(app.db, args.model_id)})
+
+    def work(app: Any) -> dict[str, Any]:
+        if args.action == "register":
+            src, tf, hz, schema, cutoff = args.file, args.timeframe, args.horizon, args.feature_schema, args.training_cutoff
+            if args.from_model_id:
+                row = app.db.one("SELECT * FROM models WHERE model_id=?", (args.from_model_id,))
+                if row is None:
+                    raise G.GovernanceError(f"no stored model {args.from_model_id}")
+                src = src or row["path"]
+                tf = tf or str(row["lane_key"]).split("|")[-1]
+                hz = hz or int(row["horizon"])
+                schema = schema or row["feature_config_sha"]
+                cutoff = cutoff or row["train_end_label"]
+            if not src:
+                raise SystemExit("give --file PATH or --from-model-id ID")
+            scope = {"shared": True} if args.shared else {"symbols": [s for s in (args.scope_symbols or "").split(",") if s]}
+            res = G.register_model(app.db, Path(src), app.s.home / "model-artifacts", timeframe=tf, horizon=int(hz or 0),
+                                   feature_schema=schema, training_cutoff=cutoff,
+                                   cost_policy=args.cost_policy or G.cost_policy_version(app.s.section("costs")),
+                                   actor=_actor(args, app), scope=scope, evidence=args.evidence)
+        elif args.action == "approve":
+            res = G.approve_model(app.db, args.model_id, _actor(args, app), args.evidence or [], expires_utc=args.expires)
+        elif args.action == "revoke":
+            res = G.revoke_model(app.db, args.model_id, _actor(args, app), args.reason)
+        else:  # predict
+            from .fixed_model import run_fixed
+
+            if not args.stock:
+                raise SystemExit("give --stock SYMBOL")
+            res = run_fixed(app, args.stock, args.model_id, as_of=args.as_of)
+            _p(json.dumps(res, indent=2, default=str))
+            return {"status": "COMPLETED", "forecast_status": res.get("status")}
+        _p(json.dumps(res, indent=2, default=str))
+        return {"status": "COMPLETED", "model_id": res.get("model_id")}
+
+    return _run(args, "model", work)
+
+
+def cmd_universe(args: argparse.Namespace) -> int:
+    from . import governance as G
+
+    if args.action == "list":
+        return _gov_read(args, lambda app: G.list_universes(app.db))
+    if args.action == "check":
+        if not args.stock:
+            raise SystemExit("give --stock SYMBOL")
+        return _gov_read(args, lambda app: G.universe_membership(app.db, args.stock))
+
+    def work(app: Any) -> dict[str, Any]:
+        who = _actor(args, app)
+        if args.action == "register":
+            res = G.register_universe(app.db, Path(args.file), args.name, args.as_of, who)
+            res = {**res, "symbols": res["symbols"][:10]}
+        elif args.action in ("activate", "deactivate"):
+            res = G.set_universe_active(app.db, args.universe_id, args.action == "activate", who, args.note)
+            res = {**res, "symbols": res["symbols"][:10]}
+        else:  # supplement-add / supplement-revoke
+            res = G.supplement(app.db, args.stock or "", args.action == "supplement-add", who, args.reason)
+        _p(json.dumps(res, indent=2, default=str))
+        return {"status": "COMPLETED"}
+
+    return _run(args, "universe", work)
+
+
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--config", help="application config (default config/app/gplm.json or $GPLM_CONFIG)")
@@ -1076,7 +1222,7 @@ def build_parser() -> argparse.ArgumentParser:
     db_.add_argument("--open", action="store_true", help="open a browser")
     st = add("strategies", cmd_strategies, "strategy library")
     st.add_argument("action", choices=["list", "show", "export", "copy", "edit", "activate", "deactivate", "history",
-                                       "import", "validate", "seed"])
+                                       "import", "validate", "seed", "lifecycle", "advance"])
     st.add_argument("target", nargs="?", help="strategy id (prefix ok) or a file for import/validate")
     st.add_argument("--id")
     st.add_argument("--version", type=int)
@@ -1087,6 +1233,10 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--set", action="append", help="for copy/edit: dotted.key=JSON value, repeatable")
     st.add_argument("--file", help="for copy/edit: JSON object of top-level replacements")
     st.add_argument("--name")
+    st.add_argument("--to", help="advance: target lifecycle stage (VALIDATED, BACKTESTED, PAPER_TESTED, APPROVED, RETIRED)")
+    st.add_argument("--evidence", action="append", help="advance: evidence reference (repeatable)")
+    st.add_argument("--by", help="advance: owner identity (or config governance.approver)")
+    st.add_argument("--note", help="advance: note; required reason for RETIRED")
     a = add("audit", cmd_audit, "reconstruct runs and predictions, verify, export, back up")
     a.add_argument("--run")
     a.add_argument("--prediction")
@@ -1128,6 +1278,41 @@ def build_parser() -> argparse.ArgumentParser:
     vf = add("verify", cmd_verify, "correctness-verification suite (synthetic fixtures): PASS/FAIL report with "
                                    "strategy-, indicator- and ML-level evidence")
     vf.add_argument("--out", help="report directory (default <home>/reports/verify/<UTC timestamp>)")
+    ca = add("calendar", cmd_calendar, "M5.9B exchange-calendar registry (owner-supplied local file)")
+    ca.add_argument("action", choices=["validate", "register", "list", "show", "activate", "deactivate"])
+    ca.add_argument("--file")
+    ca.add_argument("--calendar-id")
+    ca.add_argument("--by", help="owner identity (or config governance.approver)")
+    ca.add_argument("--note")
+    mo = add("model", cmd_model, "M5.9B immutable model-artifact registry, approval and fixed-model forecast")
+    mo.add_argument("action", choices=["register", "list", "inspect", "approve", "revoke", "predict"])
+    mo.add_argument("--model-id")
+    mo.add_argument("--file", help="register: an existing fixed DirectionModel .npz")
+    mo.add_argument("--from-model-id", help="register: prefill from a stored rolling model row (frozen copy)")
+    mo.add_argument("--timeframe")
+    mo.add_argument("--horizon", type=int)
+    mo.add_argument("--feature-schema", help="lane feature_config_sha the artifact was fitted on")
+    mo.add_argument("--training-cutoff")
+    mo.add_argument("--cost-policy", help="default: version of the configured costs section")
+    mo.add_argument("--scope-symbols", help="comma list of symbols the artifact may serve")
+    mo.add_argument("--shared", action="store_true", help="shared-model scope (any symbol)")
+    mo.add_argument("--evidence", action="append", help="evidence reference (repeatable)")
+    mo.add_argument("--expires", help="approve: optional expiry (ISO date/time, UTC if no zone)")
+    mo.add_argument("--reason", help="revoke: reason")
+    mo.add_argument("--by", help="owner identity (or config governance.approver)")
+    mo.add_argument("--stock", help="predict: one symbol")
+    mo.add_argument("--as-of", help="predict: requested session YYYY-MM-DD")
+    un = add("universe", cmd_universe, "M5.9B live-alert universe (owner membership file + approved supplements)")
+    un.add_argument("action", choices=["register", "activate", "deactivate", "list", "supplement-add",
+                                       "supplement-revoke", "check"])
+    un.add_argument("--file")
+    un.add_argument("--name")
+    un.add_argument("--as-of", help="register: membership as-of date YYYY-MM-DD")
+    un.add_argument("--universe-id")
+    un.add_argument("--stock")
+    un.add_argument("--reason")
+    un.add_argument("--note")
+    un.add_argument("--by", help="owner identity (or config governance.approver)")
     add("status", cmd_status, "lock, live progress and latest runs")
     sy = add("symbols", cmd_symbols, "list the local universe")
     sy.add_argument("--all", action="store_true")

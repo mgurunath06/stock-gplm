@@ -51,7 +51,7 @@ from .candidates import Rule, search
 from .compute import Backend
 from .contracts import (END_OF_SESSION, LIVE, NEUTRAL, OPPORTUNITY_INCOMPLETE, OUTPUT_CONTRACT, REPLAY, SHADOW,
                         TARGET_HORIZON_MISMATCH, UNAVAILABLE, UP, DOWN, Freshness, brier_up, classify_movement,
-                        direction_correct, live_gate, neutral_band, opportunity_missing)
+                        direction_correct, live_decision, neutral_band, opportunity_missing)
 from .db import AuditDB, sha, utc_now
 from .lanes import Lane
 from .library import Library, scoped, strategy_features, strategy_mask
@@ -119,8 +119,9 @@ class LaneReplay:
                  end_session: str | None = None, max_steps: int | None = None,
                  live_context: Mapping[str, Any] | None = None):
         """``live_context``: ``freshness`` (:class:`~.contracts.Freshness` for this symbol against the
-        requested session), ``calendar`` (registered session calendar or None), ``universe_eligible``.
-        Without it no output can be LIVE."""
+        requested session), ``calendar`` (registered session calendar or None), ``universe`` (live-alert
+        membership from :func:`~.governance.universe_membership`), ``cost_policy_version``. Model outputs of this
+        adaptive engine are never LIVE (M5.9B); only approved library strategies can pass the canonical gate."""
         self.db, self.lane, self.backend, self.progress = db, lane, backend, progress
         self.live_context = dict(live_context or {})
         self.freshness: Freshness | None = self.live_context.get("freshness")
@@ -131,6 +132,7 @@ class LaneReplay:
         self.latest_idx = int(ok[-1]) if len(ok) else -1  # latest eligible completed bar
         self.band = neutral_band(cfg.get("prediction", {}).get("neutral_band"), lane.costs.buy + lane.costs.sell)
         self.live_outputs: list[dict[str, Any]] = []
+        self.last_decision: dict[str, Any] | None = None
         self._targets: dict[tuple[int, int], dict[str, Any]] = {}
         self.cfg = cfg
         self.r = cfg["rolling"]
@@ -436,20 +438,31 @@ class LaneReplay:
 
     def _classify(self, t: int, *, approval: Mapping[str, Any] | None, missing: Sequence[str],
                   blockers: Sequence[str], target: Mapping[str, Any], model_required: bool = True,
-                  strategy_involved: bool = False) -> tuple[str, str, list[str], bool]:
-        """(mode, status, reasons, actionable) under the M5.9A contract."""
+                  strategy_involved: bool = False, strategy: Mapping[str, Any] | None = None
+                  ) -> tuple[str, str, list[str], bool]:
+        """(mode, status, reasons, actionable) through the canonical M5.9B gate (``contracts.live_decision``).
+        Rolling refits are adaptive and therefore never LIVE; the decision is kept in ``self.last_decision``."""
+        self.last_decision = None
         if t != self.latest_idx:
             return "REPLAY", REPLAY, [], not blockers and not missing
         fresh = self.freshness
         if target["status"] != "DERIVED":
             fresh = Freshness(str(target["reason"]), getattr(fresh, "expected_session", None),
                               getattr(fresh, "last_session", None), [str(target["reason"])])
-        check = live_gate(latest_eligible_bar=True, freshness=fresh,
-                          model_approval=approval if model_required else {"model_id": "n/a", "artifact_sha256": "n/a"},
-                          strategy_involved=strategy_involved, strategy_approved=False,
-                          universe_eligible=bool(self.live_context.get("universe_eligible", True)),
-                          missing_fields=missing, gate_blockers=blockers)
-        return ("LIVE" if check.status == LIVE else "SHADOW"), check.status, check.reasons, check.actionable
+        cal = self.calendar
+        tgt = str(target.get("target") or "")[:10] or None
+        covers = bool(cal is not None and hasattr(cal, "covers") and cal.covers(str(self.lane.market.sessions[t]), tgt))
+        # Adaptive refits are never registered fixed artifacts: no model evidence is offered to the gate, so a
+        # rolling output can be at most SHADOW (ADAPTIVE_MODEL_NOT_LIVE + MODEL_NOT_APPROVED) whatever `approval` says.
+        model = None
+        decision = live_decision(
+            latest_eligible_bar=True, freshness=fresh, calendar_id=getattr(cal, "calendar_id", None),
+            calendar_covers=covers, model=model, adaptive_model=model_required, model_required=model_required,
+            strategy_driven=strategy_involved, strategy=strategy, universe=self.live_context.get("universe"),
+            opportunity_missing_fields=missing, cost_policy_version=self.live_context.get("cost_policy_version"),
+            neutral_band_version=self.band.version, gate_blockers=blockers)
+        self.last_decision = decision.to_dict()
+        return ("LIVE" if decision.status == LIVE else "SHADOW"), decision.status, decision.reasons, decision.actionable
 
     def _opportunity(self, t: int, h: int, direction: str, p: float | None, stop: float | None, tgt: float | None,
                      model_version: str | None, strategy_version: str | None = None) -> dict[str, Any]:
@@ -535,7 +548,8 @@ class LaneReplay:
                    "freshness": self.freshness.to_dict() if (self.freshness and t == self.latest_idx) else None,
                    "target_contract": {"decision_bar": lane.label(t), "declared_horizon": h, "derived_target": target,
                                        "derivation": tgt_info["derivation"]},
-                   "neutral_band": self.band.to_dict(), "opportunity": opp}
+                   "neutral_band": self.band.to_dict(), "opportunity": opp,
+                   "live_decision": self.last_decision}
         new = self.db.add_prediction({
             "natural_key": natural, "mode": mode, "replay_id": replay_id, "symbol": lane.symbol,
             "timeframe": lane.timeframe, "lane_key": lane.key, "source_kind": "MODEL", "source_id": kind,
@@ -632,9 +646,15 @@ class LaneReplay:
                 opp = self._opportunity(t, h_sig, "LONG", p, stop, tgt, None, f"{sid}@{ver}")
                 opp["model_version"] = f"{kind}:{sid}@{ver}"
                 missing = opportunity_missing(opp, strategy_involved=True)
+                strategy_ev = None
+                if kind == "STRATEGY" and t == self.latest_idx:
+                    from .governance import strategy_state
+
+                    st = strategy_state(self.db, sid, ver)
+                    strategy_ev = {"strategy_id": sid, "version": ver, "stage": st.get("stage"), "seq": st.get("seq")}
                 mode, status, status_reasons, actionable = self._classify(
                     t, approval=None, missing=missing, blockers=blockers, target=tgt_info, model_required=False,
-                    strategy_involved=True)
+                    strategy_involved=True, strategy=strategy_ev)
                 if t == self.latest_idx:
                     self.live_outputs.append({"source": f"{kind}:{sid}", "status": status, "reasons": status_reasons})
                 natural = f"{replay_id}|{kind}|{sid}@{ver}|h{ex['max_hold_bars']}|{int(m.end_ns[t])}"
@@ -661,7 +681,7 @@ class LaneReplay:
                                 "target_contract": {"decision_bar": lane.label(t), "declared_horizon": h_sig,
                                                     "derived_target": target_label,
                                                     "derivation": tgt_info["derivation"]},
-                                "opportunity": opp}})
+                                "opportunity": opp, "live_decision": self.last_decision}})
                 if ok:
                     pending.append(Pending(sha(natural)[:24], kind, sid, h_sig, int(t), p, "LONG",
                                            actionable, dict(ex), target_label))
