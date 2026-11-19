@@ -294,7 +294,7 @@ def test_schema_v1_database_is_migrated_additively(tmp_path: Path) -> None:
     db.conn.commit()
     db.close()
     db = AuditDB(tmp_path / "a.sqlite", tmp_path / "ev", run_id="t2")
-    assert db.one("SELECT value FROM meta WHERE key='schema_version'")["value"] == "3"  # M5.9B: v3 additive
+    assert db.one("SELECT value FROM meta WHERE key='schema_version'")["value"] == "4"  # M6/M7: v4 additive (M5.9B was v3)
     assert db.one("SELECT COUNT(*) n FROM predictions")["n"] == 1
     assert db.one("SELECT kind FROM events WHERE kind='SCHEMA_MIGRATED'") is not None
     assert db.verify_chain()["ok"]

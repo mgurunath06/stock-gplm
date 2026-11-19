@@ -138,6 +138,53 @@ def weekly_bars(daily: Bars, calendar: Any = None) -> Bars:
     return Bars("1w", out.reset_index(drop=True), src)
 
 
+def monthly_bars(daily: Bars, calendar: Any = None) -> Bars:
+    """Calendar-month bars (M6.1). Final only when a registered calendar proves every session of the month
+    is present (same evidence rule as :func:`weekly_bars`); otherwise ``incomplete`` with ``month_status``
+    ``PARTIAL`` / ``MISSING_EXPECTED_BAR`` / ``CALENDAR_UNKNOWN``. A partial month never appears as a
+    completed bar. ``avail_ns``: close of the month's last expected session (calendar) or, without a
+    calendar, ``max(last observed close, last weekday of the month 15:30 IST)`` for HTF alignment only."""
+    if not len(daily):
+        return Bars("1mo", pd.DataFrame(), "resampled from 1d")
+    f = daily.frame
+    key = f["session"].str.slice(0, 7)
+    g = f.groupby(key, sort=False)
+    out = pd.DataFrame({"session": g["session"].last(), "open": g["open"].first(), "high": g["high"].max(),
+                        "low": g["low"].min(), "close": g["close"].last(), "volume": g["volume"].sum(),
+                        "end_ns": g["end_ns"].last(), "sessions_in_month": g["session"].count()})
+    members = g["session"].apply(list)
+    statuses, avail = [], []
+    for mk, last in zip(out.index, out["session"]):
+        y, m = int(mk[:4]), int(mk[5:7])
+        nxt = date(y + (m == 12), 1 if m == 12 else m + 1, 1)
+        days = [(date(y, m, 1) + timedelta(days=i)).isoformat() for i in range((nxt - date(y, m, 1)).days)]
+        expected = None
+        if calendar is not None and hasattr(calendar, "is_session"):
+            flags = [calendar.is_session(d) for d in days]
+            expected = None if any(fl is None for fl in flags) else [d for d, fl in zip(days, flags) if fl]
+        if expected is None:
+            status = WEEK_CALENDAR_UNKNOWN
+            wk = [d for d in days if date.fromisoformat(d).weekday() < 5]
+            avail.append(max(ist_ns(last, "15:30"), ist_ns(wk[-1], "15:30")))
+        else:
+            seen = set(members[mk])
+            missing = [d for d in expected if d not in seen]
+            if seen - set(expected):
+                status = WEEK_CALENDAR_CONFLICT
+            elif not missing:
+                status = WEEK_COMPLETE
+            elif all(d > max(seen) for d in missing):
+                status = WEEK_PARTIAL
+            else:
+                status = WEEK_MISSING_SESSION
+            avail.append(max(ist_ns(expected[-1] if expected else last, "15:30"), ist_ns(last, "15:30")))
+        statuses.append(status)
+    out["avail_ns"] = np.array(avail, dtype=np.int64)
+    out["month_status"] = statuses
+    out["incomplete"] = out["month_status"] != WEEK_COMPLETE
+    return Bars("1mo", out.reset_index(drop=True), "resampled from 1d (calendar month)")
+
+
 def minute_frame(minute: pd.DataFrame) -> Bars:
     """1-minute bars from the loader's accepted regular-session minutes."""
     if minute.empty:
@@ -194,9 +241,9 @@ def build_all(daily: pd.DataFrame, minute: pd.DataFrame,
     """
     d = daily_bars(daily)
     one = minute_frame(minute)
-    lanes = {"1d": d, "1w": weekly_bars(d, calendar)}
+    lanes = {"1d": d, "1w": weekly_bars(d, calendar), "1mo": monthly_bars(d, calendar)}
     for tf in tuple(timeframes or INTRADAY_MINUTES):
-        if tf in ("1d", "1w"):
+        if tf in ("1d", "1w", "1mo"):
             continue
         lanes[tf] = resample_intraday(one, tf)
     return lanes
@@ -234,6 +281,8 @@ def bars_per_year(timeframe: str) -> float:
         return 248.0
     if timeframe == "1w":
         return 52.0
+    if timeframe == "1mo":
+        return 12.0
     return 248.0 * SESSION_MINUTES / timeframe_minutes(timeframe)
 
 

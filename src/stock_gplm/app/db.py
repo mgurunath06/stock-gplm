@@ -31,12 +31,14 @@ from typing import Any, Iterable, Iterator, Mapping, Sequence, TextIO
 
 from stock_gplm import locking
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # v2 (M5.9A, additive): append-only ``model_approvals``. No existing table or row is changed; a v1
 # database is upgraded in place by creating the new table and recording a SCHEMA_MIGRATED event.
 # v3 (M5.9B, additive): append-only governance registries -- exchange calendars, immutable model
 # artifacts and revocations, strategy lifecycle events and the live-alert universe. New tables only;
 # a v1/v2 database is upgraded in place and no existing row is rewritten.
+# v4 (M6/M7, additive): indicator store, 13-Aug benchmark ledger, model/alert controls, paper ledger,
+# opportunities, alerts, alert events and notification log. New append-only tables only.
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -161,6 +163,79 @@ CREATE TABLE IF NOT EXISTS universe_events (
 CREATE TABLE IF NOT EXISTS universe_supplements (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, action TEXT NOT NULL, actor TEXT NOT NULL,
   reason TEXT NOT NULL, ts_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS indicator_values (
+  symbol TEXT NOT NULL, timeframe TEXT NOT NULL, end_ns INTEGER NOT NULL, bar_label TEXT NOT NULL,
+  feature TEXT NOT NULL, indicator TEXT NOT NULL, params_json TEXT NOT NULL, output TEXT, value REAL,
+  status TEXT NOT NULL, input_revision TEXT NOT NULL, calc_version TEXT NOT NULL, created_utc TEXT NOT NULL,
+  run_id TEXT, PRIMARY KEY(symbol, timeframe, end_ns, feature, input_revision, calc_version));
+CREATE INDEX IF NOT EXISTS indicator_values_bar ON indicator_values(symbol, timeframe, end_ns);
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+  run_key TEXT PRIMARY KEY, benchmark_date TEXT NOT NULL, variant TEXT NOT NULL, config_json TEXT NOT NULL,
+  result_sha256 TEXT NOT NULL, summary_json TEXT NOT NULL, created_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS benchmark_rows (
+  run_key TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, event_ns INTEGER NOT NULL,
+  payload_json TEXT NOT NULL, PRIMARY KEY(run_key, seq));
+CREATE TABLE IF NOT EXISTS model_controls (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, action TEXT NOT NULL, target TEXT,
+  actor TEXT NOT NULL, reason TEXT NOT NULL, ts_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS paper_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, trade_id TEXT NOT NULL, kind TEXT NOT NULL, symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL, source TEXT NOT NULL, bar_label TEXT NOT NULL, bar_ns INTEGER NOT NULL, price REAL,
+  fill_basis TEXT NOT NULL, payload_json TEXT NOT NULL, ts_utc TEXT NOT NULL, run_id TEXT,
+  UNIQUE(trade_id, kind));
+CREATE INDEX IF NOT EXISTS paper_events_source ON paper_events(source, kind);
+CREATE TABLE IF NOT EXISTS opportunities (
+  opportunity_id TEXT PRIMARY KEY, natural_key TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+  horizon TEXT NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL, rank INTEGER, score REAL,
+  decision_label TEXT NOT NULL, decision_ns INTEGER NOT NULL, expires_label TEXT, payload_json TEXT NOT NULL,
+  created_utc TEXT NOT NULL, run_id TEXT);
+CREATE INDEX IF NOT EXISTS opportunities_decision ON opportunities(decision_ns, status);
+CREATE TABLE IF NOT EXISTS alerts (
+  alert_id TEXT PRIMARY KEY, dedupe_key TEXT NOT NULL UNIQUE, opportunity_id TEXT NOT NULL, symbol TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL, created_utc TEXT NOT NULL, run_id TEXT);
+CREATE TABLE IF NOT EXISTS alert_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, alert_id TEXT NOT NULL, state TEXT NOT NULL, bar_label TEXT,
+  bar_ns INTEGER, price REAL, reason TEXT, current INTEGER NOT NULL, payload_json TEXT NOT NULL, ts_utc TEXT NOT NULL,
+  run_id TEXT, UNIQUE(alert_id, state));
+CREATE TABLE IF NOT EXISTS notifications (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, alert_id TEXT NOT NULL, state TEXT NOT NULL, channel TEXT NOT NULL,
+  status TEXT NOT NULL, detail TEXT, ts_utc TEXT NOT NULL, run_id TEXT, UNIQUE(alert_id, state, channel));
+CREATE TRIGGER IF NOT EXISTS indicator_values_no_update BEFORE UPDATE ON indicator_values
+  BEGIN SELECT RAISE(ABORT, 'indicator_values is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS indicator_values_no_delete BEFORE DELETE ON indicator_values
+  BEGIN SELECT RAISE(ABORT, 'indicator_values is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS benchmark_runs_no_update BEFORE UPDATE ON benchmark_runs
+  BEGIN SELECT RAISE(ABORT, 'benchmark_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS benchmark_runs_no_delete BEFORE DELETE ON benchmark_runs
+  BEGIN SELECT RAISE(ABORT, 'benchmark_runs is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS benchmark_rows_no_update BEFORE UPDATE ON benchmark_rows
+  BEGIN SELECT RAISE(ABORT, 'benchmark_rows is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS benchmark_rows_no_delete BEFORE DELETE ON benchmark_rows
+  BEGIN SELECT RAISE(ABORT, 'benchmark_rows is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_controls_no_update BEFORE UPDATE ON model_controls
+  BEGIN SELECT RAISE(ABORT, 'model_controls is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS model_controls_no_delete BEFORE DELETE ON model_controls
+  BEGIN SELECT RAISE(ABORT, 'model_controls is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS paper_events_no_update BEFORE UPDATE ON paper_events
+  BEGIN SELECT RAISE(ABORT, 'paper_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS paper_events_no_delete BEFORE DELETE ON paper_events
+  BEGIN SELECT RAISE(ABORT, 'paper_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS opportunities_no_update BEFORE UPDATE ON opportunities
+  BEGIN SELECT RAISE(ABORT, 'opportunities is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS opportunities_no_delete BEFORE DELETE ON opportunities
+  BEGIN SELECT RAISE(ABORT, 'opportunities is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS alerts_no_update BEFORE UPDATE ON alerts
+  BEGIN SELECT RAISE(ABORT, 'alerts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS alerts_no_delete BEFORE DELETE ON alerts
+  BEGIN SELECT RAISE(ABORT, 'alerts is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS alert_events_no_update BEFORE UPDATE ON alert_events
+  BEGIN SELECT RAISE(ABORT, 'alert_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS alert_events_no_delete BEFORE DELETE ON alert_events
+  BEGIN SELECT RAISE(ABORT, 'alert_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS notifications_no_update BEFORE UPDATE ON notifications
+  BEGIN SELECT RAISE(ABORT, 'notifications is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS notifications_no_delete BEFORE DELETE ON notifications
+  BEGIN SELECT RAISE(ABORT, 'notifications is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS calendar_registrations_no_update BEFORE UPDATE ON calendar_registrations
   BEGIN SELECT RAISE(ABORT, 'calendar_registrations is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS calendar_registrations_no_delete BEFORE DELETE ON calendar_registrations
@@ -349,8 +424,8 @@ class AuditDB:
             cur = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
             if cur is None:
                 self.conn.execute("INSERT INTO meta VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
-            elif int(cur[0]) in (1, 2) and SCHEMA_VERSION == 3:
-                # additive migration: the v2/v3 tables were created above by the idempotent schema script
+            elif int(cur[0]) < SCHEMA_VERSION:
+                # additive migration: the v2/v3/v4 tables were created above by the idempotent schema script
                 self.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
                 self._migrated_from = int(cur[0])
             elif int(cur[0]) != SCHEMA_VERSION:
@@ -362,7 +437,7 @@ class AuditDB:
         if getattr(self, "_migrated_from", None):
             self.event("SCHEMA_MIGRATED", {"from": self._migrated_from, "to": SCHEMA_VERSION,
                                            "change": "added append-only model_approvals (M5.9A) and governance registries "
-                                                     "(M5.9B); no rows rewritten"})
+                                                     "(M5.9B) and the M6/M7 ledgers (v4); no rows rewritten"})
 
     def close(self) -> None:
         self.conn.close()
