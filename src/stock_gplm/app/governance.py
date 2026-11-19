@@ -603,7 +603,8 @@ def strategy_state(db: AuditDB | None, strategy_id: str, version: int | str) -> 
 
 
 def advance_strategy(db: AuditDB, strategy_id: str, version: int, to_stage: str, actor: str,
-                     evidence: Sequence[str] | None = None, note: str | None = None) -> dict[str, Any]:
+                     evidence: Sequence[str] | None = None, note: str | None = None,
+                     paper_min_trades: int | None = None) -> dict[str, Any]:
     """Record one lifecycle transition. Allowed: DRAFT -> VALIDATED -> BACKTESTED -> PAPER_TESTED -> APPROVED,
     and any non-retired stage -> RETIRED (terminal). Evidence references are required for every stage from
     VALIDATED to APPROVED; APPROVED also requires recorded evidence for each preceding stage."""
@@ -622,6 +623,17 @@ def advance_strategy(db: AuditDB, strategy_id: str, version: int, to_stage: str,
         _need(note, "retirement reason (--note)")
     elif _NEXT.get(stage) != to_stage:
         raise GovernanceError(f"illegal transition {stage} -> {to_stage}; next allowed is {_NEXT.get(stage)}")
+    if to_stage == "PAPER_TESTED" and paper_min_trades:
+        # M6.6: forward paper-trading evidence from the paper ledger is required (and recorded).
+        from .paper import paper_gate, summary as paper_summary
+
+        src = f"strategy:{strategy_id}@{int(version)}"
+        lacking_paper = paper_gate(db, src, int(paper_min_trades))
+        if lacking_paper:
+            raise GovernanceError("PAPER_TESTED requires paper evidence: " + "; ".join(lacking_paper))
+        ref = paper_summary(db, src)["evidence_ref"]
+        if ref and ref not in refs:
+            refs.append(ref)
     if to_stage in _EVIDENCE_STAGES and not refs:
         raise GovernanceError(f"{to_stage} requires evidence references")
     if to_stage == "APPROVED":
