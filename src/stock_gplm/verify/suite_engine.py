@@ -288,9 +288,28 @@ TEMPLATES = [(), ("close",), ("14",), ("close", "14"), ("close > open", "14"), (
              ("close", "12", "26", "9"), ("30", "120"), ("15",), ("5",), ("10", "2", "30"), ("close", "close")]
 
 
+# Explicit calls for primitives whose arguments include quoted names or levels (generic templates cannot
+# reach them); each is still subjected to the same truncation + perturbation causality check.
+EXAMPLES = {
+    "dtw_distance": 'dtw_distance(close, 20, "vcp", 4)', "bos": 'bos(3, "up")',
+    "order_block_high": 'order_block_high(3, "up")', "order_block_low": 'order_block_low(3, "down")',
+    "trendline": 'trendline(3, "low")', "trendline_slope": 'trendline_slope(3, "high")',
+    "pitchfork": 'pitchfork(3, "median")', "pattern": 'pattern("double_bottom", 3, 0.05)',
+    "pattern_level": 'pattern_level("box", 3, 0.05)', "harmonic": 'harmonic("bat", 3, 0.15)',
+    "adf_stat": "adf_stat(close, 60)", "adf_critical": "adf_critical(0.05)",
+}
+
+
 def _call_for(name: str, frame: Any, tf: str) -> str | None:
     lo, hi, _ = dsl.FUNCTIONS[name]
     ctx = dsl.Context.from_frame(frame, tf, tf != "1d")
+    if name in EXAMPLES:
+        try:
+            v = np.asarray(dsl.evaluate(dsl.parse(EXAMPLES[name]), ctx), dtype=float)
+            if v.shape == (len(frame),) and np.isfinite(v).any():
+                return EXAMPLES[name]
+        except Exception:
+            pass
     for args in TEMPLATES:
         if not lo <= len(args) <= hi:
             continue

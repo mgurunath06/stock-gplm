@@ -19,8 +19,9 @@ def test_authoritative_catalogue_has_eleven_modules_and_preserves_tracked_gaps()
     assert len(doc["rows"]) == 125 and len(digest) == 64
     missing = [row for row in doc["rows"] if any(m["kind"] == "NOT_IMPLEMENTED"
                                                    for m in row.get("missing", []))]
-    # The original 11 missing rows remain in the completion contract; two are now implemented.
-    assert len([row for row in missing if not row.get("exprs")]) == 8
+    # M6.2 (2026-11-19): every formerly unimplemented row now has expressions; two rows stay PARTIAL with
+    # their remaining gaps named (cup/wedge/flag patterns; Three Drives harmonic).
+    assert len([row for row in missing if not row.get("exprs")]) == 0
     assert len([row for row in missing if row.get("exprs")]) == 2
     assert TIMEFRAMES == ("1m", "5m", "15m", "30m", "60m", "4h", "1d", "1w")
 
