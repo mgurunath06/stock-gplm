@@ -1928,3 +1928,6 @@ def requirements(node: tuple) -> dict[str, bool]:
 
 __all__ = ["DSL_CONTRACT", "Context", "DSLError", "FUNCTIONS", "MissingData", "SERIES", "compile_text", "evaluate",
            "functions_used", "node_size", "params_used", "parse", "requirements", "signal", "substitute", "unparse"]
+
+# M6.2 primitives register themselves on import (structure, statistics, regime, meta-labelling).
+from . import dsl_structure as _dsl_structure  # noqa: E402,F401

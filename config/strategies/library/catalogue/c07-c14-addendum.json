@@ -288,15 +288,29 @@
       "reference_id": "REF-C9-311",
       "name": "Hidden Markov Regime-Switching Selection",
       "category": "9: Regime-Adaptive Strategies",
-      "blocked": {
-        "status": "BLOCKED_METHOD",
-        "requires": [
-          "OHLCV",
-          "MODEL_ARTIFACT"
-        ],
-        "reason": "needs a fitted HMM (training-only) and filtered state probabilities; no HMM fitter is registered",
-        "proposed_data": "none; needs an 'hmm' discovery method producing causal state probabilities"
-      }
+      "exit": "trend",
+      "entry": "hmm_bull_prob(500, 100, 200) > $p0 and close > sma(close, 50)",
+      "params": {
+        "p0": {
+          "default": 0.7,
+          "grid": [
+            0.6,
+            0.7,
+            0.8
+          ]
+        }
+      },
+      "fidelity": "APPROXIMATION",
+      "applicability": {
+        "symbols": "*",
+        "timeframes": [
+          "1d"
+        ]
+      },
+      "assumptions": [
+        "2-state Gaussian HMM on log returns, refit every 100 bars on the trailing 500 (M6.2 hmm_bull_prob, causal forward filter)",
+        "strategy_state_score approximated by close above SMA(50)"
+      ]
     },
     {
       "id": "C9-312",
