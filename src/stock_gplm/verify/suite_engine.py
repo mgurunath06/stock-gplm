@@ -124,13 +124,30 @@ def run(sec: Section, ev: dict[str, Any]) -> None:
     def costs(c: Check) -> None:
         cfg = json.loads((REPO / "config" / "app" / "gplm.json").read_text(encoding="utf-8"))["costs"]
         out = {}
+        sched = cfg.get("schedule")
         for prof, d in cfg.items():
+            if prof == "schedule":
+                continue
             got = m54bt.Costs.from_bps(d)
             want_b = (d["commission_bps"] + d["slippage_bps"] + d["buy_statutory_bps"]) / 1e4
             want_s = (d["commission_bps"] + d["slippage_bps"] + d["sell_statutory_bps"]) / 1e4
             out[prof] = {"buy": got.buy, "sell": got.sell, "round_trip_bps": (got.buy + got.sell) * 1e4,
                          "basis": d.get("basis")}
             c.expect(math.isclose(got.buy, want_b) and math.isclose(got.sell, want_s), f"{prof}: cost mismatch")
+        if sched and sched.get("enabled", True):
+            # M6.0: the compiled per-side rates must equal the itemised contract-note legs at the assumed order value
+            from stock_gplm.app.costs import lane_costs, leg
+
+            v = float(sched["assumed_order_value_inr"])
+            for prof in ("delivery", "intraday"):
+                lc, det = lane_costs(cfg, prof)
+                slip = det["slippage_bps"]
+                want_b = leg(sched, prof, "BUY", v, slip).total / v
+                want_s = leg(sched, prof, "SELL", v, slip).total / v
+                c.expect(math.isclose(lc.buy, want_b, rel_tol=1e-12) and math.isclose(lc.sell, want_s, rel_tol=1e-12),
+                         f"schedule/{prof}: compiled rates differ from the itemised legs")
+                out[f"schedule/{prof}"] = {"buy": lc.buy, "sell": lc.sell, "round_trip_bps": (lc.buy + lc.sell) * 1e4,
+                                           "basis": det.get("liquidity_bucket")}
         trades, _ = _scenario({}, {}, [10])
         c.expect(math.isclose(trades[0]["net_return"], (1 - SELL) / (1 + BUY) - 1),
                  "a flat round trip must lose exactly the two cost legs")

@@ -24,44 +24,40 @@ ADF_CRITICAL = {0.01: -3.43, 0.05: -2.86, 0.10: -2.57}
 
 # --------------------------------------------------------------------------- pivots known at each bar
 
-def _alternating(c: Context, k: int) -> list[tuple[int, int, float, int]]:
-    """Alternating confirmed pivots sorted by confirmation: (pivot idx, confirm idx, price, +1 high / -1 low).
-    Consecutive same-side pivots keep the more extreme one (standard zig-zag reduction)."""
-    key = f"__alt{k}"
-    if key in c.cache:
-        return c.cache[key]
-    piv = [(p, cf, px, 1) for p, cf, px in _swings(c.high, k, True)] + \
-          [(p, cf, px, -1) for p, cf, px in _swings(c.low, k, False)]
-    piv.sort(key=lambda x: (x[1], x[0]))
-    out: list[tuple[int, int, float, int]] = []
-    for q in piv:
-        if out and out[-1][3] == q[3]:
-            if (q[3] > 0 and q[2] >= out[-1][2]) or (q[3] < 0 and q[2] <= out[-1][2]):
-                out[-1] = q
-            continue
-        out.append(q)
-    c.cache[key] = out
-    return out
+def _raw_pivots(c: Context, k: int) -> list[tuple[int, int, float, int]]:
+    """All confirmed pivots sorted by confirmation bar: (pivot idx, confirm idx, price, +1 high / -1 low)."""
+    key = f"__raw{k}"
+    if key not in c.cache:
+        piv = [(p, cf, px, 1) for p, cf, px in _swings(c.high, k, True)] +               [(p, cf, px, -1) for p, cf, px in _swings(c.low, k, False)]
+        piv.sort(key=lambda x: (x[1], x[0], x[3]))
+        c.cache[key] = piv
+    return c.cache[key]
 
 
 def _known(c: Context, k: int) -> list[list[tuple[int, int, float, int]]]:
-    """For each bar t, the list of alternating pivots confirmed by t (shared prefix lists; read-only)."""
+    """For each bar t, the alternating zig-zag of pivots confirmed by t (shared, read-only lists).
+
+    The same-side reduction (keep the more extreme of consecutive highs or lows) is applied
+    incrementally in confirmation order, so a pivot confirmed after t can never alter the sequence at t."""
     key = f"__known{k}"
     if key in c.cache:
         return c.cache[key]
-    alt = _alternating(c, k)
+    raw = _raw_pivots(c, k)
     res: list[list[tuple[int, int, float, int]]] = []
     hist: list[tuple[int, int, float, int]] = []
     j = 0
     for t in range(c.n):
         changed = False
-        while j < len(alt) and alt[j][1] <= t:
-            q = alt[j]
+        while j < len(raw) and raw[j][1] <= t:
+            q = raw[j]
+            j += 1
             if hist and hist[-1][3] == q[3]:
+                more_extreme = q[2] >= hist[-1][2] if q[3] > 0 else q[2] <= hist[-1][2]
+                if not more_extreme:
+                    continue
                 hist = hist[:-1] + [q]
             else:
                 hist = hist + [q]
-            j += 1
             changed = True
         res.append(hist if changed or not res else res[-1])
     c.cache[key] = res
