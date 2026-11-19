@@ -137,6 +137,7 @@
                        "allow_short_intraday":  false
                    },
     "costs":  {
+                  "schedule":  {"enabled": true, "contract": "stock-gplm.cost-schedule.m60.v1", "basis": "ASSUMPTION (M6.0, 2026-11-19): typical NSE cash-equity charges for a discount broker; verify every rate against your own broker contract note (gplm costs note) before relying on results", "assumed_order_value_inr": 100000, "delivery": {"brokerage": {"pct": 0.0, "flat_inr": 0.0, "cap_inr": 20.0}, "stt_buy_pct": 0.1, "stt_sell_pct": 0.1, "exchange_txn_pct": 0.00297, "sebi_fee_pct": 0.0001, "ipft_pct": 0.0001, "stamp_buy_pct": 0.015, "gst_pct": 18.0, "dp_charge_inr_per_sell": 15.93}, "intraday": {"brokerage": {"pct": 0.03, "flat_inr": 0.0, "cap_inr": 20.0}, "stt_buy_pct": 0.0, "stt_sell_pct": 0.025, "exchange_txn_pct": 0.00297, "sebi_fee_pct": 0.0001, "ipft_pct": 0.0001, "stamp_buy_pct": 0.003, "gst_pct": 18.0, "dp_charge_inr_per_sell": 0.0}, "slippage_buckets": [{"name": "very_liquid", "min_traded_value_inr": 1000000000, "bps": 2.0}, {"name": "liquid", "min_traded_value_inr": 100000000, "bps": 5.0}, {"name": "moderate", "min_traded_value_inr": 10000000, "bps": 10.0}, {"name": "illiquid", "min_traded_value_inr": 0, "bps": 25.0}]},
                   "delivery":  {
                                    "commission_bps":  3.0,
                                    "slippage_bps":  5.0,

@@ -22,14 +22,17 @@ import pandas as pd
 
 from ..m54.backtest import Costs, LaneMarket
 from ..m54.indicators import FeatureDef, _atr, build_features
-from ..m54.timeframes import Bars, align, bars_per_year, build_all, session_ids, timeframe_minutes
+from ..m54.timeframes import INTRADAY_MINUTES, Bars, align, bars_per_year, build_all, session_ids, timeframe_minutes
 from ..m54.unified import _blocked, _intraday_extras, _quarantine
+from .costs import lane_costs
 from .db import sha
 from .ingest import SymbolData
 from .settings import REPO
 
 FEATURE_SPACE = REPO / "config" / "app" / "feature-space.json"
-INTRADAY = ("1m", "5m", "15m", "30m", "60m", "4h")
+INTRADAY = ("1m", "3m", "5m", "15m", "30m", "60m", "4h")
+# M6.1: every lane the application builds (3m added; 1mo is always built from daily bars).
+APP_INTRADAY = (*INTRADAY_MINUTES, "3m")
 
 
 def load_space(path: Path | None = None) -> dict[str, Any]:
@@ -42,7 +45,7 @@ def all_bars(data: SymbolData, calendar: Any = None) -> dict[str, Bars]:
     daily = data.daily[["date", "open", "high", "low", "close", "volume"]].copy()
     minute = data.minute[["start_ist", "session", "open", "high", "low", "close", "volume"]].copy() \
         if len(data.minute) else pd.DataFrame()
-    return build_all(daily, minute, calendar=calendar)
+    return build_all(daily, minute, timeframes=APP_INTRADAY, calendar=calendar)
 
 
 def session_features(minute: pd.DataFrame) -> pd.DataFrame:
@@ -95,6 +98,7 @@ class Lane:
     data_fingerprint: str
     costs: Costs
     cost_profile: str
+    cost_detail: dict[str, Any] = field(default_factory=dict)
     source: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype="U16"))  # per bar: DAILY / MINUTE_DERIVED / 1m
 
     @property
@@ -205,9 +209,11 @@ def build_lane(data: SymbolData, timeframe: str, costs_cfg: Mapping[str, Any], s
         src = data.daily.set_index("date")["source"].reindex(f["session"]).fillna("UNKNOWN").to_numpy(dtype="U16")
     else:
         src = np.full(len(f), "1m" if b.intraday else "DAILY", dtype="U16")
+    costs, cost_detail = lane_costs(costs_cfg, profile, f["session"].to_numpy(), f["close"].to_numpy(dtype=float),
+                                    f["volume"].to_numpy(dtype=float))
     return Lane(data.symbol, timeframe, b, market, names, X, defs, htf_names, feat_sha,
                 sha({"fp": data.fingerprint, "tf": timeframe, "frame": frame_hash})[:24],
-                Costs.from_bps(costs_cfg[profile]), profile, src)
+                costs, profile, cost_detail, src)
 
 
 def assert_causal(data: SymbolData, timeframe: str, costs_cfg: Mapping[str, Any], cut_session: str,
