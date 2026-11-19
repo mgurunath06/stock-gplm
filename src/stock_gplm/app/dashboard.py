@@ -295,6 +295,17 @@ class Handler(BaseHTTPRequestHandler):
             "/api/trace": lambda: _with_db(s, lambda db: trace_prediction(db, q.get("id", ""))),
             "/api/run": lambda: _with_db(s, lambda db: trace_run(db, q.get("id", ""))),
             "/api/progress": lambda: json.loads(s.progress_path.read_text(encoding="utf-8")) if s.progress_path.exists() else {},
+            # M7.3 operation views (read-only)
+            "/api/opportunities": lambda: [dict(json.loads(r["payload_json"]), stored_status=r["status"]) for r in _rows(
+                s, "SELECT payload_json, status FROM opportunities ORDER BY decision_ns DESC, COALESCE(rank, 1e9) LIMIT ?",
+                (int(q.get("limit", 200)),))],
+            "/api/alerts": lambda: _with_db(s, lambda db: __import__("stock_gplm.app.alerts", fromlist=["history"])
+                                            .history(db, int(q.get("limit", 100)))),
+            "/api/paper": lambda: _rows(s, "SELECT source, kind, symbol, timeframe, bar_label, price, fill_basis, payload_json "
+                                           "FROM paper_events ORDER BY seq DESC LIMIT 500"),
+            "/api/benchmark": lambda: _rows(s, "SELECT run_key, benchmark_date, variant, result_sha256, summary_json, "
+                                               "created_utc FROM benchmark_runs ORDER BY created_utc DESC"),
+            "/api/controls": lambda: _rows(s, "SELECT * FROM model_controls ORDER BY seq DESC"),
         }
         try:
             if path in routes:

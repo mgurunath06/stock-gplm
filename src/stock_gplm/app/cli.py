@@ -1313,6 +1313,9 @@ def build_parser() -> argparse.ArgumentParser:
     un.add_argument("--reason")
     un.add_argument("--note")
     un.add_argument("--by", help="owner identity (or config governance.approver)")
+    from .cli_v1 import register as _register_v1  # PRD v1 roadmap commands (M5.10 - M7.3)
+
+    _register_v1(add, stocks)
     add("status", cmd_status, "lock, live progress and latest runs")
     sy = add("symbols", cmd_symbols, "list the local universe")
     sy.add_argument("--all", action="store_true")
