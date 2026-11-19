@@ -32,10 +32,13 @@ def export_champions(app: Any, actor: str, *, symbols: Sequence[str] | None = No
     rows = db.q("SELECT c.lane_key, c.horizon, c.model_kind, c.model_id, c.reason, m.path, m.sha256, "
                 "m.feature_config_sha, m.train_end_label FROM champions c LEFT JOIN models m ON m.model_id=c.model_id "
                 "ORDER BY c.lane_key, c.horizon")
-    want = {s.upper() for s in symbols} if symbols else None
+    from .ingest import normalize_symbol
+
+    want = {normalize_symbol(s) for s in symbols} if symbols else None
     out: list[dict[str, Any]] = []
     for r in rows:
-        sym, tf = str(r["lane_key"]).split("|")[0], str(r["lane_key"]).split("|")[-1]
+        parts = str(r["lane_key"]).split("|")  # SYMBOL|TIMEFRAME[|replay id]
+        sym, tf = parts[0], parts[1] if len(parts) > 1 else ""
         base = {"lane_key": r["lane_key"], "horizon": r["horizon"], "model_kind": r["model_kind"],
                 "source_model_id": r["model_id"]}
         if tf != timeframe or (want is not None and sym not in want) or \
