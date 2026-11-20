@@ -200,7 +200,7 @@ def shoonya_closes(sdir: Path) -> dict[str, float]:
     return out
 
 
-def write_part(folder: Path, start: str, end: str, rows: list[tuple]) -> None:
+def write_part(folder: Path, start: str, end: str, rows: list[tuple], source: str = "nse-mcp-adjusted") -> None:
     name = f"{start}_{end}.json.gz"
     recs = []
     for d, o, h, l, c, v in sorted(rows, reverse=True):  # Shoonya order: newest first
@@ -215,7 +215,7 @@ def write_part(folder: Path, start: str, end: str, rows: list[tuple]) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc).isoformat()
     (folder / name).write_bytes(blob)
-    meta = {"source": "nse-mcp-adjusted", "symbol": folder.name, "from": start, "to": end,
+    meta = {"source": source, "symbol": folder.name, "from": start, "to": end,
             "quality_status": "DERIVED_ADJUSTED", "sha256_compressed": digest, "records": len(recs), "built_at_utc": now}
     (folder / name.replace(".json.gz", ".meta.json")).write_text(json.dumps(meta, indent=2))
     (folder / f"{name}.done").write_text(json.dumps({"status": "COMPLETE", "file": name, "bytes": len(blob),
@@ -245,11 +245,18 @@ def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path) -> None:
     (out / "build-report.json").write_text(json.dumps(report, indent=1))
     ok = sum(1 for v in report.values() if v.startswith("ok"))
     log(f"build: {ok}/{len(report)} stocks extended; details {out / 'build-report.json'}")
+    from . import yahoo_history as yh  # Yahoo fills only dates older than NSE: rebuild it so they never overlap
+    _, yraw, yout, _ = yh.paths()
+    ys = [s for s in stocks if (yraw / s).is_dir()]
+    if ys:
+        yh.build(ys, yraw, yout, shoonya_root, out)
 
 
 def write_config(out: Path) -> Path:
+    """Long-daily config: NSE MCP and (if built) Yahoo derived roots; each covers different dates."""
     c = cfg()
-    c["data"]["daily_extra_roots"] = [str(out)]
+    yahoo = out.parent.parent / "yahoo-adjusted" / "NSE"
+    c["data"]["daily_extra_roots"] = [str(out)] + ([str(yahoo)] if yahoo.is_dir() else [])
     c["home"] = str(Path(c["home"]).parent / "state-long")
     p = CFG.with_name("gplm.windows.longdaily.json")
     p.write_text(json.dumps(c, indent=2), encoding="utf-8")

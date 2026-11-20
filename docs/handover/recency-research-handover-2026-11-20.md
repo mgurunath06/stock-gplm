@@ -50,3 +50,15 @@ Older TODOs still open (see previous handover): commit, scorecard summary when r
 
 ## Next-chat prompt
 > Read docs/handover/recency-research-handover-2026-11-20.md and continue.
+
+## Update (later session, same day): recency mode + Yahoo BUILT (owner said "go" and "yes, Yahoo")
+- Commit `3014c74`: everything listed under "Uncommitted changes" above.
+- New: `src/stock_gplm/app/recency.py` (design exactly as "Next" above; details `docs/recency-research.md`),
+  `src/stock_gplm/app/yahoo_history.py` (Yahoo `.NS` daily since 2000, only dates older than NSE MCP/Shoonya),
+  `nse_history.build` now rebuilds Yahoo afterwards (no overlap); longdaily config includes the Yahoo root.
+- Tests: `tests/test_recency.py` (3), `tests/test_yahoo_history.py` (2) pass. Owner programs:
+  `tests/owner/check_recency.py` (10/10 on RELIANCE 1d+15m, incl. no-look-ahead), `tests/owner/check_yahoo_history.py`
+  (8/8 on RELIANCE: from 2000-01-03, join +0.93%).
+- Smoke RELIANCE: 1d and 15m both NOT_USED (picks lose less than "everything active" but still lose after costs).
+- Owner to run (heavy): Yahoo + NSE history for the universe, then recency on 50 stocks all TFs and long 1d/1w
+  (commands in `docs/recency-research.md`). Then: live lab alerts from `assigned.csv` (old TODO 4).
