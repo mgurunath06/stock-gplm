@@ -43,6 +43,11 @@ def main() -> int:
                        env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
     check("offline unit test", r.returncode == 0, (r.stdout.strip().splitlines() or [r.stderr[-200:]])[-1])
 
+    nse_ok = [s for s in stocks if (nse_out / f"{s}-EQ").is_dir()]
+    if not check("precondition: NSE history present (run nse_history first)", nse_ok == stocks,
+                 f"missing {sorted(set(stocks) - set(nse_ok))}"):
+        return 1
+
     tmp = Path(tempfile.mkdtemp(prefix="yahoo-check-"))
     raw, out = tmp / "raw", tmp / "out"
     yh.fetch(stocks, raw, 1.0, False)

@@ -10,7 +10,8 @@ Stock behaviour changes, so this judges each stock × timeframe on recent candle
    normal engine, costs and fills. Each strategy is run with up to `--max-combos` parameter sets, and
    identical trade lists are kept only once.
 2. Walk forward. At each step date it uses only trades that closed before that date, inside the lookback window.
-   Variants are ranked by a recency-weighted, shrunk average net return, and the top 3 (one per strategy) are
+   Variants are ranked by a recency-weighted, shrunk average net return (recent trades weigh more: weight halves every
+   quarter of the lookback, so the oldest trade counts 1/16 of the newest; `--half-life` changes the fraction), and the top 3 (one per strategy) are
    picked. What the picks earn in the next step is compared with every active variant (the control).
 
    | TF | lookback | step | min recent trades |
@@ -50,7 +51,7 @@ Unofficial, free and split-adjusted. It goes back to 2000 and fills only the dat
 Derived Shoonya-format files go to `data/derived/yahoo-adjusted/NSE/<SYM>-EQ/`.
 Rows with missing or impossible prices, or zero volume, are dropped and counted in `build-report.json`.
 The join uses the median close ratio of the first 20 days that overlap Shoonya, and those days must agree within 1%.
-`nse_history build` rebuilds Yahoo's files afterwards, so the two sources never overlap. The `config` step writes
+**Order: NSE first, then Yahoo.** `yahoo_history build` skips any stock without NSE MCP history. `nse_history build` rebuilds Yahoo's files afterwards, so the two sources never overlap. The `config` step writes
 `gplm.windows.longdaily.json` with both extra roots.
 
 ```powershell

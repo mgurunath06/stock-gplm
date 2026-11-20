@@ -142,6 +142,9 @@ def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: 
         if not files:
             report[s] = "not fetched"
             continue
+        if not (nse_out / f"{s}-EQ").is_dir():  # owner rule: NSE MCP history first, Yahoo only fills before it
+            report[s] = "no NSE history: run nse_history first"
+            continue
         rows, rej = parse(json.loads(files[-1].read_text(encoding="utf-8")))
         before = oldest_existing(s, shoonya_root, nse_out)
         keep, note = link(rows, nh.shoonya_closes(shoonya_root / f"{s}-EQ"), before or "")
@@ -179,6 +182,10 @@ def main() -> int:
               for x in (Path(src).read_text(encoding="utf-8").splitlines() if src else a.stocks.split(","))
               if x.strip() and not x.startswith("#")]
     shoonya, raw, out, nse_out = paths()
+    missing = [s for s in stocks if not (nse_out / f"{s}-EQ").is_dir()]
+    if a.step in ("build", "all") and missing:
+        nh.log(f"NSE history missing for {len(missing)} stock(s) (e.g. {missing[:5]}); run nse_history first. "
+               "Those stocks are skipped.")
     if a.step in ("fetch", "all"):
         fetch(stocks, raw, a.pause, a.refresh)
     if a.step in ("build", "all"):

@@ -60,5 +60,9 @@ Older TODOs still open (see previous handover): commit, scorecard summary when r
   `tests/owner/check_recency.py` (10/10 on RELIANCE 1d+15m, incl. no-look-ahead), `tests/owner/check_yahoo_history.py`
   (8/8 on RELIANCE: from 2000-01-03, join +0.93%).
 - Smoke RELIANCE: 1d and 15m both NOT_USED (picks lose less than "everything active" but still lose after costs).
-- Owner to run (heavy): Yahoo + NSE history for the universe, then recency on 50 stocks all TFs and long 1d/1w
+- Owner to run (heavy): NSE history first, then Yahoo, for the universe, then recency on 50 stocks all TFs and long 1d/1w
   (commands in `docs/recency-research.md`). Then: live lab alerts from `assigned.csv` (old TODO 4).
+
+## Update (owner, 2026-11-20): NSE first; recent candles weigh more
+- `yahoo_history build` skips stocks without NSE MCP history; the owner check fails fast on that precondition.
+- Recency weight half-life is now 0.25 × lookback (was 0.5); the oldest trade in the window counts 1/16. `--half-life` overrides it. The policy is part of the lane key, so the next run recomputes every lane.
