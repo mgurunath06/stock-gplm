@@ -249,7 +249,7 @@ def _ctx_for(bars: Any, tf: str, lane: Any, data_bars: Mapping[str, Any], refs: 
 
     feats = {n: lane.X[:, i] for i, n in enumerate(lane.names)}
     return dsl.Context.from_frame(bars.frame, tf, tf in INTRADAY_MINUTES, features=feats, benchmark_loader=ref,
-                                  htf_loader=htf, default_benchmark=benchmark or "")
+                                  htf_loader=htf, default_benchmark=benchmark or dsl.Context.default_benchmark)
 
 
 def _replay(s: StrategyDef, symbol: str, tf: str, data_fp: str) -> bool:
@@ -541,8 +541,8 @@ def _ref_symbols(strategies: Sequence[StrategyDef], benchmark: str | None) -> se
                 elif n[1] == "bench":
                     if len(args) > 1 and args[1][0] == "str":
                         out.add(args[1][1])
-                    elif benchmark:
-                        out.add(benchmark)
+                    else:  # bench() without a symbol: configured benchmark, else the official Nifty 50
+                        out.add(benchmark or dsl.Context.default_benchmark)
             for c in n[1:]:
                 walk(c)
     for s in strategies:
@@ -550,7 +550,7 @@ def _ref_symbols(strategies: Sequence[StrategyDef], benchmark: str | None) -> se
             continue
         walk(s.entry_node)
         walk(s.exit_node)
-    return {normalize_symbol(x if x.upper().endswith("-EQ") else x + "-EQ") for x in out}
+    return {normalize_symbol(dsl.resolve_symbol(x)) for x in out}
 
 
 # --------------------------------------------------------------------------- orchestration

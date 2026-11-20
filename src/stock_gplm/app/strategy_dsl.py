@@ -321,7 +321,7 @@ class Context:
     features: Mapping[str, np.ndarray] = field(default_factory=dict)
     benchmark_loader: Callable[[str, str], "Context | None"] | None = None
     htf_loader: Callable[[str], "Context | None"] | None = None
-    default_benchmark: str = "NIFTYBEES-EQ"
+    default_benchmark: str = "IDX_NIFTY_50-EQ"  # official Nifty 50 (owner: ETF prices must not substitute)
     avail_ns: np.ndarray | None = None
     cache: dict[str, Any] = field(default_factory=dict)
     _bench: dict[str, Any] = field(default_factory=dict)
@@ -775,6 +775,35 @@ def _prev_session(ctx: Context, what: str, k: int = 1) -> np.ndarray:
 def _need_intraday(ctx: Context, fn: str) -> None:
     if not ctx.intraday:
         raise DSLError(f"{fn}() needs an intraday lane")
+
+
+INDEX_ALIASES = {"NIFTY": "Nifty 50", "NIFTY50": "Nifty 50", "BANKNIFTY": "Nifty Bank", "FINNIFTY": "Nifty Financial Services",
+                 "MIDCPNIFTY": "Nifty Midcap Select", "INDIAVIX": "India VIX", "VIX": "India VIX"}
+
+
+def index_symbol(name: str) -> str:
+    """Official NSE index name -> store symbol ("Nifty 50" -> IDX_NIFTY_50-EQ). Same rule as the cloud fetcher
+    deploy/oracle/live/index_history.py (official NSE index history, all ~170 indices)."""
+    import hashlib
+    s = re.sub(r"[^A-Z0-9]+", "_", name.strip().upper()).strip("_")
+    if len(s) > 32:
+        s = s[:23] + "_" + hashlib.sha1(name.strip().upper().encode()).hexdigest()[:8]
+    return f"IDX_{s}-EQ"
+
+
+def resolve_symbol(sym: str) -> str:
+    """Store symbol for a bench()/ref_symbol() argument: an index name ("Nifty Bank", "NIFTY", "India VIX",
+    "IDX_NIFTY_IT") -> its IDX_ symbol; anything else is a stock ("INFY" -> INFY-EQ). Names with a space or an
+    alias are indices; one-word names (NIFTYBEES, INFY) stay stocks."""
+    s = sym.strip()
+    u = s.upper()
+    if u.startswith("IDX_"):
+        return u if u.endswith("-EQ") else u + "-EQ"
+    if u.replace(" ", "") in INDEX_ALIASES:
+        return index_symbol(INDEX_ALIASES[u.replace(" ", "")])
+    if " " in s:
+        return index_symbol(s)
+    return u if u.endswith("-EQ") else u + "-EQ"
 
 
 def _align_bench(ctx: Context, sym: str) -> Context | None:
@@ -1765,7 +1794,7 @@ def _feature(c: Context, name: Any) -> np.ndarray:
     return np.asarray(c.features[name], dtype=float)
 
 
-FUNCTIONS["bench"] = (1, 2, 'evaluate an expression on the benchmark (default NIFTYBEES-EQ proxy), aligned as-of: bench(roc(close, 126)[, "SYMBOL"])')
+FUNCTIONS["bench"] = (1, 2, 'evaluate an expression on the benchmark (default official Nifty 50), aligned as-of: bench(roc(close, 126)[, "Nifty Bank" | "SYMBOL"]); any NSE index by official name')
 FUNCTIONS["ref_symbol"] = (2, 2, 'evaluate an expression on another local symbol: ref_symbol("BANKBEES", close)')
 
 SERIES = {"open", "high", "low", "close", "volume", "hl2", "hlc3", "ohlc4", "range", "body", "upper_wick",
@@ -1895,7 +1924,7 @@ def _eval_lazy(name: str, args: Sequence[tuple], ctx: Context) -> np.ndarray:
         sym, expr = evaluate(args[0], ctx), args[1]
     if not isinstance(sym, str):
         raise DSLError(f"{name}() symbol must be a quoted string")
-    sym = sym.upper() if sym.upper().endswith("-EQ") else sym.upper() + "-EQ"
+    sym = resolve_symbol(sym)
     b = _align_bench(ctx, sym)
     if b is None:
         raise MissingData(f"BENCHMARK:{sym}", f"no local {ctx.timeframe} candles for {sym}")

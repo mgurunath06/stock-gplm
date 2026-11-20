@@ -23,7 +23,7 @@ Read first: memory `trading-rules-2026-11-20`, `pc-capability`, `no-polling-auto
 | 7920a49 | park 195 dead/rare/blocked catalogue strategies |
 | a210338 / b3f96c6 / 3641dd6 | Chartink library `config/strategies/library/owner/chartink.json` (exact names), engine v3 (15:15 / 14:45), up-move v2 (gap-through stops, ATR label, liquidity gate, Chartink state scans as building blocks), DSL `median(x, n)` |
 | 2a1eaf7 | shorts: `upmove --side short` (down-move learner, bearish building blocks), pipeline steps downmove_1d/60m/15m, +20 Chartink scans from tmp/ChartInk2.mp4 (Bear 5 EMA series, GM Bearish 15/3 min Pinbar, ...), Claude entries exit on "Claude - Exit - Full Exit" |
-| 3c4ff15 | `config/strategies/library/owner/gemini-neon.json` (GN-001..007; GN-001 RS breakout BLOCKED until index data) |
+| 3c4ff15 | `config/strategies/library/owner/gemini-neon.json` (GN-StrongestKidInClass, GN-MorningBox, GN-NoCeiling52wHigh, GN-CoiledSpringNR7, GN-InstitutionalFairPriceVWAP, GN-QuietPullback, GN-OvernightSurpriseGapAndGo; GN-StrongestKidInClass BLOCKED until index data) |
 | (this commit) | cloud worker fetches "Nifty 50" (token 26000) first each sweep; this handover |
 
 Library now: 256 strategies (155 catalogue, 85 Chartink, 9 O1, 7 GeminiNeon); long 54 names / short 27 names
@@ -42,7 +42,7 @@ Library now: 256 strategies (155 catalogue, 85 Chartink, 9 O1, 7 GeminiNeon); lo
 
 ## Open points / next steps
 1. **Nifty 50 into the local store:** cloud_link should pull `Nifty 50` folders; then make `bench()` accept it (it appends
-   `-EQ` to symbols today) and unblock GN-001 / C6 index rules (remove their `blocked` blocks). Verify daily row counts.
+   `-EQ` to symbols today) and unblock GN-StrongestKidInClass / C6 index rules (remove their `blocked` blocks). Verify daily row counts.
 2. Read the down-move and up-move `summary.md` files; report triggers qualifying on most stocks + today's firings (long and short).
 3. Live alerts: live-lab skips rules using `htf()` (8+ intraday Chartink rules). Add htf support or intraday-native variants.
 4. Pre-existing bug: `minute_of_session` = bar START in research, bar END in live-lab (`live_lab.py:202`); align.
@@ -53,3 +53,30 @@ Library now: 256 strategies (155 catalogue, 85 Chartink, 9 O1, 7 GeminiNeon); lo
    `test_m57_remediation.py::test_false_gp_advantage_is_gone_and_planted_edge_found`.
 7. Untracked, not committed on purpose: `config/strategies/ChartInk/` screenshots (contain P&L / email), `tmp/*.mp4`,
    `tests/test_research_feed_window.py` (owner decision pending from previous chat).
+
+## Session 2 (2026-11-20 night) - done
+- **All NSE indices (153, broad + sector + thematic + VIX)** fetched BY THE CLOUD from the official NSE MCP:
+  `deploy/oracle/live/index_history.py` (+ `run_index_history.sh`, cron 17:05/20:05 IST, flock). Publishes Shoonya-format
+  triplets to `~/StockGPLMDownloads/data/daily/nse-index/NSE/IDX_<NAME>-EQ/`. NSE serves 2024-10-07 onward (~524 rows).
+  Raw payloads kept in `~/gplm-live/index/raw` (re-parse without refetch). Shoonya "Nifty 50" daily is gappy - not used.
+- PC: `data.index_root` (both windows configs) = `data/raw/nse-index/NSE`; ingestion reads it; live lab CloudSync pulls it
+  (outside the shoonya retention ledger); one-shot pull: `python -m stock_gplm.app.cloud_link indices`.
+- DSL: `bench(expr, "Nifty Bank")` / `ref_symbol("Nifty IT", ...)` take official index names (aliases NIFTY, BANKNIFTY,
+  FINNIFTY, INDIAVIX); default benchmark = official Nifty 50 (`IDX_NIFTY_50-EQ`), no ETF proxy.
+- Up-move learner contract v3: average win/loss shrunk toward target/stop (TATATECH RR 120 artefact gone); "firing on
+  latest candle" now prints the latest candle date. Rerun chain: `state/reports/pipeline/2026-11-20/learners_v3_chain.cmd`
+  (long + short, 1d/15m/60m; writes `learners_v3.done`).
+- GeminiNeon IDs are descriptive (owner): GN-StrongestKidInClass, GN-MorningBox, GN-NoCeiling52wHigh, GN-CoiledSpringNR7,
+  GN-InstitutionalFairPriceVWAP, GN-QuietPullback, GN-OvernightSurpriseGapAndGo.
+- Research feeder (`var/runs/research_feed.py`, untracked) now tracks the library hash per stock
+  (`research_feed_done_lib.txt`): stocks researched on an older library are re-run (library lanes only, no LLM) first.
+  93 stocks were researched on the old/partial library -> re-queued.
+- `python -m stock_gplm.app.strategy_report <research dir> [--stock SYM]` -> STOCK_REPORT*.md (progress per stock + every
+  strategy by name). RELIANCE check: `reliance_library_check.cmd` -> `state-reliance-check/reports/research/reliance-library/STOCK_REPORT-RELIANCE.md`.
+
+## Next
+1. After the cloud backfill: `python -m stock_gplm.app.cloud_link indices`, check row counts, then remove the `blocked` block of
+   GN-StrongestKidInClass (and re-check parked C6 index rules).
+2. Daily (1d) library research on the new library: the feeder runs intraday TFs only; most Chartink scans are 1d.
+3. Pre-existing failures (also on clean HEAD): `tests/test_verify_suite.py::test_writes_auditable_outputs` (correctness FAIL),
+   `tests/test_m5_historical_adapter.py` (Windows temp-dir permission check).

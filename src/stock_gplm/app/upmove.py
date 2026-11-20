@@ -40,7 +40,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-CONTRACT = "stock-gplm.upmove.v2"  # v2 2026-11-20: gap-through stops, 15:15 square-off, 14:45 last entry, ATR label
+CONTRACT = "stock-gplm.upmove.v3"  # v2 2026-11-20: gap-through stops, 15:15 square-off, 14:45 last entry, ATR label; v3: shrunk RR
 
 # name -> (family, DSL condition). Pairs are only formed across different families.
 SINGLES: dict[str, tuple[str, str]] = {
@@ -247,8 +247,9 @@ def summarize(net: np.ndarray, hit: np.ndarray, w: np.ndarray, base_p: float, p:
     sw = float(w.sum())
     conf = (float((w * win).sum()) + p.prior * base_p) / (sw + p.prior) if sw + p.prior else base_p
     ww, wl = w[win], w[~win]
-    avg_win = float((ww * net[win]).sum() / ww.sum()) if ww.sum() else p.target
-    avg_loss = float((wl * -net[~win]).sum() / wl.sum()) if wl.sum() else p.stop
+    # shrunk toward the configured target / stop like Confidence: a few tiny losses cannot make RR explode
+    avg_win = float(((ww * net[win]).sum() + p.prior * p.target) / (ww.sum() + p.prior))
+    avg_loss = float(((wl * -net[~win]).sum() + p.prior * p.stop) / (wl.sum() + p.prior))
     rr = avg_win / max(avg_loss, 1e-6)
     edge = conf * rr - (1 - conf)
     exp_net = float((w * net).sum() / (sw + p.prior)) if sw else 0.0
@@ -307,9 +308,8 @@ def screen_triples(S: np.ndarray, fams: Sequence[str], valid: np.ndarray, net: n
     o = out.cpu().numpy().astype(float)
     cnt, sw, swin, spos, sneg, slw = o.T
     conf = (swin + p.prior * base_p) / (sw + p.prior)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        avg_win = np.where(swin > 0, spos / np.maximum(swin, 1e-12), p.target)
-        avg_loss = np.where(slw > 0, sneg / np.maximum(slw, 1e-12), p.stop)
+    avg_win = (spos + p.prior * p.target) / (swin + p.prior)  # same shrinkage as summarize()
+    avg_loss = (sneg + p.prior * p.stop) / (slw + p.prior)
     edge = conf * (avg_win / np.maximum(avg_loss, 1e-6)) - (1 - conf)
     edge[cnt < p.min_firings] = -np.inf
     best = np.argsort(-edge)[:p.confirm]
@@ -405,6 +405,7 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
         rows.append({"trigger": name, "kind": kind, "firings": int(t.size),
                      "firings_last100": int((last - t < 100).sum()),
                      "last_fired": str(m.sessions[t[-1]]), "fires_now": fire_now,
+                     "latest_candle": str(m.sessions[last]),
                      **{k: round(v, 5) for k, v in s.items()}, "base_rate": round(base_now, 4),
                      "lift": round(s["confidence"] / base_now, 3) if base_now else None,
                      "atr_confidence": round(atr_conf, 4), "atr_base_rate": round(base_atr, 4),
@@ -495,7 +496,7 @@ def report(out: Path, results: Sequence[Mapping[str, Any]], p: Params, tf: str) 
     write("today.csv", today)
     lines += ["", "## Qualified triggers firing on the latest candle", ""]
     for x in [t for t in today if t["qualified"]][:60]:
-        lines.append(f"- {x['symbol']} ({x['last_fired']}): {x['trigger']} - Confidence {x['confidence']:.0%}, "
+        lines.append(f"- {x['symbol']} ({x.get('latest_candle') or x['last_fired']}): {x['trigger']} - Confidence {x['confidence']:.0%}, "
                      f"RR {x['rr']:.2f}, Edge {x['edge']:+.2f}")
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"stocks": len(results), "ok": len(ok), "triggers": len(trig_rows),

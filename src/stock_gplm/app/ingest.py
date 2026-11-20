@@ -263,7 +263,8 @@ class Ingestor:
     def ingest(self, symbol: str, *, use_minute: bool = True) -> SymbolData:
         symbol = normalize_symbol(symbol)
         daily_parts: list[dict[str, Any]] = []
-        for droot in (self.s.daily_root, *getattr(self.s, "daily_extra_roots", ())):
+        idx = getattr(self.s, "index_root", None)
+        for droot in (self.s.daily_root, *getattr(self.s, "daily_extra_roots", ()), *((idx,) if idx else ())):
             ddir = droot / symbol
             if ddir.is_dir():
                 for p in sorted(ddir.iterdir()):

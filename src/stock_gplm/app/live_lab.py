@@ -1205,7 +1205,8 @@ def main() -> None:
     wl = (REPO / "deploy" / "oracle" / "live" / "watchlist.txt").read_text().splitlines()
     syms = [s for ln in wl for s in ln.split("#", 1)[0].split()]
     stream = Stream(f"{lab.remote}/bars.jsonl", lab.on_line)
-    sync = CloudSync(syms, st.daily_root, st.minute_roots, Path(a.out) / "_staging", on_new=lab.on_synced)
+    sync = CloudSync(syms, st.daily_root, st.minute_roots, Path(a.out) / "_staging", on_new=lab.on_synced,
+                     index_root=st.index_root)
     lab.link = {"stream": stream, "sync": sync}
     threading.Thread(target=stream.run, daemon=True).start()
     threading.Thread(target=sync.loop, args=(30,), daemon=True).start()

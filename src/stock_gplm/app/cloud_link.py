@@ -75,28 +75,36 @@ class Stream:
 
 class CloudSync:
     def __init__(self, symbols: Sequence[str], daily_root: Path, minute_roots: Sequence[Path], staging: Path,
-                 on_new: Callable[[list[str]], None] | None = None):
+                 on_new: Callable[[list[str]], None] | None = None, index_root: Path | None = None):
         self.symbols = [s if s.endswith("-EQ") else f"{s}-EQ" for s in symbols if s.upper() not in ("NIFTY", "BANKNIFTY", "INDIAVIX")]
         self.daily_root, self.minute_roots = Path(daily_root), [Path(p) for p in minute_roots]
         self.staging = Path(staging)
+        # official NSE index history the cloud publishes (deploy/oracle/live/index_history.py), all indices
+        self.index_root = Path(index_root) if index_root else None
         self.on_new = on_new
         self.state: dict[str, Any] = {"state": "IDLE", "pulled_total": 0, "conflicts": [], "last_run": None,
                                       "pending": None, "cloud_inventory": None, "error": None}
 
     # remote rel path -> local destination
     def _dest(self, rel: str) -> Path:
-        parts = rel.split("/")  # minute/shoonya/NSE/SYM/file  |  daily/shoonya/NSE/SYM/file
+        parts = rel.split("/")  # minute/shoonya/NSE/SYM/file  |  daily/shoonya/NSE/SYM/file  |  daily/nse-index/...
+        if parts[1] == "nse-index" and self.index_root:
+            return self.index_root / parts[3] / parts[4]
         return (self.minute_roots[0] if parts[0] == "minute" else self.daily_root) / parts[3] / parts[4]
 
     def _have(self, rel: str) -> bool:
         parts = rel.split("/")
+        if parts[1] == "nse-index":
+            return self._dest(rel).exists()
         if parts[0] == "minute":
             return any((r / parts[3] / parts[4]).exists() for r in self.minute_roots)
         return (self.daily_root / parts[3] / parts[4]).exists()
 
     def discover(self) -> list[str]:
         paths = "\n".join(f"{k}/shoonya/NSE/{s}" for s in self.symbols for k in ("minute", "daily"))
-        out = subprocess.run(SSH + [f"cd {REMOTE_DATA} && while IFS= read -r d; do find \"$d\" -maxdepth 1 "
+        idx = ("find daily/nse-index/NSE -mindepth 2 -maxdepth 2 -name '*.json.gz.done' 2>/dev/null; "
+               if self.index_root else "")
+        out = subprocess.run(SSH + [f"cd {REMOTE_DATA} && {idx}while IFS= read -r d; do find \"$d\" -maxdepth 1 "
                                     f"-name '*.json.gz.done' 2>/dev/null; done; cat ~/gplm-live/inventory.json 2>/dev/null; echo; "
                                     f"echo @@PROG@@; cat ~/gplm-live/universe_progress.json 2>/dev/null"],
                              input=paths.encode() + b"\n", capture_output=True, timeout=60)
@@ -127,7 +135,9 @@ class CloudSync:
 
     def pull(self, payloads: list[str]) -> list[str]:
         from .cloud_retention import rpc, stamp
-        rpc("begin", items=[{"rel": rel, "pc_started_at": stamp()} for rel in payloads])
+        ledger = [rel for rel in payloads if "/shoonya/" in rel]  # index files stay on the cloud (no retention)
+        if ledger:
+            rpc("begin", items=[{"rel": rel, "pc_started_at": stamp()} for rel in ledger])
         files = []
         for rel in payloads:
             files += [rel, rel.replace(".json.gz", ".meta.json"), rel + ".done"]
@@ -170,7 +180,8 @@ class CloudSync:
                     tmp.unlink(missing_ok=True)
             if ok:
                 done.append(rel)
-        rpc("end", items=[{"rel": rel, "pc_completed_at": stamp()} for rel in done])
+        if any("/shoonya/" in rel for rel in done):
+            rpc("end", items=[{"rel": rel, "pc_completed_at": stamp()} for rel in done if "/shoonya/" in rel])
         return done
 
     # ---------------------------------------------------------------- watcher: what should exist locally
@@ -283,3 +294,30 @@ class CloudSync:
 def start_threads(objs: Sequence[tuple[Callable[..., None], tuple]]) -> None:
     for fn, args in objs:
         threading.Thread(target=fn, args=args, daemon=True).start()
+
+
+def pull_indices(config: str = "config/app/gplm.windows.json") -> int:
+    """One-shot: pull every official NSE index file the cloud has published into ``data.index_root``.
+
+        python -m stock_gplm.app.cloud_link indices
+    """
+    from .settings import load
+    s = load(Path(config))
+    if not s.index_root:
+        raise SystemExit("config has no data.index_root")
+    sync = CloudSync([], s.daily_root, s.minute_roots, s.index_root / "_staging", index_root=s.index_root)
+    remote = [r for r in sync.discover() if "/nse-index/" in r]
+    missing = [r for r in remote if not sync._have(r)]
+    got: list[str] = []
+    for i in range(0, len(missing), 60):
+        got += sync.pull(missing[i:i + 60])
+    print(f"indices: {len(remote)} files on cloud, {len(missing)} missing, {len(got)} pulled, "
+          f"{len(sync.state['conflicts'])} conflicts -> {s.index_root}")
+    return 0 if len(got) == len(missing) else 1
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:2] == ["indices"]:
+        raise SystemExit(pull_indices(*sys.argv[2:3]))
+    raise SystemExit("usage: python -m stock_gplm.app.cloud_link indices [config]")

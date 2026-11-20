@@ -35,6 +35,7 @@ class Settings:
     minute_roots: tuple[Path, ...]
     real_raw_tree: Path
     daily_extra_roots: tuple[Path, ...] = ()  # e.g. NSE bhavcopy history (bhavcopy_history.py); older dates only
+    index_root: Path | None = None  # official NSE index history (IDX_<NAME>-EQ dirs), pulled from the cloud
 
     @property
     def sha256(self) -> str:
@@ -108,4 +109,5 @@ def load(path: str | Path | None = None, home: str | Path | None = None,
         minute_roots=tuple(_resolve(base, r) for r in d["minute_roots"]),
         real_raw_tree=_resolve(base, d["real_raw_tree"]),
         daily_extra_roots=tuple(_resolve(base, r) for r in d.get("daily_extra_roots", [])),
+        index_root=_resolve(base, d["index_root"]) if d.get("index_root") else None,
     )
