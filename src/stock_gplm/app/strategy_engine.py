@@ -237,7 +237,10 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
             if xmask is not None and xmask[j]:
                 if m.intraday and j >= sess_end:
                     return sess_end, float(m.close[sess_end]), "SESSION_CLOSE"
-                if j + 1 <= time_bar:
+                if j + 1 > last:  # exit signal on the latest candle: the next open is not known yet
+                    if hold_open:
+                        return last, float(m.close[last]), "OPEN_END"
+                elif j + 1 <= time_bar:
                     return j + 1, float(m.open[j + 1]), "SIGNAL_EXIT"
     if m.intraday and time_bar > sess_end:
         return sess_end, float(m.close[sess_end]), "SESSION_CLOSE"
