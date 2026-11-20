@@ -143,6 +143,13 @@ def intraday(ev: Mapping[str, Any], ts: str) -> dict[str, Any]:
                 {"type": ev["type"], "side": ev["side"]}, ts)
 
 
+def login_reminder(reason: str, ts: str) -> dict[str, Any]:
+    """Owner reminder: the Shoonya token will not cover today's session (or has expired)."""
+    return note("SYSTEM", None, "Shoonya login needed", reason,
+                "Open the page on this PC or your own device and use 'Connect Shoonya' (owner only).",
+                "bad", f"login|{ts[:5]}", {"owner_only": True}, ts)
+
+
 def system(old: str, new: str, detail: str, ts: str) -> dict[str, Any]:
     bad = new not in ("LIVE",)
     return note("SYSTEM", None, f"Feed {new}" + (" — alerts paused" if bad else " — alerts resumed"),

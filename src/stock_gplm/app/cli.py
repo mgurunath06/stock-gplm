@@ -452,9 +452,9 @@ def cmd_research(args: argparse.Namespace) -> int:
         if bad:
             raise ValueError(f"unsupported timeframes: {bad}")
         methods = [x.strip() for x in args.methods.split(",") if x.strip() and x.strip() != "none"]
-        bad_m = sorted(set(methods) - {"evolve", "tree", "screen"})
+        bad_m = sorted(set(methods) - {"evolve", "tree", "screen", "llm"})
         if bad_m:
-            raise ValueError(f"unknown ML methods {bad_m}; use evolve,tree,screen")
+            raise ValueError(f"unknown ML methods {bad_m}; use evolve,tree,screen,llm")
         if args.mode == "catalogue":
             methods = []
         out = Path(args.out).resolve() if args.out else app.s.reports_dir / "research" / args.name

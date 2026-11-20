@@ -94,8 +94,11 @@ def explain_setup(st: dict[str, Any], prof: dict[str, Any], changes: list[dict[s
                                   "conservative_win_rate_lower_bound_pct": round(c["p_lo"] * 100, 1)
                                   if c.get("p_lo") is not None else None,
                                   "average_return_per_past_trade_pct": c.get("avg"),
-                                  "sessions_of_history_used": c.get("sessions"),
-                                  "rule": "HIGH needs n>=200 and lower bound >55%; MEDIUM n>=60 and >50%; else LOW"}
+                                  "evidence_basis": c.get("basis"),
+                                  "cautious_net_per_trade_pct": c.get("cautious_pct"),
+                                  "break_even_win_rate_pct": round(c["break_even"] * 100, 1)
+                                  if c.get("break_even") is not None else None,
+                                  "rule": c.get("rule") or "no backtest evidence: live replay only, capped at LOW"}
                        )(st.get("confidence") or {}),
         "behaviour_profile": {k: v.get("label") for k, v in (prof or {}).items()},
         "behaviour_changes": [c["text"] for c in changes][:4], "intraday_now": intra,
@@ -165,6 +168,49 @@ def atr14(h: np.ndarray, lo: np.ndarray, c: np.ndarray) -> float:
     return float(pd.Series(tr).ewm(alpha=1 / 14, adjust=False).mean().iloc[-1]) if len(tr) else float("nan")
 
 
+def load_strats(roots: list[Path], scratch: Path) -> list[dict[str, Any]]:
+    """Enabled long/short library strategies with an intraday timeframe and no benchmark/htf/feature needs."""
+    lib = StrategyLibrary(roots, scratch).load(record=False)
+    strats = []
+    for sid, s in sorted(lib.strategies.items()):
+        if not (s.enabled and not s.blocked and s.direction in ("long", "short") and s.entry_node is not None):
+            continue
+        needs = dsl.requirements(s.entry_node)
+        if needs["benchmark"] or needs["htf"] or needs["features"]:
+            continue
+        node = dsl.substitute(s.entry_node, s.defaults()) if s.defaults() else s.entry_node
+        ex = s.doc.get("exit") or {}
+        strats.append({"id": sid, "name": s.doc.get("name") or sid, "tfs": set(s.timeframes) & set(TFS),
+                       "node": node, "stop_atr": ex.get("stop_atr"), "target_atr": ex.get("target_atr"),
+                       "max_hold": int(ex.get("max_hold_bars") or 12), "apply": s.applies,
+                       "dir": s.direction})
+    return [s for s in strats if s["tfs"]]
+
+
+def build_frame(bars: list[dict[str, Any]], k: int, day: str) -> pd.DataFrame:
+    """1m bars {t,o,h,l,c,v} -> k-minute session buckets; bars of sessions before `day` count as complete."""
+    df = pd.DataFrame(bars)
+    if df.empty:
+        return df
+    ts = pd.to_datetime(df["t"])
+    df["session"] = ts.dt.strftime("%Y-%m-%d")
+    mos = ts.dt.hour * 60 + ts.dt.minute - (9 * 60 + 15)
+    df["bucket"] = mos // k
+    g = df.groupby(["session", "bucket"], sort=True)
+    f = g.agg(open=("o", "first"), high=("h", "max"), low=("l", "min"), close=("c", "last"),
+              volume=("v", "sum"), n=("o", "size"), last_t=("t", "last")).reset_index()
+    f["minute_of_session"] = (f["bucket"] + 1) * k
+    end = pd.to_datetime(f["session"]) + pd.to_timedelta(9 * 60 + 15 + f["minute_of_session"], unit="m")
+    f["end_ns"] = end.dt.tz_localize(IST).astype("int64")
+    f["label"] = (end - pd.Timedelta(minutes=k)).dt.strftime("%Y-%m-%d %H:%M")
+    # a bucket is complete when its last minute is present (or the session is finished)
+    last_min = pd.to_datetime(f["last_t"])
+    close_t = pd.to_datetime(f["session"]) + pd.Timedelta(minutes=15 * 60 + 30)
+    bucket_last = end.where(end <= close_t, close_t) - pd.Timedelta(minutes=1)  # last bucket ends 15:29
+    f["complete"] = (last_min >= bucket_last) | (f["session"] < day)
+    return f
+
+
 class Lab:
     def __init__(self, day: str, out: Path, stale_after: int, roots: list[Path]):
         self.day, self.out, self.stale_after = day, out, stale_after
@@ -194,26 +240,13 @@ class Lab:
         self.done_t: dict[str, str] = {}
         self._saved = 0.0
         self.recompute = threading.Event()
+        self.evidence = None  # evidence.Evidence (backtest rule C), set by main()
         self.link: dict[str, Any] = {}
         self.out.mkdir(parents=True, exist_ok=True)
         self.events_path = out / "events.jsonl"
         if self.events_path.exists():  # a restart rebuilds alerts by replay; keep the old log, never append twice
             self.events_path.rename(out / f"events-{now_ist():%H%M%S}.jsonl")
-        lib = StrategyLibrary(roots, out / "_unused-writable").load(record=False)
-        self.strats = []
-        for sid, s in sorted(lib.strategies.items()):
-            if not (s.enabled and not s.blocked and s.direction in ("long", "short") and s.entry_node is not None):
-                continue
-            needs = dsl.requirements(s.entry_node)
-            if needs["benchmark"] or needs["htf"] or needs["features"]:
-                continue
-            node = dsl.substitute(s.entry_node, s.defaults()) if s.defaults() else s.entry_node
-            ex = s.doc.get("exit") or {}
-            self.strats.append({"id": sid, "name": s.doc.get("name") or sid, "tfs": set(s.timeframes) & set(TFS),
-                                "node": node, "stop_atr": ex.get("stop_atr"), "target_atr": ex.get("target_atr"),
-                                "max_hold": int(ex.get("max_hold_bars") or 12), "apply": s.applies,
-                                "dir": s.direction})
-        self.strats = [s for s in self.strats if s["tfs"]]
+        self.strats = load_strats(roots, out / "_unused-writable")
         # bearish (short) strategies are WARNINGS only in PRD v1 (cash equity, long-only): no paper trade
         self.bear: dict[str, dict[str, int]] = defaultdict(dict)          # symbol -> tf -> firing now
         self.bear_events: list[dict[str, Any]] = []                        # rising edges today
@@ -256,26 +289,7 @@ class Lab:
 
     # ------------------------------------------------------------------ bars
     def frame(self, sym: str, k: int) -> pd.DataFrame:
-        df = pd.DataFrame(self.min1[sym])
-        if df.empty:
-            return df
-        ts = pd.to_datetime(df["t"])
-        df["session"] = ts.dt.strftime("%Y-%m-%d")
-        mos = ts.dt.hour * 60 + ts.dt.minute - (9 * 60 + 15)
-        df["bucket"] = mos // k
-        g = df.groupby(["session", "bucket"], sort=True)
-        f = g.agg(open=("o", "first"), high=("h", "max"), low=("l", "min"), close=("c", "last"),
-                  volume=("v", "sum"), n=("o", "size"), last_t=("t", "last")).reset_index()
-        f["minute_of_session"] = (f["bucket"] + 1) * k
-        end = pd.to_datetime(f["session"]) + pd.to_timedelta(9 * 60 + 15 + f["minute_of_session"], unit="m")
-        f["end_ns"] = end.dt.tz_localize(IST).astype("int64")
-        f["label"] = (end - pd.Timedelta(minutes=k)).dt.strftime("%Y-%m-%d %H:%M")
-        # a bucket is complete when its last minute is present (or the session is finished)
-        last_min = pd.to_datetime(f["last_t"])
-        close_t = pd.to_datetime(f["session"]) + pd.Timedelta(minutes=15 * 60 + 30)
-        bucket_last = end.where(end <= close_t, close_t) - pd.Timedelta(minutes=1)  # last bucket ends 15:29
-        f["complete"] = (last_min >= bucket_last) | (f["session"] < self.day)
-        return f
+        return build_frame(self.min1[sym], k, self.day)
 
     def evaluate(self, sym: str, catch_up: bool, t: str | None = None) -> None:
         if sym in INDICES:
@@ -360,8 +374,18 @@ class Lab:
                     if mm is not None:
                         trades += past_trades(mm, f["open"].to_numpy(float), H, L_, C_, atr_s, sd["stop_atr"],
                                               sd["target_atr"], sd["max_hold"])
-                conf = confidence(trades, conflict=bearish > 0)
-                conf["sessions"] = int(f["session"].nunique())
+                live = confidence(trades, conflict=bearish > 0)
+                live["sessions"] = int(f["session"].nunique())
+                rrs = [sd_["target_atr"] / sd_["stop_atr"] for a_ in added
+                       if (sd_ := (masks.get(a_["strategy"]) or (None, None))[1]) and sd_.get("stop_atr")
+                       and sd_.get("target_atr")]
+                ev = self.evidence.lookup([a_["strategy"] for a_ in added], sym, tf,
+                                          min(rrs) if rrs else None, bearish > 0) if self.evidence else None
+                if ev:
+                    conf = ev | {"live": {k: live.get(k) for k in ("label", "n", "p", "avg", "sessions")}}
+                else:  # no backtest for these strategies x tf: live replay is informational, capped at LOW
+                    conf = live | {"basis": "LIVE_REPLAY_ONLY",
+                                   "label": "NO_EVIDENCE" if live["label"] == "NO_EVIDENCE" else "LOW"}
                 ctx["confidence"] = conf
                 st, n = NT.setup(sym, tf, k, last, added, applicable, close, ctx, catch_up, ts)
                 self.setups[st["key"]] = st
@@ -437,12 +461,14 @@ class Lab:
         n["ts"] = n.get("ts") or now_ist().strftime("%H:%M:%S")
         self.notes.append(n)
         del self.notes[:-400]
-        self.log("NOTE", {k: n[k] for k in ("kind", "symbol", "title", "body", "action", "key")})
+        self.log("NOTE", {k: n[k] for k in ("kind", "symbol", "title", "body", "action", "key")},
+                 publish=not (n.get("data") or {}).get("owner_only"))  # owner-only notes never stream to viewers
 
-    def log(self, kind: str, a: dict[str, Any]) -> None:
+    def log(self, kind: str, a: dict[str, Any], publish: bool = True) -> None:
         with self.events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": now_ist().isoformat(timespec="seconds"), "kind": kind, **a}) + "\n")
-        self.publish({"type": kind, "alert": a})
+        if publish:
+            self.publish({"type": kind, "alert": a})
 
     # ------------------------------------------------------------------ state + push
     def snapshot(self) -> dict[str, Any]:
@@ -460,7 +486,7 @@ class Lab:
                              **self.rs(s, round((last["c"] / pc - 1) * 100, 2) if last and pc else None, mk)})
             return {"contract": CONTRACT, "day": self.day, "now": now_ist().strftime("%H:%M:%S"),
                     "feed": self.feed, "oracle": self.oracle, "login_url": LOGIN_URL,
-                    "link": {k: getattr(v, "state", v) for k, v in self.link.items()}, "heartbeat": self.heartbeat, "strategies": len(self.strats),
+                    "link": {k: getattr(v, "state", v) for k, v in self.link.items()}, "learning": self.learning(), "heartbeat": self.heartbeat, "strategies": len(self.strats),
                     "symbols": syms, "groups": self.groups(), "bear_events": self.bear_events[-300:][::-1],
                     "timeframes": list(TFS), "counts": self.counts(), "notes": self.notes[-150:],
                     "intraday": self.intraday, "intraday_events": self.intraday_events[-150:][::-1],
@@ -741,11 +767,56 @@ class Lab:
         self.local_stale = True  # reload the local store (new sessions) on the next behaviour pass
         self.recompute.set()
 
+    def learning(self) -> dict[str, Any]:
+        """Automatic research progress (var/runs/research_feed.py) + report freshness, for the Data link tab."""
+        runs = REPO / "var" / "runs"
+        out: dict[str, Any] = {}
+        try:
+            done = (runs / "research_feed_done.txt").read_text().split() if (runs / "research_feed_done.txt").exists() else []
+            out["researched"] = len(done)
+            out["last_done"] = done[-3:]
+            lines = (runs / "research-feed.log").read_text(errors="ignore").splitlines()[-3:]                 if (runs / "research-feed.log").exists() else []
+            out["last"] = [ln[11:] for ln in lines]
+            for k, f in (("scorecard", "scorecard/latest/scorecard.md"), ("profiles", "profiles/latest/profile.md")):
+                p = REPO.parent / "state" / "reports" / f
+                out[k] = datetime.fromtimestamp(p.stat().st_mtime, IST).strftime("%d %b %H:%M") if p.exists() else None
+        except OSError as exc:
+            out["error"] = str(exc)[:120]
+        return out
+
     def refresh_oracle(self) -> None:
         try:
             self.oracle = ctl("status") | {"checked": now_ist().strftime("%H:%M:%S")}
         except Exception as exc:  # noqa: BLE001
             self.oracle = {"ok": False, "error": str(exc)[:200]}
+        self.check_login()
+
+    def check_login(self) -> None:
+        """Remind the owner (once per reason per day) when the Shoonya token won't cover today's session:
+        from 08:45 IST on weekdays if it expires before 15:35 (token life ~23 h), and whenever it has expired."""
+        tok, age = self.oracle.get("token"), self.oracle.get("age_hours")
+        if tok is None:
+            return  # status unknown (Oracle unreachable): the feed state already reports that
+        t = now_ist()
+        sent = getattr(self, "_login_sent", set())
+        self._login_sent = sent
+        ts = t.strftime("%H:%M:%S")
+        if tok != "CACHED":
+            key = f"{t:%Y-%m-%d}|expired"
+            if key not in sent:
+                sent.add(key)
+                self.add_note(NT.login_reminder("The Shoonya token has expired or is missing: the live feed and "
+                                                "the cloud download are paused until you reconnect.", ts))
+            return
+        mins = t.hour * 60 + t.minute
+        if t.weekday() < 5 and 8 * 60 + 45 <= mins <= 15 * 60 and age is not None:
+            left_h = 23.0 - float(age)
+            need_h = (15 * 60 + 35 - mins) / 60
+            key = f"{t:%Y-%m-%d}|morning"
+            if left_h < need_h and key not in sent:
+                sent.add(key)
+                self.add_note(NT.login_reminder(f"Token is {age} h old (about {max(left_h, 0):.1f} h left) - it "
+                                                "would expire during today's session.", ts))
 
     # ------------------------------------------------------------------ warm restart (no full-day replay)
     STATE_KEYS = ("alerts", "setups", "notes", "bear_events", "intraday_events", "evaluated_until", "signals", "bear",
@@ -793,6 +864,11 @@ class Lab:
             try:
                 if n % 60 == 0:
                     self.refresh_oracle()
+                    if self.evidence:
+                        try:
+                            self.evidence.refresh()
+                        except Exception as exc:  # evidence is optional; never stop the feed
+                            print(f"evidence refresh failed: {exc}")
                 if n % 15 == 0:
                     try:
                         self.heartbeat = json.loads(ssh(f"cat {self.remote}/heartbeat.json 2>/dev/null || echo '{{}}'"))
@@ -1016,7 +1092,10 @@ def handler_for(lab: Lab):
                 self.end_headers()
                 self.wfile.write(body)
             elif self.path == "/api/state":
-                body = json.dumps(lab.snapshot()).encode()
+                snap = lab.snapshot()
+                if self.role() != "owner":  # owner-only notes (Shoonya login) never reach family viewers
+                    snap["notes"] = [n for n in snap.get("notes", []) if not (n.get("data") or {}).get("owner_only")]
+                body = json.dumps(snap).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1110,12 +1189,19 @@ def main() -> None:
     ap.add_argument("--stale-after", type=int, default=150, help="heartbeat age (s) that marks the feed STALE")
     ap.add_argument("--out", default=str(REPO / "var" / "live-lab"))
     ap.add_argument("--library", action="append", default=[str(REPO / "config" / "strategies" / "library")])
+    ap.add_argument("--evidence-run", action="append", default=None,
+                    help="research-matrix run name(s) used for confidence, first wins per lane "
+                         "(default: evidence-intraday, evidence-daily)")
     a = ap.parse_args()
     lab = Lab(a.date, Path(a.out) / a.date, a.stale_after, [Path(p) for p in a.library])
     print(f"live lab {a.date}: {len(lab.strats)} strategies ({'/'.join(TFS)}; long = paper alerts, short = bearish warnings)")
     from .cloud_link import CloudSync, Stream
     from .settings import load as load_settings
     st = load_settings(REPO / "config" / "app" / "gplm.windows.json")
+    from .evidence import Evidence
+    lab.evidence = Evidence(Path(st.reports_dir) / "research", a.evidence_run or ["evidence-intraday", "evidence-daily"])
+    lab.evidence.refresh()
+    print(f"evidence: {len(lab.evidence.trades)} validation trades from {sorted(lab.evidence.trades['run'].unique())}")
     wl = (REPO / "deploy" / "oracle" / "live" / "watchlist.txt").read_text().splitlines()
     syms = [s for ln in wl for s in ln.split("#", 1)[0].split()]
     stream = Stream(f"{lab.remote}/bars.jsonl", lab.on_line)

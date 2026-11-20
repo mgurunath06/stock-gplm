@@ -38,7 +38,7 @@ INTRADAY_FEATURES = {"VWAP().session_distance", "VWAP().reclaim", "SESSION().min
                      "ORB(minutes=30).breakout_up"}
 SUMMARY_FEATURES = {"INTRADAY().first_hour_return", "INTRADAY().last_hour_return", "INTRADAY().close_vs_vwap",
                     "INTRADAY().realized_vol", "INTRADAY().close_location", "INTRADAY().volume_unknown_share"}
-_KEY = re.compile(r"^(?:(?P<tf>1m|5m|15m|30m|60m|1d|1w):)?(?P<ind>[A-Z_]+)\((?P<params>[^)]*)\)\.(?P<out>[a-z_0-9]+)$")
+_KEY = re.compile(r"^(?:(?P<tf>1m|5m|15m|30m|60m|4h|1d|1w):)?(?P<ind>[A-Z_]+)\((?P<params>[^)]*)\)\.(?P<out>[a-z_0-9]+)$")
 
 
 class StrategyError(ValueError):

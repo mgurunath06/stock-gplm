@@ -69,6 +69,18 @@ _SERIES: list[tuple[str, dict[str, list[int]]]] = [
     ("skew(ret, {n})", {"n": [20, 60]}),
     ("day_of_week", {}),
     ("day_of_month", {}),
+    # level proximity (2026-11-20): how far price/low sits from a moving average, prior-day level or VWAP
+    ("(low - ema(close, {n})) / atr(14)", {"n": [20, 50, 100, 200]}),
+    ("(close - ema(close, {n})) / atr(14)", {"n": [9, 20, 50, 100, 200]}),
+    ("(close - prev_day_high) / atr(14)", {}),
+    ("(low - prev_day_low) / atr(14)", {}),
+    ("(day_open - prev_day_close) / prev_day_close", {}),
+    # intraday-only (rejected on 1d/1w lanes, the search then picks another atom)
+    ("(close - vwap) / atr(14)", {}),
+    ("(close - or_high({n})) / atr(14)", {"n": [5, 15, 30]}),
+    ("(close - session_open) / atr(14)", {}),
+    ("slot_rvol({n})", {"n": [5, 10, 20]}),
+    ("minute_of_session", {}),
 ]
 _EVENTS: list[tuple[str, dict[str, list[int]]]] = [
     ("cross_above(ema(close, {n}), ema(close, {m}))", {"n": [3, 5, 9, 13, 20], "m": [21, 34, 50, 100, 200]}),
@@ -89,6 +101,13 @@ _EVENTS: list[tuple[str, dict[str, list[int]]]] = [
     ("supertrend_dir(10, 3) == 1", {}),
     ("cross_above(close, swing_high(3))", {}),
     ("low < lowest(low, {n})[1] and close > lowest(low, {n})[1]", {"n": [10, 20]}),
+    # level reactions (2026-11-20): touch and hold / reclaim
+    ("low <= ema(close, {n}) and close > ema(close, {n})", {"n": [20, 50, 100, 200]}),
+    ("low <= sma(close, {n}) and close > sma(close, {n})", {"n": [50, 200]}),
+    ("low <= prev_day_low and close > prev_day_low", {}),
+    ("cross_above(close, prev_day_high)", {}),
+    ("low < vwap and close > vwap", {}),
+    ("cross_above(close, or_high({n}))", {"n": [5, 15, 30]}),
 ]
 _QUANTS = [0.05, 0.1, 0.2, 0.3, 0.7, 0.8, 0.9, 0.95]
 _EXITS = [

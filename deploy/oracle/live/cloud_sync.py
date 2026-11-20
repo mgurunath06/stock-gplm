@@ -27,6 +27,7 @@ sys.path.insert(0, str(HOME / "StockGPLMDownloads" / "scripts"))
 sys.path.insert(0, str(HOME / "gplm-live"))
 import gplm_jobs as J  # noqa: E402
 from live_collector import session_api  # noqa: E402
+from transfer_ledger import archived, download_event  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
 LIVE = HOME / "gplm-live"
@@ -78,12 +79,13 @@ def sessions_back(n, include_today):
 def daily_last(sym):
     p = DAY_ROOT / sym
     ends = [m.group(2) for f in (os.listdir(p) if p.is_dir() else []) if (m := DAILY_RE.match(f))]
+    ends.extend(x.split("_")[-1] for x in archived("daily", sym))
     return max(ends) if ends else None
 
 
 def minute_have(sym):
     p = MIN_ROOT / sym
-    return {m.group(1) for f in (os.listdir(p) if p.is_dir() else []) if (m := MIN_RE.match(f))}
+    return {m.group(1) for f in (os.listdir(p) if p.is_dir() else []) if (m := MIN_RE.match(f))} | archived("minute", sym)
 
 
 BACKOFF = [60, 300, 1800, 7200]  # seconds between retries of one (symbol, session)
@@ -126,7 +128,7 @@ class Retry:
         write_atomic(STATE, self.s)
 
     def health(self, sym):
-        rs = {k: v for k, v in self.s.items() if k.startswith(sym + "|")}
+        rs = {k: v for k, v in self.s.items() if k.startswith(sym + "|") and v.get("status") != "UNAVAILABLE"}
         gave = [k for k, v in rs.items() if v["status"] == "GAVE_UP"]
         if gave:
             errs = sorted({v["last_error"] for k, v in rs.items() if v["status"] == "GAVE_UP"})
@@ -165,12 +167,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--watchlist", default=str(LIVE / "watchlist.txt"))
     ap.add_argument("--minute-sessions", type=int, default=60, help="keep this many recent sessions complete")
-    ap.add_argument("--pause", type=float, default=1.5, help="seconds between API calls (shared with live)")
+    ap.add_argument("--pause", type=float, default=1.0, help="min seconds between API calls in market hours")
+    ap.add_argument("--idle-pause", type=float, default=0.25, help="min seconds between API calls outside market hours")
     ap.add_argument("--every", type=int, default=600, help="seconds between passes")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--order", choices=["date", "symbol"], default="date",
+                    help="minute gaps: date = newest day across all stocks; symbol = complete one stock, then the next")
+    ap.add_argument("--universe", default=None,
+                    help="file of extra symbols (bare, comma/space separated) filled AFTER the watchlist, in file order")
+    ap.add_argument("--floor", default=None, help="seed: earliest session the provider still serves (YYYY-MM-DD)")
     a = ap.parse_args()
     syms = watchlist(a.watchlist)
+    extra = []
+    if a.universe and Path(a.universe).exists():
+        raw = Path(a.universe).read_text().replace(",", " ").split()
+        extra = [x.upper() + "-EQ" for x in raw if x.upper() + "-EQ" not in syms]
+        extra = list(dict.fromkeys(extra))
     retry = Retry()
+    if a.floor and a.floor > retry.s.get("_floor", ""):
+        retry.s["_floor"] = a.floor
+        retry.save()
     while True:
         notes = {}
         for rq in take_requests():  # PC: "reset SYM" clears its backoff so it is tried again now
@@ -188,24 +204,54 @@ def main():
                 return
             time.sleep(120)
             continue
-        want = sessions_back(a.minute_sessions, include_today=True)
+        want = [d for d in sessions_back(a.minute_sessions, include_today=True)
+                if str(d) >= retry.s.get("_floor", "")]
         # daily first (one call per symbol), then minute gaps newest-first so recent days close quickly
         yday = now().date() - timedelta(days=1)
         ok_n = fail_n = 0
         failed_now = []
+        pace = {"p": a.pause}
+        streak: list = []
+        unavail: dict = {}
+
+        def base_pause():
+            t = now()
+            busy = t.weekday() < 5 and 9 * 60 <= t.hour * 60 + t.minute <= 15 * 60 + 45  # live collector shares API
+            return a.pause if busy else a.idle_pause
 
         def attempt(key, fn):
+            """Adaptive pace: speed up on success, double the pause on errors (throttling/network)."""
             nonlocal ok_n, fail_n
             if not retry.due(key):
-                return
+                return "skip"
+            err = None
+            download_event(key, "CLOUD_DOWNLOAD_STARTED")
             try:
                 fn()
+                download_event(key, "CLOUD_DOWNLOAD_COMPLETED")
                 retry.ok(key)
                 ok_n += 1
+                streak.clear()
+                pace["p"] = max(base_pause(), pace["p"] * 0.9)
             except Exception as exc:  # noqa: BLE001
-                failed_now.append((key, f"{type(exc).__name__}: {str(exc)[:120]}"))
-                fail_n += 1
-            time.sleep(a.pause)
+                err = f"{type(exc).__name__}: {str(exc)[:120]}"
+                download_event(key, "CLOUD_DOWNLOAD_FAILED", {"error": err})
+                if "MINUTE_UNAVAILABLE" not in err:
+                    fail_n += 1
+                    pace["p"] = min(10.0, max(pace["p"], base_pause()) * 2)
+                    if a.order == "symbol":  # remember now (a pass can last days); outage streaks are undone
+                        retry.fail(key, err)
+                        streak.append(key)
+                        if len(streak) >= 10:
+                            log(f"OUTAGE suspected ({err}); pausing 5 min, failures not charged")
+                            for k in streak:
+                                retry.s.pop(k, None)
+                            streak.clear()
+                            time.sleep(300)
+                    else:
+                        failed_now.append((key, err))
+            time.sleep(pace["p"])
+            return err
 
         for s in syms:
             last = daily_last(s)
@@ -214,16 +260,81 @@ def main():
                 if any(J.session(start + timedelta(days=k))[0] for k in range((yday - start).days + 1)):
                     attempt(f"{s}|daily|{start}", lambda s=s, start=start: J.eod(api, s, start, yday))
         write_atomic(LIVE / "inventory.json", inventory(syms, want, notes, retry) | {"state": "FILLING"})
-        for d in want:
-            for s in syms:
-                if str(d) in minute_have(s):
+        def fill(s, days):
+            have = minute_have(s)
+            oldest = sorted(want)[:20]
+            failures_this_pass = 0
+            for d in sorted(days):  # oldest first: those days are the next to leave the provider window
+                if str(d) in have or str(d) < retry.s.get("_floor", ""):
                     continue
                 if s not in tok:
                     retry.s[f"{s}|master"] = {"status": "GAVE_UP", "attempts": MAX_ATTEMPTS,
                                               "last_error": "symbol not in current Shoonya master (renamed/delisted?)"}
+                    return
+                key = f"{s}|minute|{d}"
+                err = attempt(key, lambda s=s, d=d: J.minute(api, d, s, tok[s], allow_today=True))
+                if err and err != "skip" and "MINUTE_UNAVAILABLE" in err:
+                    if d in oldest:  # old day: provider history window; 3 stocks agreeing moves the floor
+                        retry.s[key] = {"status": "UNAVAILABLE", "attempts": 1, "last_error": err[:160]}
+                        cnt = unavail.setdefault(str(d), set())
+                        cnt.add(s)
+                        if len(cnt) >= 3 and str(d) >= retry.s.get("_floor", ""):
+                            retry.s["_floor"] = str(d + timedelta(days=1))
+                            log(f"provider window floor -> {retry.s['_floor']}")
+                    else:  # recent day without data: suspension/listing gap or transient; normal retries
+                        retry.fail(key, err)
+                if err and err != "skip":
+                    failures_this_pass += 1
+                    if failures_this_pass >= 5:
+                        notes[s] = "deferred after 5 failed sessions this pass"
+                        break
+
+        def sweep(limit=10):
+            """Retry a bounded number of earlier failures without starving new symbols."""
+            attempted = 0
+            for key, r in list(retry.s.items()):
+                if key.startswith("_") or "|minute|" not in key or r.get("status") != "RETRYING" or not retry.due(key):
                     continue
-                attempt(f"{s}|minute|{d}", lambda s=s, d=d: J.minute(api, d, s, tok[s], allow_today=True))
-            write_atomic(LIVE / "inventory.json", inventory(syms, want, notes, retry) | {"state": "FILLING"})
+                s_, _, d_ = key.split("|")
+                if s_ in tok and d_ >= retry.s.get("_floor", ""):
+                    attempt(key, lambda s_=s_, d_=d_: J.minute(api, date.fromisoformat(d_), s_, tok[s_],
+                                                                allow_today=True))
+                    attempted += 1
+                    if attempted >= limit:
+                        break
+
+        try:
+            previous_rows = json.loads((LIVE / "universe_progress.json").read_text()).get("have", {})
+        except (OSError, ValueError):
+            previous_rows = {}
+        # Resume the last snapshot and refresh each symbol when it is processed.
+        # A full pre-scan delayed every restart without improving transfer safety.
+        progress_rows = {x: int(previous_rows.get(x, 0)) for x in syms + extra}
+        def progress(current):
+            # Recheck only the symbol just processed. Rewalking the full universe
+            # after every symbol made progress O(symbols squared).
+            progress_rows[current] = sum(1 for d in want if str(d) in minute_have(current))
+            write_atomic(LIVE / "universe_progress.json",
+                         {"generated": now().isoformat(timespec="seconds"), "expected": len(want),
+                          "window": [str(want[-1]), str(want[0])] if want else None, "current": current,
+                          "complete": sorted(k for k, v in progress_rows.items() if v >= len(want)),
+                          "have": progress_rows})
+
+        if a.order == "symbol":  # one stock fully, then the next: research can start per finished stock
+            for index, s in enumerate(syms + extra):
+                fill(s, want)
+                if index and index % 100 == 0:
+                    sweep(10)
+                retry.save()
+                if s in syms:
+                    write_atomic(LIVE / "inventory.json", inventory(syms, want, notes, retry) | {"state": "FILLING"})
+                progress(s)
+            sweep(10)
+        else:
+            for d in want:
+                for s in syms:
+                    fill(s, [d])
+                write_atomic(LIVE / "inventory.json", inventory(syms, want, notes, retry) | {"state": "FILLING"})
         # A pass where everything failed is an outage (network/auth/provider), not a per-stock problem:
         # those failures do not consume the stocks' retry budget.
         outage = fail_n > 0 and ok_n == 0 and fail_n >= 5

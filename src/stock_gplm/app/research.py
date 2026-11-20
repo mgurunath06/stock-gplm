@@ -376,10 +376,14 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
             n_new = 0
             for g in out["selected"]:
                 doc = genome_doc(g, data.symbol, tf, prov)
-                sdef = _rebuild({"doc": doc, "path": "(new discovery)", "root": ""})
-                if sdef.fingerprint() in known:
+                try:  # one rule that cannot be built/evaluated is skipped, never the whole lane
+                    sdef = _rebuild({"doc": doc, "path": "(new discovery)", "root": ""})
+                    if sdef.fingerprint() in known:
+                        continue
+                    res = evaluate_strategy(sdef, li, base_cache, regimes)
+                except Exception as exc:  # noqa: BLE001
+                    ml_status.append(f"evolve-skip:{type(exc).__name__}")
                     continue
-                res = evaluate_strategy(sdef, li, base_cache, regimes)
                 row = _row_from_result(base, sdef, res)
                 row.update(source="ML", method="evolve", device="cpu (NumPy GP over the DSL)", replay=0)
                 if res.get("status") == "TESTED":
@@ -390,6 +394,49 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
                 discovered.append({"doc": doc, "row_index": len(rows) - 1})
                 n_new += 1
             ml_status.append(f"evolve:COMPLETED({out['evaluated']} genomes, {n_new} selected)")
+    if lane is not None and "llm" in job["methods"]:
+        segs = _dev_segments(len(lane.market))
+        if segs is None:
+            ml_status.append("llm:BLOCKED_INSUFFICIENT_HISTORY")
+        else:
+            from .strategy_llm import llm_doc, propose
+            known = {s.fingerprint() for s in strategies}
+            ev = Evolver(li, segs, job["seed"], job["budget"], allow_short=False)
+            try:
+                out = propose(ev, data.symbol, tf, job["budget"])
+            except Exception as exc:  # model down etc.: the lane's other results still count
+                out = None
+                ml_status.append(f"llm:FAILED({str(exc)[:80]})")
+            if out is not None:
+                if audit_cfg.get("ml_log", True):
+                    ml_log.extend({"method": "llm", **x} for x in out.get("log", []))
+                prov = {"lane": {"symbol": data.symbol, "timeframe": tf, "data_fingerprint": lane.data_fingerprint},
+                        "seed": job["seed"], "budget": job["budget"], "calls": out["calls"],
+                        "evaluated": out["evaluated"], "facts": out["facts"],
+                        "discovery_segment": [lane.market.label(segs[0]), lane.market.label(segs[1] - 1)],
+                        "run_id": job["run_id"], "discovered_utc": utc_now(), "code_sha": job["code_sha"]}
+                n_new = 0
+                for g in out["selected"]:
+                    doc = llm_doc(genome_doc(g, data.symbol, tf, prov), out["why"].get(g.key(), ""), out["model"])
+                    try:  # one unusable proposal is skipped, never the whole lane
+                        sdef = _rebuild({"doc": doc, "path": "(new discovery)", "root": ""})
+                        if sdef.fingerprint() in known:
+                            continue
+                        res = evaluate_strategy(sdef, li, base_cache, regimes)
+                    except Exception as exc:  # noqa: BLE001
+                        ml_status.append(f"llm-skip:{type(exc).__name__}")
+                        continue
+                    row = _row_from_result(base, sdef, res)
+                    row.update(source="ML", method="llm", device=f"local LLM {out['model']} + NumPy backtest",
+                               replay=0)
+                    if res.get("status") == "TESTED":
+                        tested.append((row, sdef, res))
+                        for seg_name, trs in (res.get("trades") or {}).items():
+                            keep_trades(sdef, res, seg_name, trs)
+                    rows.append(row)
+                    discovered.append({"doc": doc, "row_index": len(rows) - 1})
+                    n_new += 1
+                ml_status.append(f"llm:COMPLETED({out['calls']} calls, {out['evaluated']} rules, {n_new} selected)")
     # Lane-wide multiple testing over every fresh validation test (replays excluded: their read was counted
     # in the run that discovered them).
     fam = [t for t in tested if not t[0].get("replay")]
@@ -608,7 +655,8 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
                 finish(fut.result(), job)
             except Exception as exc:  # one bad lane never stops the run
                 app.db.event("RESEARCH_LANE_FAILED", {"symbol": job["data"].symbol, "tf": job["timeframe"],
-                                                      "error": f"{type(exc).__name__}: {exc}"}, level="ERROR")
+                                                      "error": f"{type(exc).__name__}: {exc}",
+                                                      "trace": __import__("traceback").format_exc()[-1500:]}, level="ERROR")
                 lanes_status["FAILED"] = lanes_status.get("FAILED", 0) + 1
                 app.progress.advance()
 
@@ -651,7 +699,8 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
                         finish(compute_lane(job), job)
                     except Exception as exc:
                         app.db.event("RESEARCH_LANE_FAILED", {"symbol": symbol, "tf": tf,
-                                                              "error": f"{type(exc).__name__}: {exc}"}, level="ERROR")
+                                                              "error": f"{type(exc).__name__}: {exc}",
+                                                      "trace": __import__("traceback").format_exc()[-1500:]}, level="ERROR")
                         lanes_status["FAILED"] = lanes_status.get("FAILED", 0) + 1
                         app.progress.advance()
                 else:

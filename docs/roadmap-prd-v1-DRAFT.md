@@ -61,6 +61,13 @@ produces can be LIVE until the gate is set.
 
 M8.0 can be decided at any time. Until then, Phase C runs on end-of-day and local minute data.
 
+**M8.1 prototype + research automation (2026-11-20, PAPER/research only):** Shoonya (still unapproved) Oracle
+collector downloads the full NSE universe stock by stock (watchdog, adaptive pace, provider-window floor); PC pulls
+verified copies (`universe_sync`) and Codex's cloud retention deletes Oracle copies only after SHA-verified receipt.
+A PC research feeder runs intraday deep + local-LLM discovery per completed stock, then setup replay, stock profiles
+and the per stock × TF scorecard. Handover: `docs/handover/research-automation-handover-2026-11-20.md`; tests
+`docs/m81-test-budget.md`. M8.0 (licence) is still open, so nothing here is LIVE.
+
 ## Deferred (post-V1 or per CLAUDE.md)
 
 Point-in-time index membership and survivorship-safe universes, BSE/ETF, F&O and options, index-relative

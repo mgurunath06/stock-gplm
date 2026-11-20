@@ -97,9 +97,23 @@ class CloudSync:
     def discover(self) -> list[str]:
         paths = "\n".join(f"{k}/shoonya/NSE/{s}" for s in self.symbols for k in ("minute", "daily"))
         out = subprocess.run(SSH + [f"cd {REMOTE_DATA} && while IFS= read -r d; do find \"$d\" -maxdepth 1 "
-                                    f"-name '*.json.gz.done' 2>/dev/null; done; cat ~/gplm-live/inventory.json 2>/dev/null"],
+                                    f"-name '*.json.gz.done' 2>/dev/null; done; cat ~/gplm-live/inventory.json 2>/dev/null; echo; "
+                                    f"echo @@PROG@@; cat ~/gplm-live/universe_progress.json 2>/dev/null"],
                              input=paths.encode() + b"\n", capture_output=True, timeout=60)
-        lines = out.stdout.decode().splitlines()
+        text, _, prog = out.stdout.decode().partition("@@PROG@@")
+        lines = text.splitlines()
+        try:  # Oracle stock-by-stock progress: provider window floor + universe completion
+            p = json.loads(prog.strip() or "{}")
+            if p:
+                have = p.get("have") or {}
+                self.state["universe"] = {"window": p.get("window"), "expected": p.get("expected"),
+                                          "complete": len(p.get("complete") or []), "total": len(have),
+                                          "started": sum(1 for v in have.values() if v), "current": p.get("current"),
+                                          "generated": p.get("generated")}
+                if p.get("window"):
+                    self.floor = p["window"][0]
+        except ValueError:
+            pass
         inv = next((ln for ln in lines if ln.startswith("{")), None)
         if inv:
             try:
@@ -112,6 +126,8 @@ class CloudSync:
         return [ln[:-5] for ln in lines if ln.endswith(".json.gz.done")]  # payload rel paths
 
     def pull(self, payloads: list[str]) -> list[str]:
+        from .cloud_retention import rpc, stamp
+        rpc("begin", items=[{"rel": rel, "pc_started_at": stamp()} for rel in payloads])
         files = []
         for rel in payloads:
             files += [rel, rel.replace(".json.gz", ".meta.json"), rel + ".done"]
@@ -154,10 +170,12 @@ class CloudSync:
                     tmp.unlink(missing_ok=True)
             if ok:
                 done.append(rel)
+        rpc("end", items=[{"rel": rel, "pc_completed_at": stamp()} for rel in done])
         return done
 
     # ---------------------------------------------------------------- watcher: what should exist locally
-    def expected_sessions(self, n: int = 60) -> list[str]:
+    def expected_sessions(self, n: int = 400) -> list[str]:
+        """Every trading session from the provider window floor (oldest day Shoonya still serves) to today."""
         if not getattr(self, "calendar", None):
             raw = subprocess.run(SSH + ["cat StockGPLMDownloads/calendar/nse_2026.json"], capture_output=True,
                                  timeout=30).stdout
@@ -166,7 +184,8 @@ class CloudSync:
         closed = set(self.calendar.get("closed_dates", []))
         t = datetime.now(IST)
         d, out = t.date(), []
-        while len(out) < n and d.year == 2026:
+        floor = getattr(self, "floor", None) or "2026-01-19"
+        while len(out) < n and d.year == 2026 and d.isoformat() >= floor:
             if d.weekday() < 5 and d.isoformat() not in closed and (d < t.date() or t.strftime("%H:%M") >= "16:45"):
                 out.append(d.isoformat())
             d -= timedelta(days=1)

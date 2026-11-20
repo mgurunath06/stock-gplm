@@ -1,5 +1,13 @@
 # Stock GPLM project rules
 
+- Owner clarification (2026-11-20): Oracle is staging for the application candle
+  workflow. After the matching payload, metadata and publication marker are
+  downloaded to PC and verified by byte count and SHA-256, their cloud copies
+  may be deleted. Retain durable cloud receipts and timestamps for cloud download
+  start/end, PC transfer start/verification and cloud deletion. Missing historical
+  timestamps remain UNKNOWN. Receipts prevent re-downloading retired files.
+  This narrow exception does not authorize modifying PC raw files or M5.2 data.
+
 - Scope: local M1 ingestion and M2/M2.1 historical/reference-data validation, plus
   M3.5 research-only daily model training (authorized by the user on 2026-11-02).
   No orders, live signals, remote synchronization, Oracle changes, or credential

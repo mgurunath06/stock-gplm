@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>GPLM Live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -96,6 +96,49 @@ tbody tr.new td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
 #toast{position:fixed;bottom:34px;left:50%;transform:translateX(-50%);background:var(--strong);color:var(--bg);padding:6px 14px;border-radius:3px;display:none;z-index:30;font-size:12px}
 @media (max-width:1200px){#tab-ws{grid-template-columns:260px minmax(0,1fr)}#tab-ws>.pane:last-child{grid-column:1/-1}body{overflow:auto}main.on{min-height:900px}}
 @media (max-width:760px){#tab-ws{grid-template-columns:1fr}.mkt .ix svg{display:none}#q{width:120px}}
+/* ---- phone (2026-11-20): one workspace panel at a time, compact tables, touch targets ---- */
+.mnav{display:none}
+@media (max-width:760px){
+  body{overflow:hidden;font-size:14px}
+  .top{flex-wrap:wrap;height:auto}.brand{padding:0 10px;height:44px;border-right:0}
+  .tools{margin-left:auto;height:44px;padding:0 6px;gap:2px}#q{width:110px}
+  .mkt{order:3;flex-basis:100%;height:42px;border-top:1px solid var(--line)}.ix{padding:0 10px;gap:6px}.reg{padding:0 10px}
+  nav{overflow-x:auto;scrollbar-width:none;padding:0;height:40px}nav button{flex:none;padding:0 12px}
+  button,select{min-height:36px}.seg button{min-height:32px;padding:2px 10px}
+  input,select{font-size:16px}input[type=checkbox]{width:18px;height:18px;vertical-align:-4px}
+  main{padding:4px;gap:4px}main.on{min-height:0}
+  #tab-ws.on{display:flex;flex-direction:column}
+  #tab-ws>.p-wl,#tab-ws>.p-sig,#tab-ws>.p-chart{display:none;flex:1;min-height:0}
+  #tab-ws[data-p=wl]>.p-wl,#tab-ws[data-p=sig]>.p-sig,#tab-ws[data-p=chart]>.p-chart{display:flex}
+  .mnav{display:flex;gap:0;border:1px solid var(--line2);border-radius:4px;overflow:hidden;flex:none}
+  .mnav button{flex:1;border:0;border-radius:0;min-height:38px;font-weight:500;color:var(--mute)}
+  .mnav button.on{background:var(--sel);color:var(--accent);box-shadow:inset 0 -2px 0 var(--accent)}
+  .ph{height:auto;min-height:38px;flex-wrap:wrap;white-space:normal;padding:6px 10px;row-gap:6px}
+  .ph .sp{margin-left:0}
+  th,td{height:38px;padding:0 6px}th{font-size:10px}
+  .pb table td:first-child,.histt td:nth-child(2){position:sticky;left:0;background:var(--panel);z-index:1}
+  .pb table th:first-child,.histt th:nth-child(2){position:sticky;left:0;z-index:3}
+  .pb table tr.sel td:first-child{background:var(--sel)}
+  #dBody td small{display:none}#dBody th,#dBody td{padding:0 3px}
+  .sigt td small,.histt td small{display:none}.sigt th,.sigt td,.histt th,.histt td{padding:0 4px}
+  .sigt td:first-child,.histt td:nth-child(2){white-space:normal;max-width:118px;line-height:1.25;padding:4px}.sigt th:nth-child(6),.sigt td:nth-child(6),.sigt th:nth-child(12),.sigt td:nth-child(12),
+  .sigt th:nth-child(3),.sigt td:nth-child(3),.sigt th:nth-child(7),.sigt td:nth-child(7),
+  .sigt th:nth-child(8),.sigt td:nth-child(8),.sigt th:nth-child(11),.sigt td:nth-child(11){display:none}
+  .histt th:nth-child(1),.histt td:nth-child(1),.histt th:nth-child(7),.histt td:nth-child(7),.histt th:nth-child(8),
+  .histt td:nth-child(8),.histt th:nth-child(9),.histt td:nth-child(9),.histt th:nth-child(10),.histt td:nth-child(10),
+  .histt th:nth-child(12),.histt td:nth-child(12){display:none}
+  .actg{grid-template-columns:1fr!important}.actg>div{border-right:0!important;max-height:40vh}
+  .p-sig>.pane:first-child{flex:2!important}
+  #chart{height:240px}.dh .px{font-size:24px}
+  .heat{grid-template-columns:repeat(2,1fr)}.ht{min-height:48px}
+  .ev li{padding:9px 10px}
+  .kpi{min-width:calc(50% - 4px);padding:6px 10px}
+  .visg{grid-template-columns:1fr!important}
+  .pop{top:auto;bottom:0;left:0;right:0;width:100%;max-height:82vh;border-radius:10px 10px 0 0;padding-bottom:env(safe-area-inset-bottom)}
+  .pop label{margin:10px 14px}
+  .status{font-size:10.5px;height:26px;padding-bottom:env(safe-area-inset-bottom)}
+  #toast{bottom:40px;max-width:calc(100% - 24px)}
+}
 </style>
 </head>
 <body>
@@ -128,30 +171,31 @@ tbody tr.new td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
   <button data-t="data">Data link<span class="cnt" id="dBadge" style="display:none"></span></button><button data-t="hist">History</button><button data-t="vis" class="owner-only">Visitors</button>
 </nav>
 
-<main id="tab-ws" class="on">
-  <section class="pane">
+<main id="tab-ws" class="on" data-p="sig">
+  <div class="mnav" id="mnav"><button data-p="sig" class="on">Signals</button><button data-p="wl">Watchlist</button><button data-p="chart">Chart</button></div>
+  <section class="pane p-wl">
     <div class="ph"><h2>Watchlist</h2><span class="seg sp"><button id="wlT" class="on">Table</button><button id="wlH">Heatmap</button></span></div>
     <div class="pb" id="wlBody"><table class="wl"><thead><tr><th>Symbol</th><th class="n">LTP</th><th class="n">Chg %</th><th class="n" title="relative strength: stock % minus its index % (banks vs Bank Nifty)">RS</th><th class="n" title="bullish / bearish strategies agreeing now">Sig</th></tr></thead><tbody id="wlRows"></tbody></table></div>
     <div class="pb" id="heatBody" style="display:none"><div class="heat" id="heat"></div></div>
   </section>
-  <div class="col">
+  <div class="col p-sig">
     <section class="pane" style="flex:1.7">
       <div class="ph"><h2>Signals</h2><small id="nowSub"></small>
         <span class="sp"></span><label class="mute">Agree ≥ <input type="number" id="fMin" min="1" value="10" style="width:52px"></label>
         <span class="seg" id="tfBox"><button data-tf="5m" class="on">5m</button><button data-tf="15m" class="on">15m</button><button data-tf="30m" class="on">30m</button><button data-tf="60m" class="on">60m</button></span>
         <select id="fBars"><option value="1">Latest bar</option><option value="3">Last 3 bars</option><option value="12">Last 60 min</option><option value="120">Last 2 hours</option><option value="day">Today</option><option value="week">This week</option><option value="month">This month</option></select>
         <label class="mute"><input type="checkbox" id="fClosed"> Closed</label></div>
-      <div class="pb"><table><thead><tr><th>Symbol</th><th>TF</th><th>Bar</th><th class="n" title="how many strategies fired together (breadth)">Agree</th><th title="evidence: past win rate of these strategies on this stock and timeframe">Confidence</th><th class="n">Entry</th><th class="n">Stop</th><th class="n">Target</th><th class="n">P&amp;L %</th><th>Status</th><th title="bearish strategies firing now on the same timeframe">Bear</th><th></th></tr></thead><tbody id="nowRows"></tbody></table></div>
+      <div class="pb"><table class="sigt"><thead><tr><th>Symbol</th><th>TF</th><th>Bar</th><th class="n" title="how many strategies fired together (breadth)">Agree</th><th title="evidence: past win rate of these strategies on this stock and timeframe">Confidence</th><th class="n">Entry</th><th class="n">Stop</th><th class="n">Target</th><th class="n">P&amp;L %</th><th>Status</th><th title="bearish strategies firing now on the same timeframe">Bear</th><th></th></tr></thead><tbody id="nowRows"></tbody></table></div>
     </section>
     <section class="pane" style="flex:1">
       <div class="ph"><h2>Market activity</h2><small id="chgSub"></small></div>
-      <div class="pb" style="display:grid;grid-template-columns:1fr 1fr;min-height:0">
+      <div class="pb actg" style="display:grid;grid-template-columns:1fr 1fr;min-height:0">
         <div style="border-right:1px solid var(--line);overflow:auto"><div class="sec">Today, intraday <span id="mkt30"></span></div><ul class="ev" id="intraTop"></ul></div>
         <div style="overflow:auto"><div class="sec" id="chgHdr">Behaviour changes · last sessions</div><ul class="ev" id="chgTop"></ul></div>
       </div>
     </section>
   </div>
-  <section class="pane" id="detail">
+  <section class="pane p-chart" id="detail">
     <div class="dh" id="dHead"><span class="mute">Select a symbol</span></div>
     <div class="cbar"><span class="seg" id="ctf"><button data-tf="1m">1m</button><button data-tf="5m" class="on">5m</button><button data-tf="15m">15m</button><button data-tf="60m">60m</button><button data-tf="1D">1D</button></span>
       <span class="sp" style="margin-left:auto"></span><label class="mute" title="overlay the reference index, rebased to % from previous close"><input type="checkbox" id="cmp"> Compare index</label></div>
@@ -173,12 +217,12 @@ tbody tr.new td:first-child{box-shadow:inset 2px 0 0 var(--accent)}
 <main id="tab-hist">
   <div class="kpis"><label class="mute">Agree ≥ <input type="number" id="hMin" value="1" style="width:52px"></label><label class="mute"><input type="checkbox" id="hOpen"> Open only</label><label class="mute">Symbol <input id="hSym" style="width:110px"></label></div>
   <section class="pane"><div class="ph"><h2>All signals today</h2><small>one row per symbol × timeframe × bar · replayed = before a restart, never notified</small></div>
-    <div class="pb"><table><thead><tr><th>Seen</th><th>Symbol</th><th>TF</th><th>Bar</th><th class="n">Agree</th><th>Confidence</th><th class="n">Entry</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Last</th><th class="n">P&amp;L %</th><th class="n">MFE / MAE</th><th>Status</th></tr></thead><tbody id="histRows"></tbody></table></div></section>
+    <div class="pb"><table class="histt"><thead><tr><th>Seen</th><th>Symbol</th><th>TF</th><th>Bar</th><th class="n">Agree</th><th>Confidence</th><th class="n">Entry</th><th class="n">Stop</th><th class="n">Target</th><th class="n">Last</th><th class="n">P&amp;L %</th><th class="n">MFE / MAE</th><th>Status</th></tr></thead><tbody id="histRows"></tbody></table></div></section>
 </main>
 
 <main id="tab-vis">
   <div class="kpis" id="visK"></div>
-  <div style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;min-height:0">
+  <div class="visg" style="display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:6px;min-height:0">
     <section class="pane"><div class="ph"><h2>Visitors</h2><small>family / outside viewers only · you are not logged · one row per IP + device</small></div>
       <div class="pb"><table><thead><tr><th>Last seen</th><th>User</th><th>Device</th><th>IP</th><th class="n">Visits</th><th>Stocks opened</th><th>Tabs</th><th class="n">Explain</th><th class="n">Failed logins</th><th>First seen</th></tr></thead><tbody id="visRows"></tbody></table></div></section>
     <section class="pane"><div class="ph"><h2>Recent activity</h2></div><div class="pb"><ul class="ev" id="visAct"></ul></div></section>
@@ -222,7 +266,7 @@ function sigTime(g){const [d,t]=g.bar.split(' ');const [Y,M,D]=d.split('-').map(
 function ago(iso){const s=Math.max(0,(Date.now()-new Date(iso))/1000);return s<90?'now':s<3600?`${Math.round(s/60)}m`:`${Math.floor(s/3600)}h ${Math.round(s%3600/60)}m`}
 function entryCell(g){const x=sigTime(g);return `${px(g.entry)} <small title="signal bar closed ${x.d} ${x.t} IST · ${ago(x.iso)} ago">${x.t}</small>`}
 function confCell(c){if(!c||!c.label)return '<span class=mute>–</span>';if(c.label==='NO_EVIDENCE')return '<span class="tag">NONE</span>';
-  const k={HIGH:'up',MEDIUM:'warn',LOW:'dn'}[c.label];return `<span class="tag ${k}">${c.label}</span> <small title="won ${Math.round(c.p*100)}% of ${c.n} past signals (conservative ${Math.round(c.p_lo*100)}%), avg ${c.avg}% per trade, ${c.sessions} sessions${c.conflict?'; downgraded: bearish conflict':''}">${Math.round(c.p*100)}% · ${c.n}</small>`}
+  const k={HIGH:'up',MEDIUM:'warn',LOW:'dn'}[c.label];return `<span class="tag ${k}">${c.label}</span> <small title="${c.basis&&c.basis.startsWith('BACKTEST')?`backtest ${c.basis==='BACKTEST_MARKET_WIDE'?'(all stocks pooled; this stock has '+c.own_n+')':'(this stock)'}: won ${Math.round(c.p*100)}% of ${c.n} independent past trades (break-even ${Math.round(c.break_even*100)}%), avg ${c.avg}% net per trade, cautious ${c.cautious_pct}%`:`no backtest yet - live replay only (capped LOW): won ${Math.round(c.p*100)}% of ${c.n}, ${c.sessions} sessions`}${c.conflict?'; downgraded: bearish conflict':''}">${Math.round(c.p*100)}% · ${c.n}${c.basis==='BACKTEST_MARKET_WIDE'?' mw':''}</small>`}
 function statusCell(g){const x=g.setup_exit||{},st=g.states||{},tip=`Individual strategies: ${st.TARGET_HIT||0} target, ${st.STOP_HIT||0} stop, ${st.OPEN||0} open, ${(st.TIME_EXIT||0)+(st.EOD_EXIT||0)} time/EOD`;
   const L={OPEN:`<span class="tag warn">OPEN</span> <small>till ${x.until?x.until.slice(11):'–'}</small>`,TARGET:`<span class="tag up">TARGET</span> <small>${x.exit_at} ${sgn(x.exit_pct)}%</small>`,
     STOP:`<span class="tag dn">STOPPED</span> <small>${x.exit_at} ${sgn(x.exit_pct)}%</small>`,EXPIRED:`<span class="tag">EXPIRED</span> <small>${x.exit_at} ${sgn(x.exit_pct)}%</small>`,EOD:`<span class="tag">EOD</span> <small>${sgn(x.exit_pct)}%</small>`}[g.setup_state]||g.setup_state;
@@ -308,11 +352,14 @@ function renderIntra(){const ev=S.intraday_events||[],m=S.intraday_mkt30;$('mkt3
   $('intraTop').innerHTML=ev.slice(0,14).map(e=>`<li onclick="select('${e.symbol}')"><span class=tm>${e.at}</span><span class=tx><span class="${e.side==='up'?'up':'dn'}">${e.side==='up'?'▲':'▼'}</span> <b>${e.symbol}</b> ${e.headline}</span></li>`).join('')||'<li class=mute>No intraday event yet (checked every minute).</li>'}
 function renderHist(){if(!$('tab-hist').classList.contains('on'))return;const min=+$('hMin').value||1,op=$('hOpen').checked,q=$('hSym').value.trim().toUpperCase();
   $('histRows').innerHTML=S.groups.filter(g=>g.n>=min&&(!op||g.setup_state==='OPEN')&&(!q||g.symbol.includes(q))).slice(0,400).map(g=>`<tr onclick="select('${g.symbol}',true)"><td>${g.created}${g.catch_up?' <small>replayed</small>':''}</td><td><b>${g.symbol}</b></td><td>${g.tf}</td><td>${g.bar.slice(11)}</td><td class=n>${g.n}</td><td>${confCell(g.confidence)}</td><td class=n>${entryCell(g)}</td><td class=n>${px(g.stop)}</td><td class=n>${px(g.target)}</td><td class=n>${px(g.last)}</td><td class=n>${pct(g.pnl_pct)}</td><td class=n>${sgn(g.mfe_pct)} / ${sgn(g.mae_pct)}</td><td>${statusCell(g)}</td></tr>`).join('');applyTable('histRows')}
-function renderData(){const L=S.link||{},ls=L.stream||{},sy=L.sync||{},ci=sy.cloud_inventory||{},sm=sy.summary||{},hb=S.heartbeat||{},o=S.oracle||{};
+function renderData(){const L=S.link||{},ls=L.stream||{},sy=L.sync||{},ci=sy.cloud_inventory||{},sm=sy.summary||{},hb=S.heartbeat||{},o=S.oracle||{},U=sy.universe||{},LR=S.learning||{};
   $('linkK').innerHTML=[['Push stream',ls.state,`${ls.lines||0} bars · reconnects ${ls.reconnects||0}`,ls.state==='CONNECTED'],['Collector',o.collector_pid?'running':'stopped',`cycle ${hb.cycle_seconds??'–'} s · failures ${hb.failures_total??0}`,!!o.collector_pid],
     ['PC watcher',sy.state,`pulled ${sy.pulled_total||0} files · checked ${sy.last_run||'–'}`,/IN_SYNC/.test(sy.state||'')],['Cloud filler',ci.state,`${ci.missing_total??'–'} sessions to fetch`,ci.state==='COMPLETE'],
-    ['Stocks',`${sm.OK||0} OK · ${sm.PROBLEM||0} problem`,`${(sm.SYNCING||0)+(sm.WAITING_CLOUD||0)} still filling`,!sm.PROBLEM]].map(([t,v,d,g])=>`<div class=kpi><small>${t}</small><b class="${g?'up':'warn'}">${v||'–'}</b><br><small style="text-transform:none;letter-spacing:0">${d}</small></div>`).join('')+(sy.error?`<div class="kpi dn">${sy.error}</div>`:'');
-  $('linkSub').textContent=sy.expected_window?`expected: last 60 NSE sessions, ${sy.expected_window.join(' → ')}`:'';if(!$('tab-data').classList.contains('on'))return;const ord={PROBLEM:0,WAITING_CLOUD:1,SYNCING:2,OK:3};
+    ['Your 50 stocks',`${sm.OK||0} complete · ${sm.PROBLEM||0} problem`,`${(sm.SYNCING||0)+(sm.WAITING_CLOUD||0)} still filling (full window)`,!sm.PROBLEM&&!(sm.SYNCING||sm.WAITING_CLOUD)],
+    ['Universe download',U.total?`${U.complete} / ${U.total} complete`:'–',U.current?`now downloading ${U.current.replace(/-EQ$/,'')}`:'',U.total&&U.complete===U.total],
+    ['Learning',`${LR.researched??0} stocks researched`,(LR.last||[]).slice(-1)[0]||'waiting for the first complete stock',!!LR.researched],
+    ['Results',LR.scorecard?`scorecard ${LR.scorecard}`:'not yet',LR.profiles?`profiles ${LR.profiles}`:'after your 50 are researched',!!LR.scorecard]].map(([t,v,d,g])=>`<div class=kpi><small>${t}</small><b class="${g?'up':'warn'}">${v||'–'}</b><br><small style="text-transform:none;letter-spacing:0">${d}</small></div>`).join('')+(sy.error?`<div class="kpi dn">${sy.error}</div>`:'');
+  $('linkSub').textContent=sy.expected_window?`expected: every NSE session ${sy.expected_window.join(' → ')} (oldest day Shoonya still serves → today)`:'';if(!$('tab-data').classList.contains('on'))return;const ord={PROBLEM:0,WAITING_CLOUD:1,SYNCING:2,OK:3};
   $('syncRows').innerHTML=Object.entries(sy.symbols||{}).sort((a,b)=>ord[a[1].status]-ord[b[1].status]).map(([k,v])=>`<tr><td><b>${k.replace(/-EQ$/,'')}</b></td><td><span class="tag ${{OK:'up',PROBLEM:'dn'}[v.status]||'warn'}">${v.status}</span></td><td class=n>${v.missing}</td><td class=n>${v.on_cloud||''}</td><td><small>${(v.waiting_cloud||[]).slice(0,4).join(', ')}</small></td><td>${v.daily_last||'–'}</td><td style="white-space:normal"><small class=dn>${v.cloud_health?.status==='PROBLEM'?v.cloud_health.detail:''}</small><small>${v.cloud_health?.status==='RETRYING'?v.cloud_health.detail:''}</small></td><td>${v.status==='PROBLEM'||v.cloud_health?.status==='RETRYING'?`<button class=owner-only onclick="resetSym('${k}')">Retry now</button>`:''}</td></tr>`).join('');applyTable('syncRows')}
 /* ---------------- behaviour ---------------- */
 function renderBeh(){if(!B||!B.profiles){$('chgSub').textContent=B?.error||'computing…';return}const byS={};for(const c of B.changes)(byS[c.symbol]=byS[c.symbol]||[]).push(c);
@@ -323,7 +370,10 @@ function renderBeh(){if(!B||!B.profiles){$('chgSub').textContent=B?.error||'comp
 async function behav(){try{B=await (await fetch('/api/behaviour')).json();renderBeh();if(S)renderDetail()}catch(e){}}
 /* ---------------- detail pane ---------------- */
 const XP={},XS={};
-function select(s,switchTab){const changed=SEL!==s;SEL=s;try{localStorage.setItem('gplmSel',s)}catch(e){}if(switchTab)tab('ws');if(changed)FOCUS=null;if(S){renderWL();renderNow()}renderDetail();if(changed||switchTab)loadChart(true)}
+const PHONE=matchMedia('(max-width:760px)');
+function pane(p){const m=$('tab-ws');m.dataset.p=p;document.querySelectorAll('#mnav button').forEach(b=>b.classList.toggle('on',b.dataset.p===p));try{localStorage.setItem('gplmPane',p)}catch(e){}if(p==='chart'&&CH)setTimeout(()=>CH.timeScale().fitContent(),60)}
+function userPick(){const e=window.event;return !!(e&&(e.type==='click'||e.type==='change'||e.type==='keydown'))}
+function select(s,switchTab){const changed=SEL!==s;if(PHONE.matches&&userPick())setTimeout(()=>pane('chart'),0);SEL=s;try{localStorage.setItem('gplmSel',s)}catch(e){}if(switchTab)tab('ws');if(changed)FOCUS=null;if(S){renderWL();renderNow()}renderDetail();if(changed||switchTab)loadChart(true)}
 function renderDetail(){if(!S||!SEL)return;const s=SEL,x=S.symbols.find(z=>z.symbol===s)||{},isIx=ISIX(s),ixd=(S.market?.indices||{})[s];
   const last=isIx&&ixd?ixd.last:x.last,chg=isIx&&ixd?ixd.chg_pct:x.chg_pct,it=(S.intraday||{})[s];
   $('dHead').innerHTML=`<div><span class=sym>${INAME[s]||s}</span> <small>${isIx?'Index':'NSE · EQ'}${x.t?` · ${x.t} IST`:''}</small></div><div><span class=px>${px(last)}</span><span class=chg>${pct(chg)}</span></div>
@@ -377,7 +427,7 @@ async function loadCompare(d){const on=$('cmp').checked&&CTF!=='1D'&&!ISIX(SEL);
   const r=await (await fetch(`/api/bars?s=${cmpRef()}&tf=${CTF}`)).json();const day=t=>new Date(t*1000).toISOString().slice(0,10),today=d.candles.length?day(d.candles[d.candles.length-1].time):'';
   const reb=(cs,pc)=>pc?cs.filter(c=>day(c.time)===today).map(c=>({time:c.time,value:+((c.close/pc-1)*100).toFixed(3)})):[];
   CMP1.setData(reb(d.candles,d.prev_close));CMP2.setData(reb(r.candles,r.prev_close))}
-function focusSetup(k){FOCUS=FOCUS===k?null:k;const g=S.groups.find(x=>x.key===k);if(FOCUS&&g&&g.tf!==CTF&&g.tf!=='30m')setCtf(g.tf);else{renderDetail();loadChart(false)}}
+function focusSetup(k){if(PHONE.matches&&userPick())setTimeout(()=>pane('chart'),0);FOCUS=FOCUS===k?null:k;const g=S.groups.find(x=>x.key===k);if(FOCUS&&g&&g.tf!==CTF&&g.tf!=='30m')setCtf(g.tf);else{renderDetail();loadChart(false)}}
 function setCtf(t){CTF=t;try{localStorage.setItem('gplmCtf',t)}catch(e){}document.querySelectorAll('#ctf button').forEach(b=>b.classList.toggle('on',b.dataset.tf===t));loadChart(true)}
 document.querySelectorAll('#ctf button').forEach(b=>{b.classList.toggle('on',b.dataset.tf===CTF);b.onclick=()=>setCtf(b.dataset.tf)});$('cmp').onchange=()=>loadChart(false);
 setInterval(()=>{if(!document.hidden)loadChart(false)},20000);
@@ -402,6 +452,8 @@ async function renderVis(){if(ROLE!=='owner')return;try{const d=await (await fet
 setInterval(()=>{if($('tab-vis').classList.contains('on'))renderVis()},10000);
 function tab(t){track('TAB',t);if(t==='vis')renderVis();document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.t===t));document.querySelectorAll('main').forEach(m=>m.classList.toggle('on',m.id==='tab-'+t));if(S)render(S);renderBeh();if(t==='ws'&&CH)setTimeout(()=>CH.timeScale().fitContent(),50)}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.t));
+document.querySelectorAll('#mnav button').forEach(b=>b.onclick=()=>pane(b.dataset.p));
+try{const p=localStorage.getItem('gplmPane');if(p&&['sig','wl','chart'].includes(p))pane(p)}catch(e){}
 ['fMin','fBars','fClosed'].forEach(i=>$(i).oninput=()=>{saveView();S&&renderNow()});document.querySelectorAll('#tfBox button').forEach(b=>b.onclick=()=>{b.classList.toggle('on');S&&renderNow()});
 ['hMin','hOpen','hSym'].forEach(i=>$(i).oninput=()=>S&&renderHist());$('onlyChg').onchange=renderBeh;
 $('wlT').onclick=()=>{$('wlT').classList.add('on');$('wlH').classList.remove('on');$('wlBody').style.display='';$('heatBody').style.display='none'};
