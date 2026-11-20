@@ -1,65 +1,111 @@
-# Chartink scans → strategy library (analysis, 2026-11-20)
+# Chartink scans → strategy library (2026-11-20, approved by owner)
 
-Source: 66 screenshots in `config/strategies/ChartInk/`. Draft output: `config/strategies/drafts/chartink-draft.json`
-(57 strategies, IDs O2-001..057, **not loaded by any run until approved**).
+Active file: `config/strategies/library/owner/chartink.json` (65 strategies). Names = the owner's Chartink scan
+names (scan dashboard video `tmp/ChartInk1.mp4`, page 1 of 2 = 50 of 88 scans), matched to the 59 scan screenshots in
+`config/strategies/ChartInk/` (7 other screenshots were not scans).
 
-## What was in the folder
-- **7 are not scans** (live-lab alerts, broker P&L, device list): 092152, 101930, 110819, 111422, 120310, 120632, 184959. Skipped.
-- **59 scan screenshots → 58 distinct scans** (200511 is a crop of 200524).
-- "Futures segment" read as cash market everywhere (as instructed).
-- Disabled (greyed) conditions ignored. Market-cap filters ignored (no market-cap data); index segment
-  (Nifty 50/100/200/500) kept as a tag only.
+## Rules applied to every Chartink strategy
+- **Liquidity floor** (replaces market cap): 20-session median turnover ≥ ₹15 Cr and close ≥ ₹50 from completed sessions
+  (weekly: 4-week median ≥ ₹75 Cr; intraday: mean of the previous 20 sessions). Same gate in the up-move learner.
+- **Exits by type:** `trend` = 2 ATR stop trailing at 2 ATR, no target, 25 bars; `meanrev` = 1.5 ATR stop, 2 ATR target, 8 bars;
+  `intraday` = 1.2 ATR stop, 2.5 ATR target, 12 bars.
+- **Intraday session (engine v3, up-move v2):** no new entries after 14:45, square-off at 15:15 IST.
+- **Daily/weekly shorts** are tagged `cash-short:research-only`: no overnight cash short in India, so read them as
+  exit-long / avoid signals until F&O is in scope. Intraday shorts are tradable.
+- "Futures segment" read as cash; disabled conditions ignored; Nifty 50/100/200/500 kept as `segment:` tags.
+- 3-minute scans run on 5m (or 15m for the confirmation bar).
 
-## Duplicates and merges
-| Scan | Outcome |
-|---|---|
-| 200524 EMA13 × EMA200 (13×50, 13×100 disabled) | = existing **O1-004** (and O1-002/003). Not added. |
-| 201344 1h EMA13 > 20 and EMA13 × EMA100 | = **O1-003** on 60m (extra filter is almost always true at the cross). Not added. |
-| 200648 daily + 202041 weekly MACD × signal below zero | one rule, two timeframes → O2-004 |
-| 201400 daily + 202020 weekly "below EMA200 recovery" | one rule, two timeframes → O2-032 (monthly 202010 impossible: needs a 200-month EMA ≈ 17 years) |
-| 200900 branches 2 + 3 | merged (only differ on high above/below upper band) → O2-034 |
-| 201554 (±1% of EMA200) + 200943 (±2%) | one rule with grid 1% / 2% → O2-052 |
-| 201125 vs 201447 | near-duplicates (rising closes vs closes above highs) → kept as O2-010 / O2-011 |
-| 201041 vs 201836 | identical firings on 15m (the daily 10% filter never binds) → O2-021 can be dropped in favour of O2-023 |
-| Mirrors (kept both sides) | 201324 / 201334, 201803 / 201816, 201125 / 201603, 201936 / 202033, 201616 = short side of O1-001..004 |
+## Directions settled by the scan names
+GM Bearish RSI Divergence - Hourly = short; BB 15 min Short strategy = short; PoS 5 EMA 15 mins = 5-EMA alert-candle short;
+Volume Based Bulltrade = long; GM W Pattern = Bollinger W-bottom (interpretation, confirm). Still two-sided (both tested):
+5 Red / 5 Green candles - 5 min (each split into opening drive 09:20–09:45 and midday 10:00–14:30) and D-VolumeSpike.
 
-## Bugs found in the Chartink scans
-| Scan | Problem | Draft |
-|---|---|---|
-| 201750 shooting star | Can never fire: branch A has "3 days ago close > 3 days ago close"; branch B needs close > open **and** open > close | O2-041 = red shooting star after 2 green days, gap-up fails (confirm) |
-| 200943 near EMA200 | "passes any 1" with close ≤ 1.02×EMA and close ≥ 0.98×EMA → matches every stock | fixed in O2-052 |
-| 201411 | "Lower Bollinger < SMA20" is always true → scan is only RSI < 50 and open > yesterday's open | not drafted (ask) |
-| 201803 / 201816 | 1h EMA100 compared with **15m** EMA200 | drafted as 1h vs 1h |
+## Moved to the up-move learner as building blocks (state scans, not entries)
+Near EMA200 (±1%), Bollinger band Squeeze, Bullish Hourly Convergence, Sowmya scan, GM Bull EMA Sorted, Monthly MACD Below 0.
+GM Bear EMA Sorted is not used (the learner is long-only).
 
-## The 57 drafted strategies by family
-- **EMA / MACD (7):** O2-001 EMA9×45, O2-002 EMA9×200, O2-003 MACD turning up below zero + RSI3 ≥ 80, O2-004 MACD × signal below zero (1d, 1w), O2-005 monthly version, O2-006 Entry A MACD reversal, O2-007 Predictive MACD.
-- **Momentum streaks / bursts (13):** O2-008 5 days of ≥ 4.9%, O2-009 5 higher closes, O2-010/011 momentum + volume (O2-012 short mirror), O2-013 15m breakout + RSI3, O2-014 5m EMA 4/9/18, O2-015 5m rising closes, O2-016/017 15m 5% bar, O2-018 volume > 2× 15-day max, O2-019 low-volume strength, O2-020 "9 GT 20 at 45°".
-- **EMA 50 reclaim in a downtrend (5):** O2-021, O2-022, O2-023 (1d/60m/15m), O2-024 Heikin-Ashi, O2-025 short.
-- **Stacks / crosses (7):** O2-026 short EMA13 × 20/50/100/200, O2-027 30m EMA100×200, O2-028/029 1h + daily stack breaks prior-day high / low, O2-030/031 5m + 15m stack, O2-032 below-EMA200 recovery.
-- **Bollinger / multi-timeframe RSI (5):** O2-033/034 SMA20 cross with d/w/m RSI ≥ 59, O2-035 1h tight base breakout, O2-036 monthly RSI3 < 20 + 2 up days, O2-037 1h RSI divergence.
-- **Candles (7):** O2-038 hammer, O2-039 hammer at a lower low, O2-040 hammer + 2-day confirmation, O2-041 shooting star (short), O2-042/043 5 red / 5 green 5m candles, O2-044 15m stall after a strong day.
-- **Supertrend / Heikin-Ashi (2):** O2-045 short flip, O2-046 long flip.
-- **Support touches / pullbacks (5):** O2-047/048 EMA44 of lows / highs, O2-049 Entry B pullback, O2-050/051 close × EMA200 up / down.
-- **Condition-only (6):** O2-052 near EMA200, O2-053 15m squeeze, O2-054 1h EMA convergence, O2-055 m/w/d RSI, O2-056/057 all-timeframe stacks. These stay true for long stretches. They work better as building blocks for the up-move learner's pairs and triples than as standalone entries.
+## Not converted
+- Daily Imp - 9c200 (EMA13 × EMA200) = existing O1-004.
+- SS_Portfolio_Entry_Monthly: needs a 200-month EMA (~17 years of history).
+- Scans on the dashboard without a screenshot (e.g. Claude - Exit - 50% / Full Exit, Bear 5 EMA - 5min..Monthly, GR - Intraday Sell,
+  PDH break out, 15-VolumeSpike, Daily Imp - 10 20 30 EMA ADX 20+, GM Bearish 15/3 min Pinbar) and page 2 (38 scans).
 
-## Mapping notes
-- **3-minute scans** (201250, 201301, 201827, 202059): we have no 3m bars → mapped to 5m (or 15m for the confirmation bar).
-- "Daily …" inside intraday scans uses the **last completed day** (Chartink uses the day so far). This avoids look-ahead in backtests.
-- Weekly and monthly values come from completed weeks and months (`htf(…, "1w")`, `htf(…, "1mo")`).
-- Chartink gives entries only. Draft exit: 10 bars, stop 1.5 × ATR, target 2.5 × ATR. The up-move learner still judges every trigger by its own per-TF rule (1d: +3% within 5 days before −1.5%).
+## Bugs found in the saved Chartink scans
+- GM Bearish Daily Pinbar Candle cannot fire (branch A compares a close with itself; branch B needs close > open and open > close).
+- Near EMA200 (Nifty 50): "any of ≤ 1.02× / ≥ 0.98×" matches every stock.
+- GM W Pattern: "lower band < SMA 20" is always true.
+- GM Bull/Bear EMA Sorted compare 1h EMA100 with 15m EMA200.
 
-## Smoke check (3 stocks: RELIANCE, HDFCBANK, ICICIBANK; NSE data; no costs)
-All 57 parse and run on real candles, with no errors on any timeframe (1d, 1w, 1mo, 60m, 30m, 15m, 5m, cross-timeframe).
-Firing counts are sane except these, which are rare by design: O2-005 monthly MACD (0), O2-008 five days of ≥ 4.9% (0),
-O2-016 15m 5% bar (0), O2-027 (1), O2-033 (1). **Three stocks prove nothing about edge**; the full evidence comes from
-the owner-run pipeline after approval. Per-rule numbers: `state/reports/strategy-audit/2026-11-20/chartink-smoke.json`.
+## Strategy list
+| ID | Chartink name | TF | Side | Exit | Screenshot |
+|---|---|---|---|---|---|
+| O2-001 | GMAnalysis - EMA 9 x 45 | 1d | long | trend | 200442 |
+| O2-002 | GMAnalysis - EMA 9 x 200 | 1d | long | trend | 200442 |
+| O2-003 | GMAnalysis - MACD up below zero + RSI3 | 1d | long | trend | 200442 |
+| O2-004 | MACD Cross below 0 | 1d | long | trend | 200648 |
+| O2-004-W | Weekly MACD below 0 | 1w | long | trend | 202041 |
+| O2-006 | Excellent - Entry A - MACD Reversal | 1d | long | trend | 202152 |
+| O2-007 | Claude Predictive MACD | 1d | long | trend | 202206 |
+| O2-008 | 5 day daily 5% up | 1d | long | trend | 200604 |
+| O2-009 | 5 day price increase | 1d | long | trend | 201544 |
+| O2-010 | SS-2Bullish-Daily | 1d | long | trend | 201125 |
+| O2-011 | SS-2Bullish-Hourly | 1d | long | trend | 201447 |
+| O2-012 | SS-2Bearish-Daily | 1d | short | trend | 201603 |
+| O2-018-L | D-VolumeSpike - Long | 1d | long | meanrev | 201926 |
+| O2-018-S | D-VolumeSpike - Short | 1d | short | meanrev | 201926 |
+| O2-019 | Volume Based Bulltrade | 1d | long | trend | 201908 |
+| O2-020 | 9 gt 20 at 45 deg | 1d | long | trend | 202112 |
+| O2-020-ATR | 9 gt 20 at 45 deg (ATR slope) | 1d | long | trend | 202112 |
+| O2-023 | JULY23_DAILY_BULL_BBSCAN | 1d | long | meanrev | 201836 |
+| O2-026 | Bearish EMA Crossover | 1d | short | trend | 201616 |
+| O2-032 | SS_Portfolio_Entry | 1d | long | meanrev | 201400 |
+| O2-032-W | SS_Portfolio_Entry_Weekly | 1w | long | meanrev | 202020 |
+| O2-033 | DS - Bollinger Band Bullish Breakout - Daily | 1d | long | trend | 200900 |
+| O2-034 | DS - Bollinger Band Bullish Breakout - Daily (follow-through) | 1d | long | trend | 200900 |
+| O2-036 | GM_Longterm_InvestmentStrategy | 1d | long | meanrev | 201628 |
+| O2-038 | GM Bullish Daily Pinbar Bull Candle | 1d | long | meanrev | 201500 |
+| O2-039 | GM Bullish Daily Pinbar Candle Today | 1d | long | meanrev | 201534 |
+| O2-040 | GM Bullish Daily Pinbar Candle - Final | 1d | long | meanrev | 201520 |
+| O2-041 | GM Bearish Daily Pinbar Candle | 1d | short | meanrev | 201750 |
+| O2-047 | 44EMA Low | 1d | long | meanrev | 201846 |
+| O2-048 | 44EMA High | 1d | long | meanrev | 201859 |
+| O2-049 | Entry Type B — Trend Continuation Pullback | 1d | long | meanrev | 202141 |
+| O2-050 | Near EMA200 - cross above | 1d | long | trend | 200943 |
+| O2-051 | Near EMA200 - cross below | 1d | short | trend | 200943 |
+| O2-058 | GM W Pattern | 1d | long | meanrev | 201411 |
+| O2-013 | GR - Intraday buy | 15m | long | intraday | 200722 |
+| O2-014 | 5 Min Golden Cross | 5m | long | intraday | 200748 |
+| O2-015 | Sowmya 3 min Strategy | 5m | long | intraday | 202059 |
+| O2-016 | 15 min Volume Shockers - Up | 15m | long | intraday | 201312 |
+| O2-016-ATR | 15 min Volume Shockers - Up (ATR) | 15m | long | intraday | 201312 |
+| O2-017 | 15 min Volume Shockers - Down | 15m | short | intraday | 201312 |
+| O2-017-ATR | 15 min Volume Shockers - Down (ATR) | 15m | short | intraday | 201312 |
+| O2-021 | New BB 15 Min | 15m, 60m | long | intraday | 201041 |
+| O2-022 | July23_15MIN_BuLL_BBSCAN | 15m | long | intraday | 201827 |
+| O2-024 | HA-13-50-200 | 15m, 60m | long | intraday | 201947 |
+| O2-025 | BB 15 min Short strategy | 15m | short | intraday | 200920 |
+| O2-026-I | Bearish EMA Crossover (intraday) | 15m, 60m | short | intraday | 201616 |
+| O2-027 | BB 100-200-400 30 min - GM | 30m | long | intraday | 201109 |
+| O2-028 | SS-Swing-1hr-Bullish | 60m | long | intraday | 201324 |
+| O2-029 | SS-Swing-1hr-Bearish | 60m | short | intraday | 201334 |
+| O2-030 | SS - 3 MIN 2BULL-CANDLE | 5m | long | intraday | 201250 |
+| O2-031 | Final-SS-GM-3Min-Bearish | 5m | short | intraday | 201301 |
+| O2-035 | Bollinger Feb25 | 60m | long | intraday | 202131 |
+| O2-037 | GM Bearish RSI Divergence - Hourly | 60m | short | intraday | 200813 |
+| O2-042-L-OPEN | 5 Red candles - 5 min - Long (opening drive) | 5m | long | intraday | 201703 |
+| O2-042-L-MID | 5 Red candles - 5 min - Long (midday) | 5m | long | intraday | 201703 |
+| O2-042-S-OPEN | 5 Red candles - 5 min - Short (opening drive) | 5m | short | intraday | 201703 |
+| O2-042-S-MID | 5 Red candles - 5 min - Short (midday) | 5m | short | intraday | 201703 |
+| O2-043-L-OPEN | 5 Green candles - 5 min - Long (opening drive) | 5m | long | intraday | 201713 |
+| O2-043-L-MID | 5 Green candles - 5 min - Long (midday) | 5m | long | intraday | 201713 |
+| O2-043-S-OPEN | 5 Green candles - 5 min - Short (opening drive) | 5m | short | intraday | 201713 |
+| O2-043-S-MID | 5 Green candles - 5 min - Short (midday) | 5m | short | intraday | 201713 |
+| O2-044 | PoS 5 EMA 15 mins | 15m | short | intraday | 201723 |
+| O2-045 | Supertrend Bear 15 min | 15m | short | intraday | 201936 |
+| O2-046 | MySuperTrend | 15m | long | intraday | 202033 |
+| O2-059 | Super Swing Setup -Bullish | 60m | long | intraday | 201344 |
 
-## Open questions for the owner
-1. **Direction unclear:** 200813 (price higher, RSI lower), 200920 (15m red candle cuts EMA50), 201312 (5% down bar),
-   201703 / 201713 (5 red / 5 green 5m candles), 201723, 201908, 201926. Proposal: test **both long and short**
-   and let each stock × TF result decide.
-2. **3-minute → 5m** mapping OK?
-3. **Market cap / Nifty segment:** run on the full universe (proposal) or restrict to index lists?
-4. **Condition-only scans** → add to the up-move learner's building blocks (proposal) or keep as standalone strategies?
-5. **201411** (only RSI < 50 and open > yesterday's open after the always-true condition): what did you intend?
-6. **Exits:** do you use a specific target or stop with these scans?
+## Checks
+All strategies parse and run on real NSE candles (RELIANCE, HDFCBANK, ICICIBANK; 1d, 1w, 60m, 30m, 15m, 5m and
+cross-timeframe). Rare by design (0 firings on 3 stocks): 5 day daily 5% up, 15 min Volume Shockers - Up (5%),
+SS_Portfolio_Entry_Weekly. Three stocks say nothing about edge; the owner-run pipeline gives the evidence.

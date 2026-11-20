@@ -15,7 +15,7 @@ from stock_gplm.app import strategy_evolve as evo
 from stock_gplm.app.m56_catalogue import _direction
 from stock_gplm.app.research import _tree_to_dsl, write_audit
 from stock_gplm.verify import fixtures as fx
-from stock_gplm.verify.suite_catalogue import CATALOGUE, LIBRARY, semantic
+from stock_gplm.verify.suite_catalogue import CATALOGUE, LIBRARY, PARKED, semantic
 from stock_gplm.verify.suite_validation import _lane
 
 
@@ -50,7 +50,7 @@ def test_corrected_catalogue_entries_match_the_literal_formula(sid: str, tmp_pat
     from stock_gplm.app.m56_catalogue import load_catalogue
     from stock_gplm.app.strategy_library import StrategyLibrary
 
-    s = StrategyLibrary([LIBRARY], tmp_path).load(record=False).strategies[sid]
+    s = StrategyLibrary([LIBRARY, PARKED], tmp_path).load(record=False).strategies[sid]
     ref = {r.reference_id: r for r in load_catalogue(CATALOGUE).references}[s.reference_id]
     frames = [fx.ohlcv(1500, fx.SEED + k) for k in range(3)]
     res = semantic(ref.rule_text, s.doc["entry"], s.defaults(), frames)

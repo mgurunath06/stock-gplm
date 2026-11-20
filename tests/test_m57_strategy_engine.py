@@ -84,3 +84,9 @@ def test_discoveries_are_deduplicated(tmp_path: Path) -> None:
            "exit": {"max_hold_bars": 5}, "applicability": {"symbols": ["X"], "timeframes": ["1d"]}}
     assert lib.save_discovered(doc) == ("ML-X-1d-a", True)
     assert lib.save_discovered({**doc, "id": "ML-X-1d-b"}) == ("ML-X-1d-a", False)
+
+
+def test_rolling_median() -> None:
+    ctx = _ctx(30)
+    med = dsl.evaluate(dsl.parse("median(close, 5)"), ctx)
+    assert np.isnan(med[:4]).all() and abs(med[10] - np.median(ctx.close[6:11])) < 1e-9

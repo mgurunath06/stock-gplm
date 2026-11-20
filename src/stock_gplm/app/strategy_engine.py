@@ -36,7 +36,8 @@ from .strategy_library import StrategyDef
 
 # v2 (2026-11-15): the unconditional baseline applies the strategy's signal exit (exit.when) too, so the
 # excess-return test compares like with like; trade ledgers are returned for the audit trail.
-ENGINE_CONTRACT = "stock-gplm.strategy-engine.v2"
+# v3 (2026-11-20): intraday square-off at 15:15 IST and no new entries after 14:45 IST (owner session rules).
+ENGINE_CONTRACT = "stock-gplm.strategy-engine.v3"
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,9 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     target = entry + sgn * p.target_atr * atr if p.target_atr else (-math.inf if short else math.inf)
     time_bar = t + 1 + p.max_hold
     if m.intraday:
-        sess_end = int(m.session_last[t + 1])
+        sess_end = int(m.exit_last[t + 1])  # square-off bar (15:15 IST), owner rule 2026-11-20
+        if sess_end < t + 1:
+            return None
         hold_end = min(time_bar - 1, sess_end)
     else:
         sess_end = -1
@@ -141,7 +144,7 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
     for t in fired.tolist():
         if t < nxt or t + 1 > last:
             continue
-        if m.intraday and sid[t + 1] != sid[t]:
+        if m.intraday and (sid[t + 1] != sid[t] or not m.entry_ok[t]):
             continue
         fill = _path(m, t, p, last, short, xmask)
         if fill is None:

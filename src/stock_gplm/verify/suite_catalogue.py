@@ -19,6 +19,7 @@ from .suite_indicators import cols
 REPO = Path(__file__).resolve().parents[3]
 CATALOGUE = REPO / "config" / "strategies" / "reference-300-strategies.txt"
 LIBRARY = REPO / "config" / "strategies" / "library"
+PARKED = REPO / "config" / "strategies" / "parked"  # inactive translations (2026-11-20 revamp), still verified
 WARMUP = 260  # longest lookback in the subset (52-week max + lag)
 VERDICTS = ("VERIFIED_SEMANTIC", "VERIFIED_STRUCTURAL", "APPROXIMATION", "REVIEW", "MISMATCH", "BLOCKED", "DEFERRED")
 
@@ -81,7 +82,7 @@ def semantic(rule: str, entry: str, params: dict[str, Any], frames: list[Any]) -
 
 def run(sec: Section, ev: dict[str, Any], work: Path) -> None:
     refs = {r.reference_id: r for r in load_catalogue(CATALOGUE).references}
-    loaded = StrategyLibrary([LIBRARY], work / "catalogue-library-readonly").load(record=False)
+    loaded = StrategyLibrary([LIBRARY, PARKED], work / "catalogue-library-readonly").load(record=False)
     lib = [s for s in loaded.strategies.values() if s.reference_id]
     frames = [fx.ohlcv(1500, fx.SEED), fx.ohlcv(1500, fx.SEED + 1, drift=0.0008), fx.ohlcv(1500, fx.SEED + 2, vol=0.025)]
     rows: list[dict[str, Any]] = []

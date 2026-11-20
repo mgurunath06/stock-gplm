@@ -844,6 +844,8 @@ fn("highest", 2, 2, "rolling maximum over n bars including the current bar")(
 fn("lowest", 2, 2, "rolling minimum over n bars including the current bar")(
     lambda c, x, n: rolling_min(_arr(c, x), _n(n)))
 fn("sum", 2, 2, "rolling sum")(lambda c, x, n: rolling_sum(_arr(c, x), _n(n)))
+fn("median", 2, 2, "rolling median over n bars including the current bar (NaN until n bars)")(
+    lambda c, x, n: pd.Series(_arr(c, x)).rolling(_n(n), min_periods=_n(n)).median().to_numpy(dtype=float))
 fn("stdev", 2, 2, "rolling population standard deviation")(lambda c, x, n: stdev(_arr(c, x), _n(n, lo=2)))
 fn("zscore", 2, 2, "(x - sma(x,n)) / stdev(x,n)")(
     lambda c, x, n: _div(_arr(c, x) - sma(_arr(c, x), _n(n)), stdev(_arr(c, x), _n(n, lo=2))))

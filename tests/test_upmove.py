@@ -36,3 +36,29 @@ def test_edge_ranks_better_trigger_and_walk_forward_is_causal():
     net2[-5:] = -0.015  # changing later results must not change which earlier firings were taken
     b = walk_forward(t, net2, hit, np.full(t.size, 0.35), p, 400)
     assert a["taken_t"][: len(a["taken_t"]) - 5] == b["taken_t"][: len(a["taken_t"]) - 5]
+
+
+def test_gap_through_stop_fills_at_open_and_atr_levels():
+    p = Params(target=0.03, stop=0.015, horizon=3)
+    o = np.array([100, 100, 95, 100, 100.0])                # t=0: entry 100, bar2 opens at 95 (gap below the 98.5 stop)
+    h = np.array([100, 100.5, 96, 100, 100.0])
+    lo = np.array([100, 99.0, 94, 100, 100.0])
+    c = np.array([100, 100, 95, 100, 100.0])
+    hit, net = outcomes(o, h, lo, c, p, cost=0.0)
+    assert hit[0] == 0 and abs(net[0] + 0.05) < 1e-9        # filled at the 95 open, not the 98.5 stop
+    hit2, _ = outcomes(o, h, lo, c, p, 0.0, target=np.full(5, 0.004), stop=np.full(5, 0.5))
+    assert hit2[0] == 1                                     # per-candle (ATR-style) target of 0.4% hit on bar1
+
+
+def test_session_rules_square_off_1515_and_last_entry_1445():
+    import pandas as pd
+    from stock_gplm.m54.backtest import LaneMarket
+
+    ends = pd.date_range("2026-11-02 09:30", "2026-11-02 15:30", freq="15min", tz="Asia/Kolkata")
+    n = len(ends)
+    z = np.ones(n)
+    m = LaneMarket("15m", np.array(["2026-11-02"] * n), np.zeros(n, np.int64), ends.asi8, z, z, z, z, z, z,
+                   np.zeros(n, bool), np.zeros(n, bool), True, 252 * 25)
+    labels = [m.label(i)[-5:] for i in range(n)]
+    assert labels[int(m.exit_last[0])] == "15:15" and labels[m.session_last[0]] == "15:30"
+    assert [lb for lb, ok in zip(labels, m.entry_ok) if ok][-1] == "14:45"

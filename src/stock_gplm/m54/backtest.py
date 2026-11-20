@@ -71,6 +71,10 @@ class Costs:
                      (c["commission_bps"] + c["slippage_bps"] + c["sell_statutory_bps"]) / 10_000)
 
 
+SQUARE_OFF_MIN = 15 * 60 + 15  # IST minute of day: intraday positions are squared off at 15:15
+LAST_ENTRY_MIN = 14 * 60 + 45  # IST minute of day: no new intraday entries after 14:45
+
+
 @dataclass
 class LaneMarket:
     timeframe: str
@@ -88,6 +92,8 @@ class LaneMarket:
     intraday: bool
     bars_per_year: float
     session_last: np.ndarray = field(init=False)  # index of the last bar of each bar's session
+    exit_last: np.ndarray = field(init=False)  # intraday: last bar ending <= 15:15 IST (square-off bar)
+    entry_ok: np.ndarray = field(init=False)  # intraday: signal bar ends <= 14:45 IST (new entries allowed)
 
     def __post_init__(self) -> None:
         n = len(self.close)
@@ -100,6 +106,17 @@ class LaneMarket:
                 last[s:e + 1] = e
         self.session_last = last
         self._blocked_cum = np.concatenate(([0], np.cumsum(self.blocked.astype(np.int64))))
+        # Owner session rules (2026-11-20), used by app.strategy_engine and app.upmove (not the M5.4 path):
+        # intraday square-off at the close of the last bar ending <= SQUARE_OFF; no entry after LAST_ENTRY.
+        mins = ((self.end_ns // 60_000_000_000 + 330) % 1440) if n else np.zeros(0, np.int64)
+        self.exit_last = last.copy()
+        self.entry_ok = np.ones(n, dtype=bool)
+        if self.intraday and n:
+            ok_exit = mins <= SQUARE_OFF_MIN
+            for s, e in zip(starts, ends):
+                idx = np.nonzero(ok_exit[s:e + 1])[0]
+                self.exit_last[s:e + 1] = s + idx[-1] if idx.size else e
+            self.entry_ok = mins <= LAST_ENTRY_MIN  # signal bar t ends <= 14:45 -> entry at open t+1 <= 14:45
 
     def __len__(self) -> int:
         return len(self.close)

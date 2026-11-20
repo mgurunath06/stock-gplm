@@ -40,7 +40,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-CONTRACT = "stock-gplm.upmove.v1"
+CONTRACT = "stock-gplm.upmove.v2"  # v2 2026-11-20: gap-through stops, 15:15 square-off, 14:45 last entry, ATR label
 
 # name -> (family, DSL condition). Pairs are only formed across different families.
 SINGLES: dict[str, tuple[str, str]] = {
@@ -73,6 +73,17 @@ SINGLES: dict[str, tuple[str, str]] = {
     "EMA13 snap-back": ("stretch", "lowest(low - ema(close, 13), 3) < -2 * atr(14) and close > high[1] "
                                    "and close < ema(close, 13)"),
     "ATR contraction": ("vol", "atr(14) < 0.8 * sma(atr(14), 50)"),
+    # owner Chartink scans that are states, not entries (2026-11-20): building blocks only, named as in Chartink
+    "Near EMA200": ("context", "abs(close / ema(close, 200) - 1) <= 0.01"),
+    "Bollinger band Squeeze": ("context", "bb_upper(close, 20, 2) - bb_lower(close, 20, 2) <= 2 * atr(14)"),
+    "Bullish Hourly Convergence": ("context", "(max(ema(close, 20), ema(close, 50), ema(close, 100), ema(close, 200)) - "
+                                              "min(ema(close, 20), ema(close, 50), ema(close, 100), ema(close, 200))) < 0.01 * close "
+                                              'and htf(close, "1d") > htf(ema(close, 50), "1d") '
+                                              'and htf(close, "1w") > htf(ema(close, 21), "1w")'),
+    "Sowmya scan": ("context", 'htf(rsi(close, 14), "1mo") >= 60 and htf(rsi(close, 14), "1w") >= 60 and rsi(close, 14) >= 40'),
+    "GM Bull EMA Sorted": ("context", "ema(close, 9) > ema(close, 13) and ema(close, 13) > ema(close, 20) and "
+                                      "ema(close, 20) > ema(close, 50) and ema(close, 50) > ema(close, 100) and ema(close, 100) > ema(close, 200)"),
+    "Monthly MACD Below 0": ("context", 'htf(macd(close), "1mo") > htf(macd_signal(close), "1mo") and htf(macd(close), "1mo") < 0'),
 }
 
 
@@ -88,6 +99,7 @@ class Params:
     pairs: bool = True
     triples: bool = True
     confirm: int = 150          # best screened triples scored exactly per stock
+    liquidity: bool = True      # skip candles failing the liquidity gate (see liquidity_gate)
 
 
 # Up-move size per timeframe: (target, stop, horizon candles). Owner set 1d = 3% in 5 days, stop 1.5%.
@@ -95,6 +107,21 @@ TF_DEFAULTS: dict[str, tuple[float, float, int]] = {
     "1w": (0.06, 0.03, 4), "1d": (0.03, 0.015, 5), "60m": (0.015, 0.0075, 6),
     "30m": (0.012, 0.006, 8), "15m": (0.01, 0.005, 8), "5m": (0.006, 0.003, 12), "1m": (0.004, 0.002, 15),
 }
+
+
+def liquidity_gate(tf: str) -> str:
+    """Owner liquidity floor (2026-11-20): 20-session median turnover >= Rs 15 Cr and close >= Rs 50, both
+    from completed sessions. Intraday lanes use the mean of the previous 20 complete sessions' volume."""
+    if tf == "1w":
+        return "median(volume * close, 4)[1] >= 750000000 and close[1] >= 50"
+    if tf.endswith("m") or tf == "4h":
+        return "avg_day_volume(20) * prev_day_close() >= 150000000 and prev_day_close() >= 50"
+    return "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50"
+
+
+# Secondary, volatility-normalised label (owner 2026-11-20): +2 x ATR(14) before -1 x ATR(14), same horizon.
+# Reported next to the % label (atr_confidence / atr_lift); ranking still uses the owner's % rule.
+ATR_TARGET, ATR_STOP = 2.0, 1.0
 
 
 # --------------------------------------------------------------------------- pure core
@@ -105,11 +132,14 @@ def weight(age: np.ndarray, p: Params) -> np.ndarray:
 
 
 def outcomes(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, p: Params, cost: float,
-             path_end: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+             path_end: np.ndarray | None = None, target: np.ndarray | None = None,
+             stop: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Per candle t: (hit, net). hit = 1 target first, 0 stop first or time-out; NaN where no full path.
 
-    Entry at open[t+1]; the path is candles t+1 .. min(t+horizon, path_end[t]) (intraday: session end).
+    Entry at open[t+1]; the path is candles t+1 .. min(t+horizon, path_end[t]) (intraday: square-off bar).
     Without ``path_end`` a full ``horizon`` path is required. Vectorised over candles, looped over horizon.
+    ``target`` / ``stop``: optional per-candle fractions (e.g. ATR-based); default ``p.target`` / ``p.stop``.
+    A stop that gaps through fills at the (worse) open, as in the strategy engine.
     """
     n = len(c)
     hit = np.full(n, np.nan)
@@ -126,7 +156,10 @@ def outcomes(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, p: Par
         ok = end >= t + 1
     ok &= ent > 0
     end = np.minimum(end, n - 1)
-    up, dn = ent * (1 + p.target), ent * (1 - p.stop)
+    tg = np.full(n - 1, p.target) if target is None else np.asarray(target, float)[:-1]
+    st = np.full(n - 1, p.stop) if stop is None else np.asarray(stop, float)[:-1]
+    ok &= np.isfinite(tg) & np.isfinite(st)
+    up, dn = ent * (1 + tg), ent * (1 - st)
     done = ~ok
     rh = np.zeros(n - 1)
     rn = np.zeros(n - 1)
@@ -134,10 +167,10 @@ def outcomes(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, p: Par
         idx = np.minimum(t + k, n - 1)
         live = ~done & (t + k <= end)
         s = live & (lo[idx] <= dn)
-        rn[s] = -p.stop
+        rn[s] = np.minimum(o[idx][s], dn[s]) / ent[s] - 1  # gap through the stop: filled at the open
         done |= s
         g = live & ~s & (h[idx] >= up)
-        rh[g], rn[g] = 1.0, p.target
+        rh[g], rn[g] = 1.0, tg[g]
         done |= g
     to = ok & ~done  # neither level touched: exit at the close of the last path candle
     rn[to] = c[end[to]] / ent[to] - 1
@@ -253,9 +286,20 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
     if n < 60:
         return {"symbol": data.symbol, "timeframe": tf, "status": "TOO_SHORT", "bars": n}
     cost = float(lane.costs.buy + lane.costs.sell)
-    path_end = m.session_last if m.intraday else None
+    path_end = m.exit_last if m.intraday else None  # intraday: squared off at 15:15 IST
     hit, net = outcomes(m.open, m.high, m.low, m.close, p, cost, path_end)
-    valid = ~np.isnan(net) & ~m.no_signal
+    # secondary label (owner 2026-11-20): +2 x ATR(14) before -1 x ATR(14) within the same horizon
+    hit_atr, _ = outcomes(m.open, m.high, m.low, m.close, p, cost, path_end,
+                          target=ATR_TARGET * m.natr, stop=ATR_STOP * m.natr)
+    valid = ~np.isnan(net) & ~m.no_signal & (m.entry_ok if m.intraday else True)
+    if p.liquidity:  # owner 2026-11-20: tradable stocks only (proxy for the missing market-cap filter)
+        try:
+            valid &= np.asarray(dsl.signal(liquidity_gate(tf), ctx), dtype=bool)
+        except Exception:  # noqa: BLE001 - no gate possible on this lane: keep the stock ungated
+            pass
+    va = valid & ~np.isnan(hit_atr)
+    wa = weight(n - 1 - np.nonzero(va)[0], p)
+    base_atr = float((wa * hit_atr[va]).sum() / wa.sum()) if wa.sum() else 0.0
     last = n - 1
     vi = np.nonzero(valid)[0]
     wv = weight(last - vi, p)
@@ -305,11 +349,16 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
         seen.add(t.tobytes())
         s = summarize(net[t], hit[t], weight(last - t, p), base_now, p)
         wf = walk_forward(t, net[t], hit[t], base_at[t], p, last)
+        ta = t[~np.isnan(hit_atr[t])]
+        wt = weight(last - ta, p)
+        atr_conf = float(((wt * hit_atr[ta]).sum() + p.prior * base_atr) / (wt.sum() + p.prior))
         rows.append({"trigger": name, "kind": kind, "firings": int(t.size),
                      "firings_last100": int((last - t < 100).sum()),
                      "last_fired": str(m.sessions[t[-1]]), "fires_now": fire_now,
                      **{k: round(v, 5) for k, v in s.items()}, "base_rate": round(base_now, 4),
                      "lift": round(s["confidence"] / base_now, 3) if base_now else None,
+                     "atr_confidence": round(atr_conf, 4), "atr_base_rate": round(base_atr, 4),
+                     "atr_lift": round(atr_conf / base_atr, 3) if base_atr else None,
                      **{k: (round(v, 5) if isinstance(v, float) else v) for k, v in wf.items()
                         if k not in ("taken_t", "taken_net")}})
     rows.sort(key=lambda r: -r["edge"])
