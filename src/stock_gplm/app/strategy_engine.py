@@ -38,7 +38,8 @@ from .strategy_library import StrategyDef
 # excess-return test compares like with like; trade ledgers are returned for the audit trail.
 # v3 (2026-11-20): intraday square-off at 15:15 IST and no new entries after 14:45 IST (owner session rules).
 # v4 (2026-11-20): owner swing exit (exit.swing_stop: stop 0.2% beyond the last swing low/high, target 2x risk).
-ENGINE_CONTRACT = "stock-gplm.strategy-engine.v4"
+# v5: with the swing exit, intraday trades have no bar limit: stop, target or the 15:15 square-off only.
+ENGINE_CONTRACT = "stock-gplm.strategy-engine.v5"
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,8 @@ class Exit:
     def text(self, when: str | None, short: bool) -> str:
         side = "above" if short else "below"
         other = "below" if short else "above"
-        parts = [f"time exit after {self.max_hold} bars at the next open"]
+        parts = [f"time exit after {self.max_hold} bars at the next open (intraday: none, square-off 15:15)"
+                 if self.swing_buffer is not None else f"time exit after {self.max_hold} bars at the next open"]
         if self.swing_buffer is not None:
             parts.append(f"stop {self.swing_buffer:.1%} {side} the last swing {'high' if short else 'low'}, "
                          f"target {self.swing_rr:g}x risk")
@@ -125,6 +127,8 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         sess_end = int(m.exit_last[t + 1])  # square-off bar (15:15 IST), owner rule 2026-11-20
         if sess_end < t + 1:
             return None
+        if p.swing_buffer is not None:  # owner rule: intraday holds to stop / target / 15:15, no bar limit
+            time_bar = sess_end + 1
         hold_end = min(time_bar - 1, sess_end)
     else:
         sess_end = -1
