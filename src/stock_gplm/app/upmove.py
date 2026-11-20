@@ -75,8 +75,8 @@ SINGLES: dict[str, tuple[str, str]] = {
     "ATR contraction": ("vol", "atr(14) < 0.8 * sma(atr(14), 50)"),
     # owner Chartink scans that are states, not entries (2026-11-20): building blocks only, named as in Chartink
     "Near EMA200": ("context", "abs(close / ema(close, 200) - 1) <= 0.01"),
-    "Bollinger band Squeeze": ("context", "bb_upper(close, 20, 2) - bb_lower(close, 20, 2) <= 2 * atr(14)"),
-    "Bullish Hourly Convergence": ("context", "(max(ema(close, 20), ema(close, 50), ema(close, 100), ema(close, 200)) - "
+    "Copy - Bollinger band Squeeze": ("context", "bb_upper(close, 20, 2) - bb_lower(close, 20, 2) <= 2 * atr(14)"),
+    "Copy - Copy - Bullish Hourly Convergence New": ("context", "(max(ema(close, 20), ema(close, 50), ema(close, 100), ema(close, 200)) - "
                                               "min(ema(close, 20), ema(close, 50), ema(close, 100), ema(close, 200))) < 0.01 * close "
                                               'and htf(close, "1d") > htf(ema(close, 50), "1d") '
                                               'and htf(close, "1w") > htf(ema(close, 21), "1w")'),
