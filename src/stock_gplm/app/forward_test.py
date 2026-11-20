@@ -38,7 +38,7 @@ SPLIT = "2026-08-14"  # first day of the out-of-sample test period (owner decisi
 
 
 GRID_MAX = [0.01, 0.015, 0.025, 0.04, None]  # None: always the swing level
-GRID_RR = [1.5, 2.0, 3.0]
+GRID_RR = [2.0, 2.5, 3.0]  # owner rule: target at least 2x risk
 
 
 def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, name: str, learn: bool = False,
