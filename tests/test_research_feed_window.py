@@ -26,3 +26,11 @@ def test_accepts_cloud_provider_window(monkeypatch):
 def test_rejects_invalid_cloud_provider_window(payload):
     with pytest.raises((ValueError, TypeError)):
         feed.parse_provider_window(json.dumps(payload))
+
+
+def test_feeder_universe_excludes_etfs():
+    watch, universe = feed.symbols()
+    assert "SILVERBEES" not in universe
+    assert "LIQUIDBEES" not in universe
+    assert "JETFREIGHT" in universe  # explicit company exclusion, despite containing ETF
+    assert "HDFCBANK" in watch

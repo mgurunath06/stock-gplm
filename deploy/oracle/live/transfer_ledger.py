@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,15 +27,14 @@ def connect():
     return c
 
 
-_ARCHIVE_CONN = None
+_ARCHIVE_LOCAL = threading.local()
 
 
 def archive_connection():
-    """Reuse one read connection; opening and schema-checking per symbol is costly."""
-    global _ARCHIVE_CONN
-    if _ARCHIVE_CONN is None:
-        _ARCHIVE_CONN = sqlite3.connect(DB, timeout=60)
-    return _ARCHIVE_CONN
+    """Reuse one read connection per worker thread."""
+    if not hasattr(_ARCHIVE_LOCAL, "conn"):
+        _ARCHIVE_LOCAL.conn = sqlite3.connect(DB, timeout=60)
+    return _ARCHIVE_LOCAL.conn
 
 
 def event(c, item, kind, detail=None):
