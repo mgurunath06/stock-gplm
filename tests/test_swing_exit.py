@@ -43,3 +43,15 @@ def test_per_stock_settings_precedence_and_candle_fallback_field(tmp_path):
     ex = Exit.of({"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20, "max_swing_pct": 0.025}})
     assert ex.swing_max == 0.025 and ":max0.025" in ex.key()
     assert "signal candle low when the swing is more than 2.5% away" in ex.text(None, False)
+
+
+def test_strategy_level_setting_wins(tmp_path):
+    import json
+    from stock_gplm.app.strategy_engine import swing_settings
+    f = tmp_path / "exits.json"
+    f.write_text(json.dumps({"default": {"buffer": 0.002, "rr": 2.0, "lookback": 20, "max_swing_pct": 0.025},
+                             "stocks": {"RELIANCE": {"1d": {"rr": 1.5, "max_swing_pct": 0.01, "strategies": {
+                                 "O2-066": {"rr": 3.0, "max_swing_pct": None, "learned": {"trades": 9}}}}}}}))
+    assert swing_settings("RELIANCE", "1d", f, strategy_id="O2-066") == {
+        "buffer": 0.002, "rr": 3.0, "lookback": 20, "max_swing_pct": None}
+    assert swing_settings("RELIANCE", "1d", f, strategy_id="O2-001")["rr"] == 1.5

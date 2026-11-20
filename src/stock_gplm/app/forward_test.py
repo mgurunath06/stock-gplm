@@ -78,8 +78,9 @@ def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, na
             learned.append(_learn(stock, tf, m, sigs, (a, b), lane.costs.buy, lane.costs.sell, min_trades, start, end))
         for s, mask, xm in sigs:
             short = s.direction == "short"
-            tr = simulate(m, mask, (a, b), exit_for(s.doc["exit"], stock, tf), lane.costs.buy, lane.costs.sell, short, xm)
+            tr = simulate(m, mask, (a, b), exit_for(s.doc["exit"], stock, tf, s.id), lane.costs.buy, lane.costs.sell, short, xm)
             status[(s.id, tf)] = "OK"
+            sws = swing_settings(stock, tf, strategy_id=s.id)
             for t in tr:
                 trades.append({"strategy_id": s.id, "name": s.doc.get("name", s.id), "timeframe": tf,
                                "side": s.direction, "signal": m.label(t["t"]), "entry": m.label(t["t"] + 1),
@@ -87,7 +88,8 @@ def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, na
                                "exit_price": round(t["exit_price"], 2), "exit_reason": t["exit_reason"],
                                "net_pct": round(100 * t["net_return"], 3), "gross_pct": round(100 * t["gross_return"], 3),
                                "bars_held": t["bars_held"], "max_up_pct": round(100 * t["mfe"], 3),
-                               "max_down_pct": round(100 * t["mae"], 3)})
+                               "max_down_pct": round(100 * t["mae"], 3),
+                               "exit_setting": _fmt(sws.get("max_swing_pct"), float(sws.get("rr", 2.0)))})
     with (out / "trades.csv").open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(trades[0]) if trades else ["strategy_id"])
         w.writeheader()
@@ -99,41 +101,68 @@ def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, na
     return out
 
 
-def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end) -> str:
-    """Grid over max_swing_pct x rr for this stock x timeframe (all its strategies together); best total net with
-    at least ``min_trades`` trades is written to exits.json stocks.<SYM>.<tf> with its evidence."""
-    base = swing_settings(stock, tf)
-    rows = []
+def _fmt(mx, rr) -> str:
+    return f"{'none' if mx is None else f'{mx:.1%}'} / {rr:g}x"
+
+
+def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strategy_trades: int = 8) -> str:
+    """Grid over max_swing_pct x rr. Learned twice, most specific wins when used:
+    * stock x timeframe (all its strategies together, >= ``min_trades``): the fallback;
+    * stock x timeframe x strategy (>= ``min_strategy_trades`` of its own trades): owner 2026-11-20 "granular".
+    Written to exits.json stocks.<SYM>.<tf> (+ .strategies.<id>) with the evidence of the chosen setting."""
+    from .strategy_engine import Exit
+    base = {k: v for k, v in swing_settings(stock, "*").items()}
+    per: dict[tuple, dict[str, list[float]]] = {}
     for mx in GRID_MAX:
         for rr in GRID_RR:
             sw = {**base, "max_swing_pct": mx, "rr": rr}
-            net = []
+            res: dict[str, list[float]] = {}
             for s, mask, xm in sigs:
                 d = dict(s.doc["exit"])
                 if d.get("swing_stop") is None:
                     continue
                 d["swing_stop"] = sw
-                from .strategy_engine import Exit
-                net += [t["net_return"] for t in simulate(m, mask, seg, Exit.of(d), buy, sell, s.direction == "short", xm)]
-            n = len(net)
-            rows.append((sum(net), n, mx, rr, (np.array(net) > 0).mean() if n else 0.0))
-    ok = [r for r in rows if r[1] >= min_trades]
-    if not ok:
-        return f"- {tf}: not enough trades to learn (best had {max((r[1] for r in rows), default=0)})"
-    best = max(ok, key=lambda r: r[0])
+                res[s.id] = [x["net_return"] for x in simulate(m, mask, seg, Exit.of(d), buy, sell,
+                                                               s.direction == "short", xm)]
+            per[(mx, rr)] = res
+
+    def pick(get, need):
+        rows = []
+        for (mx, rr), res in per.items():
+            net = get(res)
+            if len(net) >= need:
+                rows.append((sum(net), len(net), mx, rr, float((np.array(net) > 0).mean())))
+        return max(rows, key=lambda r: r[0]) if rows else None
+
+    def ev(r):
+        return {"from": start, "to": end or "latest", "trades": r[1], "win_rate": round(r[4], 3),
+                "total_net_pct": round(100 * r[0], 2)}
+
     sym = stock.upper().removesuffix("-EQ")
     doc = json.loads(EXITS_FILE.read_text(encoding="utf-8")) if EXITS_FILE.is_file() else {"default": {}, "stocks": {}}
-    doc.setdefault("stocks", {}).setdefault(sym, {})[tf] = {
-        "max_swing_pct": best[2], "rr": best[3],
-        "learned": {"from": start, "to": end or "latest", "trades": best[1], "win_rate": round(float(best[4]), 3),
-                    "total_net_pct": round(100 * best[0], 2)}}
+    best = pick(lambda res: [x for v in res.values() for x in v], min_trades)
+    entry: dict[str, Any] = {}
+    lines = []
+    if best:
+        entry = {"max_swing_pct": best[2], "rr": best[3], "learned": ev(best)}
+        lines.append(f"- {tf} (all strategies): {_fmt(best[2], best[3])} - {best[1]} trades, {best[4]:.0%} win, "
+                     f"total {100 * best[0]:+.1f}%")
+    else:
+        lines.append(f"- {tf} (all strategies): not enough trades; default used")
+    strat: dict[str, Any] = {}
+    for s, _, _ in sigs:
+        r = pick(lambda res, i=s.id: res.get(i, []), min_strategy_trades)
+        if r:
+            strat[s.id] = {"max_swing_pct": r[2], "rr": r[3], "learned": ev(r)}
+    if strat:
+        entry["strategies"] = strat
+        lines.append(f"  - {len(strat)} strategies learned their own exit (>= {min_strategy_trades} trades); "
+                     f"the rest use the line above")
+    doc.setdefault("stocks", {}).setdefault(sym, {})[tf] = entry
     EXITS_FILE.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     import stock_gplm.app.strategy_engine as eng
     eng._EXITS = None  # reload
-    grid = "; ".join(f"max {('none' if r[2] is None else f'{r[2]:.1%}')} rr {r[3]:g}: {r[1]} trades, "
-                     f"{r[4]:.0%} win, total {100 * r[0]:+.1f}%" for r in sorted(rows, key=lambda r: -r[0])[:5])
-    return (f"- {tf}: learned max_swing_pct {('none' if best[2] is None else f'{best[2]:.1%}')}, rr {best[3]:g} "
-            f"({best[1]} trades, {best[4]:.0%} win, total {100 * best[0]:+.1f}%). Top 5: {grid}")
+    return "\n".join(lines)
 
 
 def _stats(ts: list[dict[str, Any]]) -> str:

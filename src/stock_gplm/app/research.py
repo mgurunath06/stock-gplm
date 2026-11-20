@@ -50,7 +50,7 @@ from .m56_catalogue import CataloguePolicy, load_catalogue
 from .m56_status import GatePolicy, derive, validation_evidence
 from . import strategy_dsl as dsl
 from .strategy_engine import (ENGINE_CONTRACT, TRADE_FIELDS, LaneInputs, _compact, evaluate_strategy, final_read,
-                              swing_settings,
+                              stock_exits,
                               lane_regimes)
 from .strategy_library import StrategyDef, StrategyLibrary, normalize, select, validate
 
@@ -685,7 +685,7 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
                 scope_rows = [s for s in pool.values() if s.reference_id and s not in appl]
                 lane_set = sorted(s.sha256 for s in appl if not _replay_any(s, symbol, tf, data.fingerprint))
                 key = sha({"symbol": symbol, "tf": tf, "data": data.fingerprint, "lib": sha(lane_set),
-                           "exits": swing_settings(symbol, tf),
+                           "exits": stock_exits(symbol),
                            "config": app.s.sha256, "methods": sorted(methods), "budget": budget,
                            "engine": ENGINE_CONTRACT})
                 if store.done(key):

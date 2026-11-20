@@ -101,30 +101,45 @@ EXITS_FILE = Path(__file__).resolve().parents[3] / "config" / "strategies" / "ex
 _EXITS: dict[str, Any] | None = None
 
 
-def swing_settings(symbol: str, timeframe: str, path: Path | None = None) -> dict[str, Any]:
-    """Swing-exit settings for one stock x timeframe from exits.json: default < stock "*" < stock timeframe.
-    Learned per stock by ``forward_test --learn-exits`` (owner 2026-11-20: these are per-stock learnings)."""
+SWING_KEYS = ("buffer", "rr", "lookback", "max_swing_pct")
+
+
+def _exits_doc(path: Path | None = None) -> dict[str, Any]:
     global _EXITS
     if path is not None:
-        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    else:
-        if _EXITS is None:
-            _EXITS = json.loads(EXITS_FILE.read_text(encoding="utf-8")) if EXITS_FILE.is_file() else {}
-        doc = _EXITS
-    sym = symbol.upper().removesuffix("-EQ")
-    st = (doc.get("stocks") or {}).get(sym) or {}
-    out = dict(doc.get("default") or {})
-    for part in (st.get("*"), st.get(timeframe)):
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if _EXITS is None:
+        _EXITS = json.loads(EXITS_FILE.read_text(encoding="utf-8")) if EXITS_FILE.is_file() else {}
+    return _EXITS
+
+
+def stock_exits(symbol: str, path: Path | None = None) -> dict[str, Any]:
+    """Everything exits.json says about one stock (default + its entry): part of research's lane cache key."""
+    doc = _exits_doc(path)
+    return {"default": doc.get("default") or {},
+            "stock": (doc.get("stocks") or {}).get(symbol.upper().removesuffix("-EQ")) or {}}
+
+
+def swing_settings(symbol: str, timeframe: str, path: Path | None = None, strategy_id: str | None = None
+                   ) -> dict[str, Any]:
+    """Swing-exit settings from exits.json, most specific wins: default < stock "*" < stock timeframe <
+    stock timeframe strategies.<id>. Learned by ``forward_test --learn-exits`` (owner 2026-11-20: per stock,
+    per strategy - granular learnings)."""
+    se = stock_exits(symbol, path)
+    st = se["stock"]
+    tfp = st.get(timeframe) or {}
+    out = dict(se["default"])
+    for part in (st.get("*"), tfp, (tfp.get("strategies") or {}).get(strategy_id) if strategy_id else None):
         if part:
-            out.update({k: v for k, v in part.items() if k in ("buffer", "rr", "lookback", "max_swing_pct")})
+            out.update({k: v for k, v in part.items() if k in SWING_KEYS})
     return out
 
 
-def exit_for(doc_exit: Mapping[str, Any], symbol: str = "", timeframe: str = "") -> Exit:
-    """Strategy exit with the stock's swing settings applied (only to strategies using the swing exit)."""
+def exit_for(doc_exit: Mapping[str, Any], symbol: str = "", timeframe: str = "", strategy_id: str | None = None) -> Exit:
+    """Strategy exit with the stock's (and strategy's) swing settings applied - only to swing-exit strategies."""
     d = dict(doc_exit)
     if d.get("swing_stop") is not None:
-        d["swing_stop"] = {**d["swing_stop"], **swing_settings(symbol, timeframe)}
+        d["swing_stop"] = {**d["swing_stop"], **swing_settings(symbol, timeframe, strategy_id=strategy_id)}
     return Exit.of(d)
 
 
@@ -363,7 +378,7 @@ def evaluate_strategy(s: StrategyDef, li: LaneInputs, base_cache: dict[Any, Any]
     if s.blocked:
         res.update(status=s.blocked["status"], block_reason=s.blocked["reason"])
         return res
-    ex = exit_for(s.doc["exit"], li.symbol, li.timeframe)
+    ex = exit_for(s.doc["exit"], li.symbol, li.timeframe, s.id)
     segs = segments(len(m), ex.max_hold)
     if segs is None:
         res.update(status="BLOCKED_INSUFFICIENT_HISTORY",
