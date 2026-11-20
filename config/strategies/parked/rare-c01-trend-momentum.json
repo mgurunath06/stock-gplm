@@ -1,0 +1,22 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 1); the hash-bound original text is joined by reference_id at run time",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15) of the catalogue pseudo-code into stock-gplm.strategy-dsl.v1. EXACT = literal mapping of the pseudo-code; APPROXIMATION = documented interpretation (see assumptions). Exit rules are not in the catalogue; they come from the named exit profile.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "1: Trend Following & Momentum",
+    "style": "TREND",
+    "fidelity": "EXACT",
+    "exit": "trend",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "target_atr": null, "trail_atr": 3.0},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "breakout": {"max_hold_bars": 20, "stop_atr": 1.5, "target_atr": 4.0, "trail_atr": 2.5},
+    "short_trend": {"max_hold_bars": 20, "stop_atr": 2.0, "trail_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C1-002", "reference_id": "REF-C1-002", "name": "Death Cross (50/200 SMA)", "direction": "short", "exit": "short_trend", "entry": "cross_below(sma(close, 50), sma(close, 200))", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 12 mean net -0.513%; intraday trades 495 mean net -0.145%. Restore by moving back into config/strategies/library."}
+  ]
+}

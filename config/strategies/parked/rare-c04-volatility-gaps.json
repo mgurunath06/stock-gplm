@@ -1,0 +1,31 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 4)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). Intraday rules (ORB, CPR, Camarilla, midday lull) are written for 5m/15m lanes; daily-bar variants are marked as approximations.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "4: Volatility, Range Contraction & Intraday Gaps",
+    "style": "VOLATILITY",
+    "fidelity": "EXACT",
+    "exit": "breakout",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "breakout": {"max_hold_bars": 20, "stop_atr": 1.5, "target_atr": 4.0, "trail_atr": 2.5},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "short_swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "intraday": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0},
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "trail_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C4-002", "reference_id": "REF-C4-002", "name": "Bollinger Band Width 6-Month Low", "entry": "bb_width(close, 20, 2)[1] == lowest(bb_width(close, 20, 2), 120)[1] and close > bb_upper(close, 20, 2)", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 16 mean net -0.226%; intraday trades 314 mean net -0.106%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-007", "reference_id": "REF-C4-007", "name": "Double Inside Bar (II)", "exit": "swing", "entry": "high[1] < high[2] and low[1] > low[2] and high[2] < high[3] and low[2] > low[3] and close > high[3]", "assumptions": ["Mother_Bar = bar t-3"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 10 mean net 0.248%; intraday trades 187 mean net -0.086%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-008", "reference_id": "REF-C4-008", "name": "Fakey (Inside Bar False Breakout)", "exit": "swing", "entry": "high[1] < high[2] and low[1] > low[2] and low < low[2] and close > high[1]", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 12 mean net 0.125%; intraday trades 465 mean net -0.106%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-012", "reference_id": "REF-C4-012", "name": "Choppiness Index Trend Awakening", "exit": "trend", "entry": "chop(14)[2] > 61.8 and cross_below(chop(14), 50) and close > ema(close, 20)", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 16 mean net -2.599%; intraday trades 396 mean net -0.139%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-021", "reference_id": "REF-C4-021", "name": "Breakaway Gap Up on Volume", "applicability": {"timeframes": ["1d"]}, "entry": "open > highest(high, 30)[1] * 1.01 and close > open and volume > 2.5 * sma(volume, 20)", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 6 mean net 1.045%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-022", "reference_id": "REF-C4-022", "name": "Gap and Go (Power Earnings Gap)", "exit": "swing", "applicability": {"timeframes": ["1d"]}, "entry": "(open - close[1]) / close[1] > 0.03 and low >= open * 0.99", "fidelity": "APPROXIMATION", "assumptions": ["the full-day low replaces the first-15-minute low (stricter); the earnings/news catalyst is not verified"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 11 mean net 1.673%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-024", "reference_id": "REF-C4-024", "name": "Bearish Exhaustion Gap Fade", "direction": "short", "exit": "short_swing", "applicability": {"timeframes": ["1d"]}, "entry": "rsi(close, 14)[1] > 75 and open > high[1] * 1.03 and close < open", "fidelity": "APPROXIMATION", "assumptions": ["daily red candle replaces the first 15-minute red candle"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 1 mean net -3.356%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-033", "reference_id": "REF-C4-033", "name": "Mass Index Reversal Bulge", "exit": "swing", "entry": "any_of(mass_index(9, 25) > 27, 25)[1] and cross_below(mass_index(9, 25), 26.5) and close < ema(close, 9)[5]", "fidelity": "APPROXIMATION", "assumptions": ["the reversal bulge is direction-neutral; the long interpretation requires a prior decline (close below its 9-EMA of 5 bars ago)"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 2 mean net -4.7%; intraday trades 672 mean net -0.148%. Restore by moving back into config/strategies/library."}
+  ]
+}

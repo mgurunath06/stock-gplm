@@ -1,0 +1,25 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 4)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). Intraday rules (ORB, CPR, Camarilla, midday lull) are written for 5m/15m lanes; daily-bar variants are marked as approximations.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "4: Volatility, Range Contraction & Intraday Gaps",
+    "style": "VOLATILITY",
+    "fidelity": "EXACT",
+    "exit": "breakout",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "breakout": {"max_hold_bars": 20, "stop_atr": 1.5, "target_atr": 4.0, "trail_atr": 2.5},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "short_swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "intraday": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0},
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "trail_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C4-028", "reference_id": "REF-C4-028", "name": "Virgin CPR Bounce / Rejection", "blocked": {"status": "BLOCKED_IMPLEMENTATION", "requires": ["OHLCV"], "reason": "needs stateful tracking of whether each prior session's CPR zone has been touched since it formed (a per-level 'untested' state); the DSL has no multi-level zone memory", "proposed_data": "none (OHLCV suffices); needs an 'untested_level(k)' primitive"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C4-039", "reference_id": "REF-C4-039", "name": "Upper Circuit Continuation", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["PRICE_BAND"], "reason": "needs the per-session NSE price band (5/10/20%) to know the circuit price; inferring the band from price moves is not allowed", "proposed_data": "NSE daily security-wise price band files (sec_list / price-band changes), browser-downloaded and manifest-registered"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."}
+  ]
+}

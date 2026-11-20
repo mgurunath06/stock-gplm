@@ -1,0 +1,26 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 3)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). Default exit follows the catalogue's own guidance for mean reversion: exit at the next open after Close > SMA(5) (short: Close < SMA(5)), with a protective ATR stop and a time limit.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "3: Mean Reversion, Oscillators & Divergence",
+    "style": "MEAN_REVERSION",
+    "fidelity": "EXACT",
+    "exit": "meanrev",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "short_meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close < sma(close, 5)"},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "short_swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "intraday": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0},
+    "intraday_short": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C3-023", "reference_id": "REF-C3-023", "name": "200-DMA Institutional Touch Bounce", "applicability": {"timeframes": ["1d"]}, "entry": "lowest(close, 120)[1] > sma(close, 200) and low <= sma(close, 200) * 1.01 and close > sma(close, 200)", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 1 mean net 1.528%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C3-043", "reference_id": "REF-C3-043", "name": "ATR Stretch from 21-EMA Fade", "direction": "short", "exit": "short_meanrev", "entry": "(close - ema(close, 21)) / atr(14) > $k and close < open", "params": {"k": {"default": 3.5, "grid": [2.5, 3.0, 3.5]}}, "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 11 mean net 0.213%; intraday trades 597 mean net -0.096%. Restore by moving back into config/strategies/library."},
+    {"id": "C3-050", "reference_id": "REF-C3-050", "name": "RSI + Bollinger Confluence Washout", "entry": "close[1] < bb_lower(close, 20, 2)[1] and rsi(close, 14)[1] < 25 and close > high[1]", "assumptions": ["the washout bar is t-1; 'next bar Close > prev High' is the signal bar t"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 8 mean net 0.472%; intraday trades 218 mean net -0.117%. Restore by moving back into config/strategies/library."}
+  ]
+}

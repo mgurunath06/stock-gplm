@@ -1,0 +1,25 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 2)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). Delivery, free-float and corporate-event inputs are not available locally; those entries are BLOCKED with the precise data requirement.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "2: Volume, Delivery & Accumulation",
+    "style": "VOLUME",
+    "fidelity": "EXACT",
+    "exit": "swing",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "target_atr": null, "trail_atr": 3.0},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "breakout": {"max_hold_bars": 20, "stop_atr": 1.5, "target_atr": 4.0, "trail_atr": 2.5},
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "short_swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "intraday": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C2-013", "reference_id": "REF-C2-013", "name": "CMF Institutional Thrust", "exit": "trend", "entry": "all_of(cmf(20) > 0.25, 5)", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 14 mean net -0.026%; intraday trades 950 mean net -0.142%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-038", "reference_id": "REF-C2-038", "name": "Effort vs Result Bullish Absorption", "entry": "volume > 2.5 * sma(volume, 20) and (high - low) < 0.6 * atr(14) and low == lowest(low, 10)", "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 2 mean net 2.852%; intraday trades 22 mean net -0.11%. Restore by moving back into config/strategies/library."}
+  ]
+}

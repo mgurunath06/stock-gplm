@@ -1,0 +1,30 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 2)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). Delivery, free-float and corporate-event inputs are not available locally; those entries are BLOCKED with the precise data requirement.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "2: Volume, Delivery & Accumulation",
+    "style": "VOLUME",
+    "fidelity": "EXACT",
+    "exit": "swing",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "target_atr": null, "trail_atr": 3.0},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "breakout": {"max_hold_bars": 20, "stop_atr": 1.5, "target_atr": 4.0, "trail_atr": 2.5},
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "short_swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "intraday": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C2-005", "reference_id": "REF-C2-005", "name": "NSE Delivery Percentage Spike", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["DELIVERY"], "reason": "needs per-session delivery quantity and delivery %; not in local Shoonya OHLCV", "proposed_data": "NSE security-wise delivery position (sec_bhavdata_full / MTO files) per session, downloaded by a person in a browser and registered with a checksum manifest"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-006", "reference_id": "REF-C2-006", "name": "Rising Price + Rising Delivery (3-Day Accumulation)", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["DELIVERY"], "reason": "needs per-session delivery %", "proposed_data": "NSE sec_bhavdata_full delivery columns, browser-downloaded and manifest-registered"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-007", "reference_id": "REF-C2-007", "name": "High Delivery at Support Zone", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["DELIVERY"], "reason": "needs per-session delivery volume", "proposed_data": "NSE sec_bhavdata_full delivery columns"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-008", "reference_id": "REF-C2-008", "name": "Low Delivery Price Drop (Fake Selloff)", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["DELIVERY"], "reason": "needs per-session delivery %", "proposed_data": "NSE sec_bhavdata_full delivery columns"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-021", "reference_id": "REF-C2-021", "name": "Anchored VWAP Breakout from Earnings", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["CORPORATE_EVENT"], "reason": "the anchor is the quarterly results date, which is not available locally (dates are never inferred from price)", "proposed_data": "dated NSE/BSE board-meeting / financial-results announcements per symbol"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-049", "reference_id": "REF-C2-049", "name": "Weis Wave Cumulative Volume Breakout", "blocked": {"status": "BLOCKED_IMPLEMENTATION", "requires": ["OHLCV"], "reason": "needs zig-zag wave segmentation with variable-length per-wave volume sums; the DSL has only fixed-window sums", "proposed_data": "none (OHLCV suffices); needs a 'wave_volume(threshold)' primitive"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C2-050", "reference_id": "REF-C2-050", "name": "Float Turnover Velocity", "blocked": {"status": "BLOCKED_MISSING_DATA", "requires": ["FREE_FLOAT"], "reason": "needs point-in-time free-float share counts", "proposed_data": "quarterly NSE shareholding-pattern filings (promoter / public holding) per symbol"}, "notes": "PARKED 2026-11-20 (blocked): BLOCKED (no data/method); daily trades - mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."}
+  ]
+}

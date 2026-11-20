@@ -1,0 +1,28 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 6)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). Index-relative entries are DEFERRED (owner priority change: no ETF-for-index substitution); they originally used ETF PROXIES that exist as local candles: Nifty 50 -> NIFTYBEES-EQ, Nifty Bank -> BANKBEES-EQ, Nifty IT -> ITBEES-EQ (tracking error and ETF fees apply; recorded as APPROXIMATION). Cross-sectional 'top decile of the universe' rules are translated as time-series thresholds (APPROXIMATION) because no point-in-time universe exists. F&O, options, VIX, institutional-flow and delivery rules are BLOCKED with the exact data requirement.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "6: Indian F&O, Quantitative & Relative Strength",
+    "style": "RELATIVE_STRENGTH",
+    "fidelity": "APPROXIMATION",
+    "exit": "trend",
+    "applicability": {"symbols": "*", "timeframes": ["1d"]}
+  },
+  "exit_profiles": {
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "trail_atr": 3.0},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "position": {"max_hold_bars": 60, "stop_atr": 3.0, "trail_atr": 4.0},
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "pair": {"max_hold_bars": 20, "stop_atr": 3.0, "when": "zscore(log(close) - log(ref_symbol(\"ICICIBANK\", close)), 60) > 0"},
+    "pair_it": {"max_hold_bars": 20, "stop_atr": 3.0, "when": "zscore(log(close) - log(ref_symbol(\"INFY\", close)), 60) > 0"}
+  },
+  "strategies": [
+    {"id": "C6-003", "reference_id": "REF-C6-003", "name": "Alpha Rotation (Composite Momentum)", "exit": "position", "entry": "0.4 * roc(close, 63) + 0.3 * roc(close, 126) + 0.3 * roc(close, 252) > $th", "params": {"th": {"default": 0.3, "grid": [0.2, 0.3, 0.45]}}, "assumptions": ["time-series threshold replaces the cross-sectional >= 90th percentile rank of NSE 500 (no point-in-time universe)"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 5 mean net 3.917%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C6-026", "reference_id": "REF-C6-026", "name": "Hurst Regime Router: Trend Branch", "exit": "trend", "entry": "hurst(close, 100) > 0.60 and close > highest(high, 20)[1]", "assumptions": ["the router enables 'trend rules'; the trend rule used is a 20-bar Donchian breakout"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 1 mean net 3.1%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C6-030", "reference_id": "REF-C6-030", "name": "12-1 Momentum with Recent Dip", "exit": "position", "entry": "close[21] / close[252] - 1 > $th and roc(close, 21) < 0", "params": {"th": {"default": 0.3, "grid": [0.2, 0.3, 0.5]}}, "assumptions": ["time-series threshold replaces 'top 10% of universe'"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 13 mean net 1.589%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C6-032", "reference_id": "REF-C6-032", "name": "Amihud Illiquidity Drop", "entry": "sma(abs(ret) / (close * volume), 20) < 0.5 * sma(sma(abs(ret) / (close * volume), 20), 100) and close > sma(close, 50)", "assumptions": ["traded value approximated by close x volume; long direction requires close > SMA50 (the catalogue gives a trigger without direction)"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 14 mean net -0.043%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C6-035", "reference_id": "REF-C6-035", "name": "PEAD Technical Proxy", "exit": {"max_hold_bars": 30, "stop_atr": 2.0, "trail_atr": 3.0}, "entry": "any_of(gap > 0.04 and volume > 3 * sma(volume, 20), 10) and low <= ema(close, 10) and close > ema(close, 10)", "assumptions": ["results day proxied by a >4% gap on 3x volume (no announcement dates)"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 2 mean net 6.297%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."}
+  ]
+}

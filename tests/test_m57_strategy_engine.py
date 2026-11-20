@@ -50,11 +50,15 @@ def test_chained_comparison_and_params() -> None:
 def test_shipped_library_covers_every_catalogue_reference(tmp_path: Path) -> None:
     from stock_gplm.app.m56_catalogue import load_catalogue
 
+    # 2026-11-20 revamp: dead/rare/blocked translations live in config/strategies/parked (not loaded by runs);
+    # every reference must still be active or parked, and parked files must stay valid for restore.
     lib = StrategyLibrary([REPO / "config" / "strategies" / "library"], tmp_path / "w").load()
-    assert not lib.invalid
+    parked = StrategyLibrary([REPO / "config" / "strategies" / "parked"], tmp_path / "p").load()
+    assert not lib.invalid and not parked.invalid
+    assert not set(lib.strategies) & set(parked.strategies)
     refs = {r.reference_id for r in load_catalogue(REPO / "config" / "strategies" /
                                                      "reference-300-strategies.txt").references}
-    assert refs <= {s.reference_id for s in lib.strategies.values()}
+    assert refs <= {s.reference_id for s in [*lib.strategies.values(), *parked.strategies.values()]}
 
 
 def test_config_only_strategy_versioning_edit_restore(tmp_path: Path) -> None:

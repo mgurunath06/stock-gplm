@@ -1,0 +1,23 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (GPLM expansion addendum, entries 301-340)",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15). 'trained_threshold' / 'calibrated_quantile' placeholders become parameter grids chosen on the discovery segment only. Method entries (336-340) are executed as discovery methods of research-matrix, not as single rules.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "fidelity": "APPROXIMATION",
+    "exit": "swing",
+    "applicability": {"symbols": "*", "timeframes": ["1d"]}
+  },
+  "exit_profiles": {
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "short_swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "trail_atr": 3.0},
+    "position": {"max_hold_bars": 60, "stop_atr": 3.0, "trail_atr": 4.0},
+    "meanrev": {"max_hold_bars": 10, "stop_atr": 2.5, "when": "close > sma(close, 5)"},
+    "intraday_to_close": {"max_hold_bars": 30, "stop_atr": 2.0},
+    "intraday": {"max_hold_bars": 24, "stop_atr": 1.5, "target_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C8-308", "reference_id": "REF-C8-308", "name": "Liquidity-Shock Reversal", "category": "8: Statistical & Cross-Sectional Mean Reversion", "style": "MEAN_REVERSION", "exit": "meanrev", "entry": "percentrank(abs(ret) / (close * volume), 250)[1] > 0.95 and ret[1] < -$q and close > close[1]", "params": {"q": {"default": 0.03, "grid": [0.02, 0.03, 0.05]}}, "assumptions": ["RupeeTurnover approximated by close x volume; the shock bar is t-1 and the confirming higher close is t"], "notes": "PARKED 2026-11-20 (rare): TOO RARE; daily trades 18 mean net 1.234%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."}
+  ]
+}

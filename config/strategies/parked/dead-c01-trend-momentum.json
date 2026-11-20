@@ -1,0 +1,32 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "config/strategies/reference-300-strategies.txt (Category 1); the hash-bound original text is joined by reference_id at run time",
+  "translation": "AI-assisted translation (Claude Opus 5.5, 2026-11-15) of the catalogue pseudo-code into stock-gplm.strategy-dsl.v1. EXACT = literal mapping of the pseudo-code; APPROXIMATION = documented interpretation (see assumptions). Exit rules are not in the catalogue; they come from the named exit profile.",
+  "defaults": {
+    "origin": "CATALOGUE_DERIVED",
+    "category": "1: Trend Following & Momentum",
+    "style": "TREND",
+    "fidelity": "EXACT",
+    "exit": "trend",
+    "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
+  },
+  "exit_profiles": {
+    "trend": {"max_hold_bars": 30, "stop_atr": 2.0, "target_atr": null, "trail_atr": 3.0},
+    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
+    "breakout": {"max_hold_bars": 20, "stop_atr": 1.5, "target_atr": 4.0, "trail_atr": 2.5},
+    "short_trend": {"max_hold_bars": 20, "stop_atr": 2.0, "trail_atr": 3.0}
+  },
+  "strategies": [
+    {"id": "C1-005", "reference_id": "REF-C1-005", "name": "Triple EMA Ribbon Fan-Out (5/8/13 EMA)", "exit": "swing", "entry": "ema(close, 5) > ema(close, 8) > ema(close, 13) and rising(ema(close, 5) - ema(close, 13), 3)", "fidelity": "APPROXIMATION", "assumptions": ["'expanding over 3 bars' = the EMA5-EMA13 spread rose on each of the last 3 bars"], "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 439 mean net -0.169%; intraday trades 3620 mean net -0.135%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-008", "reference_id": "REF-C1-008", "name": "VWMA over SMA Confirmation", "exit": "swing", "entry": "cross_above(vwma(close, 20), sma(close, 20)) and close > vwma(close, 20)", "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 174 mean net -0.821%; intraday trades 2182 mean net -0.12%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-014", "reference_id": "REF-C1-014", "name": "Impulse MACD Surge", "exit": "swing", "entry": "macd(close) > macd_signal(close) and macd(close) > sma(macd(close), 20) + $k * stdev(macd(close), 20)", "params": {"k": {"default": 2.0, "grid": [1.0, 1.5, 2.0]}}, "fidelity": "APPROXIMATION", "assumptions": ["Upper_StdDev_Band(MACD, 20) = SMA(MACD,20) + k x StdDev(MACD,20); k not given, default 2"], "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 354 mean net -0.193%; intraday trades 3429 mean net -0.136%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-028", "reference_id": "REF-C1-028", "name": "52-Week High Breakout", "exit": "breakout", "applicability": {"timeframes": ["1d"]}, "entry": "close > highest(high, 252)[1] and volume > 1.5 * sma(volume, 20)", "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 27 mean net -0.704%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-028-W", "reference_id": "REF-C1-028", "interpretation": "B", "name": "52-Week High Breakout (weekly bars)", "exit": "breakout", "applicability": {"timeframes": ["1w"]}, "entry": "close > highest(high, 52)[1] and volume > 1.5 * sma(volume, 20)", "fidelity": "APPROXIMATION", "assumptions": ["52 weekly bars = 52 weeks; volume average over 20 weeks"], "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 0 mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-029", "reference_id": "REF-C1-029", "name": "All-Time High Blue Sky Breakout", "exit": "breakout", "applicability": {"timeframes": ["1d", "1w"]}, "entry": "close > cummax(high)[1] and barssince(close > 0) > 250", "fidelity": "APPROXIMATION", "assumptions": ["All_Time_High is bounded by the start of local data (2022-10-31 for most symbols); signals start after 250 bars of history so the 'ATH' is at least a ~1-year high. This is NOT a true lifetime high."], "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 0 mean net -%; intraday trades - mean net -%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-031", "reference_id": "REF-C1-031", "name": "Donchian 55-Day Breakout", "exit": "breakout", "entry": "close > highest(high, 55)[1]", "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 116 mean net -1.232%; intraday trades 1663 mean net -0.12%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-035", "reference_id": "REF-C1-035", "name": "Rate of Change (ROC) Thrust", "entry": "cross_above(roc(close, 12), $th) and volume > sma(volume, 20)", "params": {"th": {"default": 0.1, "grid": [0.05, 0.1, 0.15]}}, "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 73 mean net -0.031%; intraday trades 8 mean net -0.041%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-040", "reference_id": "REF-C1-040", "name": "CMO Trend Surge", "exit": "swing", "entry": "cross_above(cmo(14), 50)", "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 156 mean net -0.834%; intraday trades 2026 mean net -0.15%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-042", "reference_id": "REF-C1-042", "name": "Heikin-Ashi Strong Bull Run", "exit": "swing", "entry": "all_of(ha_close > ha_open, 3) and ha_low == ha_open", "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 494 mean net -0.015%; intraday trades 4032 mean net -0.134%. Restore by moving back into config/strategies/library."},
+    {"id": "C1-047", "reference_id": "REF-C1-047", "name": "BOP Sustained Positive", "exit": "swing", "entry": "sma((close - open) / (high - low), 14) > $th", "params": {"th": {"default": 0.3, "grid": [0.2, 0.3]}}, "notes": "PARKED 2026-11-20 (dead): DEAD (loses after costs); daily trades 47 mean net -0.192%; intraday trades 1346 mean net -0.134%. Restore by moving back into config/strategies/library."}
+  ]
+}
