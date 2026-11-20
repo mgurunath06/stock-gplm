@@ -23,7 +23,9 @@ futures-like short with the same cost model).
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -54,18 +56,24 @@ class Exit:
     swing_buffer: float | None = None
     swing_rr: float = 2.0
     swing_lookback: int = 20
+    # owner 2026-11-20: when the swing level is further than this from entry, the stop goes beyond the
+    # signal candle's own low (high for shorts) instead. None = always the swing level.
+    swing_max: float | None = None
 
     @staticmethod
     def of(d: Mapping[str, Any]) -> "Exit":
         sw = d.get("swing_stop") or {}
+        mx = sw.get("max_swing_pct") if sw else None
         return Exit(int(d["max_hold_bars"]), d.get("stop_atr"), d.get("target_atr"), d.get("trail_atr"),
                     float(sw.get("buffer", 0.002)) if sw else None, float(sw.get("rr", 2.0)),
-                    int(sw.get("lookback", 20)))
+                    int(sw.get("lookback", 20)), float(mx) if mx is not None else None)
 
     def key(self) -> str:
         k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
         if self.swing_buffer is not None:
             k += f"|swing:{self.swing_buffer:g}:{self.swing_rr:g}:{self.swing_lookback}"
+            if self.swing_max is not None:
+                k += f":max{self.swing_max:g}"
         return k
 
     def text(self, when: str | None, short: bool) -> str:
@@ -74,8 +82,10 @@ class Exit:
         parts = [f"time exit after {self.max_hold} bars at the next open (intraday: none, square-off 15:15)"
                  if self.swing_buffer is not None else f"time exit after {self.max_hold} bars at the next open"]
         if self.swing_buffer is not None:
-            parts.append(f"stop {self.swing_buffer:.1%} {side} the last swing {'high' if short else 'low'}, "
-                         f"target {self.swing_rr:g}x risk")
+            parts.append(f"stop {self.swing_buffer:.1%} {side} the last swing {'high' if short else 'low'}"
+                         + (f" (signal candle {'high' if short else 'low'} when the swing is more than "
+                            f"{self.swing_max:.1%} away)" if self.swing_max is not None else "")
+                         + f", target {self.swing_rr:g}x risk")
         if self.stop_atr:
             parts.append(f"stop {self.stop_atr:g}xATR(14) {side} entry")
         if self.target_atr:
@@ -85,6 +95,37 @@ class Exit:
         if when:
             parts.append(f"exit at next open when: {when}")
         return "; ".join(parts)
+
+
+EXITS_FILE = Path(__file__).resolve().parents[3] / "config" / "strategies" / "exits.json"
+_EXITS: dict[str, Any] | None = None
+
+
+def swing_settings(symbol: str, timeframe: str, path: Path | None = None) -> dict[str, Any]:
+    """Swing-exit settings for one stock x timeframe from exits.json: default < stock "*" < stock timeframe.
+    Learned per stock by ``forward_test --learn-exits`` (owner 2026-11-20: these are per-stock learnings)."""
+    global _EXITS
+    if path is not None:
+        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    else:
+        if _EXITS is None:
+            _EXITS = json.loads(EXITS_FILE.read_text(encoding="utf-8")) if EXITS_FILE.is_file() else {}
+        doc = _EXITS
+    sym = symbol.upper().removesuffix("-EQ")
+    st = (doc.get("stocks") or {}).get(sym) or {}
+    out = dict(doc.get("default") or {})
+    for part in (st.get("*"), st.get(timeframe)):
+        if part:
+            out.update({k: v for k, v in part.items() if k in ("buffer", "rr", "lookback", "max_swing_pct")})
+    return out
+
+
+def exit_for(doc_exit: Mapping[str, Any], symbol: str = "", timeframe: str = "") -> Exit:
+    """Strategy exit with the stock's swing settings applied (only to strategies using the swing exit)."""
+    d = dict(doc_exit)
+    if d.get("swing_stop") is not None:
+        d["swing_stop"] = {**d["swing_stop"], **swing_settings(symbol, timeframe)}
+    return Exit.of(d)
 
 
 def swing_level(low: np.ndarray, high: np.ndarray, t: int, entry: float, short: bool, lookback: int) -> float | None:
@@ -118,6 +159,9 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     target = entry + sgn * p.target_atr * atr if p.target_atr else (-math.inf if short else math.inf)
     if p.swing_buffer is not None:
         lvl = swing_level(m.low, m.high, t, entry, short, p.swing_lookback)
+        if lvl is not None and p.swing_max is not None and abs(entry - lvl) / entry > p.swing_max:
+            c = float(m.high[t]) if short else float(m.low[t])  # signal candle low / high
+            lvl = c if (c > entry if short else c < entry) else None
         if lvl is None:
             return None  # entry opened beyond the swing level: no valid stop, no trade
         stop = lvl * (1 + p.swing_buffer) if short else lvl * (1 - p.swing_buffer)
@@ -303,6 +347,7 @@ class LaneInputs:
     timeframe: str
     folds: int
     min_trades_opt: int = 8
+    symbol: str = ""  # for per-stock exit settings (config/strategies/exits.json)
     audit_discovery: bool = False  # also keep discovery-segment trades of the chosen configuration
 
 
@@ -318,7 +363,7 @@ def evaluate_strategy(s: StrategyDef, li: LaneInputs, base_cache: dict[Any, Any]
     if s.blocked:
         res.update(status=s.blocked["status"], block_reason=s.blocked["reason"])
         return res
-    ex = Exit.of(s.doc["exit"])
+    ex = exit_for(s.doc["exit"], li.symbol, li.timeframe)
     segs = segments(len(m), ex.max_hold)
     if segs is None:
         res.update(status="BLOCKED_INSUFFICIENT_HISTORY",

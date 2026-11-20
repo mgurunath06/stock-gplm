@@ -29,3 +29,17 @@ def test_exit_from_profile():
     assert "swing:0.002:2:20" in ex.key()
     assert "0.2% below the last swing low, target 2x risk" in ex.text(None, False)
     assert Exit.of({"max_hold_bars": 10, "stop_atr": 2.0}).swing_buffer is None
+
+
+def test_per_stock_settings_precedence_and_candle_fallback_field(tmp_path):
+    import json
+    from stock_gplm.app.strategy_engine import swing_settings
+    f = tmp_path / "exits.json"
+    f.write_text(json.dumps({"default": {"buffer": 0.002, "rr": 2.0, "lookback": 20, "max_swing_pct": 0.025},
+                             "stocks": {"RELIANCE": {"*": {"rr": 3.0}, "1d": {"max_swing_pct": 0.04, "learned": {}}}}}))
+    assert swing_settings("RELIANCE-EQ", "1d", f) == {"buffer": 0.002, "rr": 3.0, "lookback": 20, "max_swing_pct": 0.04}
+    assert swing_settings("RELIANCE", "5m", f)["max_swing_pct"] == 0.025
+    assert swing_settings("INFY", "1d", f)["rr"] == 2.0
+    ex = Exit.of({"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20, "max_swing_pct": 0.025}})
+    assert ex.swing_max == 0.025 and ":max0.025" in ex.key()
+    assert "signal candle low when the swing is more than 2.5% away" in ex.text(None, False)

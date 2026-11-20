@@ -1,0 +1,58 @@
+{
+  "contract": "stock-gplm.exits.v1",
+  "note": "Owner swing exit (2026-11-20). Stop = buffer beyond the last swing low (high for shorts); if that swing is more than max_swing_pct away from entry, the stop goes beyond the signal candle's low (high) instead. Target = rr x risk. Intraday: square-off 15:15. Per-stock values are learnings: `python -m stock_gplm.app.forward_test --stock SYM --learn-exits` writes stocks.SYM.<tf>; precedence default < stocks.SYM.* < stocks.SYM.<tf>.",
+  "default": {
+    "buffer": 0.002,
+    "rr": 2.0,
+    "lookback": 20,
+    "max_swing_pct": 0.025
+  },
+  "stocks": {
+    "RELIANCE": {
+      "5m": {
+        "max_swing_pct": 0.015,
+        "rr": 3.0,
+        "learned": {
+          "from": "2026-01-01",
+          "to": "latest",
+          "trades": 2032,
+          "win_rate": 0.369,
+          "total_net_pct": -185.58
+        }
+      },
+      "15m": {
+        "max_swing_pct": 0.01,
+        "rr": 3.0,
+        "learned": {
+          "from": "2026-01-01",
+          "to": "latest",
+          "trades": 1273,
+          "win_rate": 0.407,
+          "total_net_pct": -75.15
+        }
+      },
+      "60m": {
+        "max_swing_pct": 0.01,
+        "rr": 3.0,
+        "learned": {
+          "from": "2026-01-01",
+          "to": "latest",
+          "trades": 248,
+          "win_rate": 0.456,
+          "total_net_pct": 0.18
+        }
+      },
+      "1d": {
+        "max_swing_pct": 0.01,
+        "rr": 1.5,
+        "learned": {
+          "from": "2026-01-01",
+          "to": "latest",
+          "trades": 145,
+          "win_rate": 0.338,
+          "total_net_pct": -75.85
+        }
+      }
+    }
+  }
+}
