@@ -86,6 +86,48 @@ SINGLES: dict[str, tuple[str, str]] = {
     "Monthly MACD Below 0": ("context", 'htf(macd(close), "1mo") > htf(macd_signal(close), "1mo") and htf(macd(close), "1mo") < 0'),
 }
 
+# Down-move learner (side = short, owner 2026-11-20: intraday short or PE buy): the mirror of SINGLES.
+SINGLES_SHORT: dict[str, tuple[str, str]] = {
+    "EMA13 below EMA20": ("ema", "cross_below(ema(close, 13), ema(close, 20))"),
+    "EMA13 below EMA50": ("ema", "cross_below(ema(close, 13), ema(close, 50))"),
+    "EMA13 below EMA100": ("ema", "cross_below(ema(close, 13), ema(close, 100))"),
+    "EMA13 below EMA200": ("ema", "cross_below(ema(close, 13), ema(close, 200))"),
+    "close below EMA13": ("ema", "cross_below(close, ema(close, 13))"),
+    "close < EMA50": ("trend", "close < ema(close, 50)"),
+    "close < EMA200": ("trend", "close < ema(close, 200)"),
+    "EMA13 < EMA50": ("trend", "ema(close, 13) < ema(close, 50)"),
+    "ADX > 20": ("trend", "adx(14) > 20"),
+    "MACD below signal": ("macd", "cross_below(macd(close), macd_signal(close))"),
+    "MACD < 0": ("macd", "macd(close) < 0"),
+    "RSI below 50": ("rsi", "cross_below(rsi(close, 14), 50)"),
+    "RSI below 70": ("rsi", "cross_below(rsi(close, 14), 70)"),
+    "RSI 30-50": ("rsi", "rsi(close, 14) > 30 and rsi(close, 14) < 50"),
+    "RSI > 65": ("rsi", "rsi(close, 14) > 65"),
+    "volume > 1.5x avg": ("volume", "volume > 1.5 * sma(volume, 20)"),
+    "volume surge down-day": ("volume", "volume > 2 * sma(volume, 20) and close < open"),
+    "OBV < its avg": ("volume", "obv < sma(obv, 20)"),
+    "close < prev low": ("price", "close < low[1]"),
+    "5-candle breakdown": ("price", "close < lowest(low, 5)[1]"),
+    "20-candle breakdown": ("price", "close < lowest(low, 20)[1]"),
+    "bearish engulfing": ("price", "close < open and close[1] > open[1] and close < open[1] and open > close[1]"),
+    "shooting star": ("price", "(high - max(open, close)) > 2 * abs(close - open) and "
+                               "(min(open, close) - low) < 0.2 * (high - low)"),
+    "near 20-candle high": ("price", "high >= highest(high, 20)[1] * 0.99"),
+    "stretched above EMA13": ("stretch", "(close - ema(close, 13)) > 2 * atr(14)"),
+    "EMA13 snap-back (short)": ("stretch", "highest(high - ema(close, 13), 3) > 2 * atr(14) and close < low[1] "
+                                           "and close > ema(close, 13)"),
+    "5 EMA alert candle": ("stretch", "low[1] > ema(close, 5)[1] and low < low[1]"),
+    "ATR contraction": ("vol", "atr(14) < 0.8 * sma(atr(14), 50)"),
+    "Near EMA200": ("context", "abs(close / ema(close, 200) - 1) <= 0.01"),
+    "Copy - Bollinger band Squeeze": ("context", "bb_upper(close, 20, 2) - bb_lower(close, 20, 2) <= 2 * atr(14)"),
+    "GM Bear EMA Sorted": ("context", "ema(close, 9) < ema(close, 13) and ema(close, 13) < ema(close, 20) and "
+                                      "ema(close, 20) < ema(close, 50) and ema(close, 50) < ema(close, 100) and ema(close, 100) < ema(close, 200)"),
+}
+
+
+def singles(side: str) -> dict[str, tuple[str, str]]:
+    return SINGLES_SHORT if side == "short" else SINGLES
+
 
 @dataclass(frozen=True)
 class Params:
@@ -100,6 +142,7 @@ class Params:
     triples: bool = True
     confirm: int = 150          # best screened triples scored exactly per stock
     liquidity: bool = True      # skip candles failing the liquidity gate (see liquidity_gate)
+    side: str = "long"          # "short" = down-move learner (same sizes, mirrored; for intraday shorts / PE buys)
 
 
 # Up-move size per timeframe: (target, stop, horizon candles). Owner set 1d = 3% in 5 days, stop 1.5%.
@@ -159,21 +202,28 @@ def outcomes(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, p: Par
     tg = np.full(n - 1, p.target) if target is None else np.asarray(target, float)[:-1]
     st = np.full(n - 1, p.stop) if stop is None else np.asarray(stop, float)[:-1]
     ok &= np.isfinite(tg) & np.isfinite(st)
-    up, dn = ent * (1 + tg), ent * (1 - st)
+    short = p.side == "short"  # down-move: target below entry, stop above (intraday short / PE)
+    up, dn = (ent * (1 + st), ent * (1 - tg)) if short else (ent * (1 + tg), ent * (1 - st))
     done = ~ok
     rh = np.zeros(n - 1)
     rn = np.zeros(n - 1)
     for k in range(1, p.horizon + 1):
         idx = np.minimum(t + k, n - 1)
         live = ~done & (t + k <= end)
-        s = live & (lo[idx] <= dn)
-        rn[s] = np.minimum(o[idx][s], dn[s]) / ent[s] - 1  # gap through the stop: filled at the open
-        done |= s
-        g = live & ~s & (h[idx] >= up)
+        if short:
+            s = live & (h[idx] >= up)
+            rn[s] = 1 - np.maximum(o[idx][s], up[s]) / ent[s]  # gap through the stop: filled at the open
+            done |= s
+            g = live & ~s & (lo[idx] <= dn)
+        else:
+            s = live & (lo[idx] <= dn)
+            rn[s] = np.minimum(o[idx][s], dn[s]) / ent[s] - 1  # gap through the stop: filled at the open
+            done |= s
+            g = live & ~s & (h[idx] >= up)
         rh[g], rn[g] = 1.0, tg[g]
         done |= g
     to = ok & ~done  # neither level touched: exit at the close of the last path candle
-    rn[to] = c[end[to]] / ent[to] - 1
+    rn[to] = (1 - c[end[to]] / ent[to]) if short else (c[end[to]] / ent[to] - 1)
     hit[:-1] = np.where(ok, rh, np.nan)
     net[:-1] = np.where(ok, rn - cost, np.nan)
     return hit, net
@@ -315,7 +365,7 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
     masks: dict[str, np.ndarray] = {}
     fam: dict[str, str] = {}
     errors: dict[str, str] = {}
-    for name, (f, expr) in SINGLES.items():
+    for name, (f, expr) in singles(p.side).items():
         try:
             masks[name] = dsl.signal(expr, ctx)
             fam[name] = f
@@ -392,9 +442,11 @@ def qualified(r: Mapping[str, Any]) -> bool:
 def report(out: Path, results: Sequence[Mapping[str, Any]], p: Params, tf: str) -> dict[str, Any]:
     trig_rows, today = [], []
     ok = [r for r in results if r.get("status") == "OK"]
-    lines = [f"# Up-move learner ({tf})", "",
-             f"Up-move = +{p.target:.2%} within {p.horizon} candles before -{p.stop:.2%} (costs included). "
-             f"All history, weight (1 + age/{p.decay_bars:g})^-{p.decay_power:g}.",
+    short = p.side == "short"
+    lines = [f"# {'Down-move (SHORT / PE)' if short else 'Up-move'} learner ({tf})", "",
+             (f"Down-move = -{p.target:.2%} within {p.horizon} candles before +{p.stop:.2%} (costs included). " if short else
+              f"Up-move = +{p.target:.2%} within {p.horizon} candles before -{p.stop:.2%} (costs included). ")
+             + f"All history, weight (1 + age/{p.decay_bars:g})^-{p.decay_power:g}.",
              "Confidence = chance the trade ends in profit. RR = average win / average loss. "
              "Edge = Confidence x RR - (1 - Confidence): expected gain per 1 unit of risk.",
              "QUALIFIED = Edge > 0, beats the stock's base rate, and the live-like check (each firing scored "
@@ -485,10 +537,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--no-triples", action="store_true")
     ap.add_argument("--workers", type=int, default=6, help="parallel stock processes (each may use the GPU)")
     ap.add_argument("--device", help="cuda | cpu (default: cuda when available)")
+    ap.add_argument("--side", choices=("long", "short"), default="long",
+                    help="short = down-move learner (target below, stop above; for intraday shorts / PE buys)")
     a = ap.parse_args(argv)
     tgt, stp, hz = TF_DEFAULTS.get(a.tf, TF_DEFAULTS["1d"])
     p = Params(a.target or tgt, a.stop or stp, a.horizon or hz, a.decay_bars, a.decay_power,
-               pairs=not a.no_pairs, triples=not a.no_triples)
+               pairs=not a.no_pairs, triples=not a.no_triples, side=a.side)
     syms = read_stocks(a.stocks)[: a.max_symbols or None]
     app = App(a.config, a.home, quiet=True)
     try:
@@ -513,7 +567,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f.write_text(json.dumps({"symbol": sym, "timeframe": a.tf, "status": "NO_DATA"}), encoding="utf-8")
                 continue
             key = sha({"c": CONTRACT, "fp": getattr(data, "fingerprint", None), "tf": a.tf, "p": asdict(p),
-                       "s": SINGLES, "code": app.code_sha, "cost": costs})
+                       "s": singles(p.side), "code": app.code_sha, "cost": costs})
             if f.is_file():
                 try:
                     if json.loads(f.read_text(encoding="utf-8")).get("key") == key:

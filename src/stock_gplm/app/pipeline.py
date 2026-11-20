@@ -45,6 +45,13 @@ def steps(universe: str, top: int, gpu_workers: int, cpu_workers: int) -> list[d
          "cmd": up + ["--config", cfg, "--tf", "60m", "--name", "universe-60m"]},
         {"name": "upmove_15m", "lane": "gpu", "after": ["upmove_60m"],
          "cmd": up + ["--config", cfg, "--tf", "15m", "--name", "universe-15m"]},
+        # down-move learner (owner 2026-11-20: intraday shorts / PE buys), after the long side on the GPU lane
+        {"name": "downmove_1d", "lane": "gpu", "after": ["upmove_15m"],
+         "cmd": up + ["--config", cfg, "--tf", "1d", "--side", "short", "--name", "universe-1d-short"]},
+        {"name": "downmove_60m", "lane": "gpu", "after": ["downmove_1d"],
+         "cmd": up + ["--config", cfg, "--tf", "60m", "--side", "short", "--name", "universe-60m-short"]},
+        {"name": "downmove_15m", "lane": "gpu", "after": ["downmove_60m"],
+         "cmd": up + ["--config", cfg, "--tf", "15m", "--side", "short", "--name", "universe-15m-short"]},
         {"name": "recency_intraday", "lane": "cpu", "after": [],
          "cmd": rec + ["--config", cfg, "--max-symbols", str(top), "--timeframes", "15m,60m", "--name",
                        "intraday-top", "--library", str(ROOT / "state-intraday" / "strategy-library")]},
@@ -118,6 +125,7 @@ def summary(out: Path, status: dict[str, Any]) -> None:
     rep = ROOT / "state" / "reports"
     lines += ["", "Results:",
               f"- Up-move 1d/60m/15m: {rep / 'upmove'}/universe-*/summary.md (today.csv = firing now)",
+              f"- Down-move (short / PE) 1d/60m/15m: {rep / 'upmove'}/universe-*-short/summary.md",
               f"- Up-move 1d long history: {ROOT / 'state-long' / 'reports' / 'upmove' / 'universe-1d-long'}",
               f"- Recency intraday: {rep / 'recency' / 'intraday-top'}/summary.md",
               f"- Recency 1d/1w long: {ROOT / 'state-long' / 'reports' / 'recency' / 'universe-long'}/summary.md"]

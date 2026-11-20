@@ -62,3 +62,14 @@ def test_session_rules_square_off_1515_and_last_entry_1445():
     labels = [m.label(i)[-5:] for i in range(n)]
     assert labels[int(m.exit_last[0])] == "15:15" and labels[m.session_last[0]] == "15:30"
     assert [lb for lb, ok in zip(labels, m.entry_ok) if ok][-1] == "14:45"
+
+
+def test_short_side_mirrors_target_stop_and_gap():
+    p = Params(target=0.03, stop=0.015, horizon=3, side="short")
+    o = np.array([100, 100, 100, 103, 100, 100.0])
+    h = np.array([100, 100.5, 100, 103.5, 100, 100.0])
+    lo = np.array([100, 96.5, 100, 102, 100, 100.0])        # t=0: bar1 falls 3.5% -> short target
+    c = np.array([100, 97, 100, 103, 100, 100.0])
+    hit, net = outcomes(o, h, lo, c, p, cost=0.0)
+    assert hit[0] == 1 and abs(net[0] - 0.03) < 1e-9
+    assert hit[1] == 0 and abs(net[1] + 0.03) < 1e-9        # t=1: entry 100, bar3 gaps up to 103 -> stop filled at open
