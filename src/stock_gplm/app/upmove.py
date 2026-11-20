@@ -86,6 +86,15 @@ class Params:
     prior: float = 5.0          # pseudo-firings at the stock's base rate (few firings cannot look sure)
     min_firings: int = 8        # firings in all history to be ranked
     pairs: bool = True
+    triples: bool = True
+    confirm: int = 150          # best screened triples scored exactly per stock
+
+
+# Up-move size per timeframe: (target, stop, horizon candles). Owner set 1d = 3% in 5 days, stop 1.5%.
+TF_DEFAULTS: dict[str, tuple[float, float, int]] = {
+    "1w": (0.06, 0.03, 4), "1d": (0.03, 0.015, 5), "60m": (0.015, 0.0075, 6),
+    "30m": (0.012, 0.006, 8), "15m": (0.01, 0.005, 8), "5m": (0.006, 0.003, 12), "1m": (0.004, 0.002, 15),
+}
 
 
 # --------------------------------------------------------------------------- pure core
@@ -97,29 +106,43 @@ def weight(age: np.ndarray, p: Params) -> np.ndarray:
 
 def outcomes(o: np.ndarray, h: np.ndarray, lo: np.ndarray, c: np.ndarray, p: Params, cost: float,
              path_end: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Per candle t: (hit, net). hit = 1 target first, 0 stop first or time-out; NaN where no full path."""
+    """Per candle t: (hit, net). hit = 1 target first, 0 stop first or time-out; NaN where no full path.
+
+    Entry at open[t+1]; the path is candles t+1 .. min(t+horizon, path_end[t]) (intraday: session end).
+    Without ``path_end`` a full ``horizon`` path is required. Vectorised over candles, looped over horizon.
+    """
     n = len(c)
     hit = np.full(n, np.nan)
     net = np.full(n, np.nan)
-    for t in range(n - 1):
-        end = min(t + p.horizon, n - 1) if path_end is None else min(t + p.horizon, int(path_end[t]))
-        if end < t + 1 or (path_end is None and t + p.horizon > n - 1):
-            continue
-        ent = o[t + 1]
-        if not ent > 0:
-            continue
-        up, dn = ent * (1 + p.target), ent * (1 - p.stop)
-        res = None
-        for k in range(t + 1, end + 1):
-            if lo[k] <= dn:
-                res = (0.0, -p.stop)
-                break
-            if h[k] >= up:
-                res = (1.0, p.target)
-                break
-        if res is None:
-            res = (0.0, c[end] / ent - 1)
-        hit[t], net[t] = res[0], res[1] - cost
+    if n < 2:
+        return hit, net
+    t = np.arange(n - 1)
+    ent = o[1:].astype(float)
+    if path_end is None:
+        end = t + p.horizon
+        ok = end <= n - 1
+    else:
+        end = np.minimum(t + p.horizon, np.asarray(path_end[:-1], np.int64))
+        ok = end >= t + 1
+    ok &= ent > 0
+    end = np.minimum(end, n - 1)
+    up, dn = ent * (1 + p.target), ent * (1 - p.stop)
+    done = ~ok
+    rh = np.zeros(n - 1)
+    rn = np.zeros(n - 1)
+    for k in range(1, p.horizon + 1):
+        idx = np.minimum(t + k, n - 1)
+        live = ~done & (t + k <= end)
+        s = live & (lo[idx] <= dn)
+        rn[s] = -p.stop
+        done |= s
+        g = live & ~s & (h[idx] >= up)
+        rh[g], rn[g] = 1.0, p.target
+        done |= g
+    to = ok & ~done  # neither level touched: exit at the close of the last path candle
+    rn[to] = c[end[to]] / ent[to] - 1
+    hit[:-1] = np.where(ok, rh, np.nan)
+    net[:-1] = np.where(ok, rn - cost, np.nan)
     return hit, net
 
 
@@ -171,10 +194,50 @@ def walk_forward(t: np.ndarray, net: np.ndarray, hit: np.ndarray, base_p: np.nda
             "taken_w_mean_net": float((w * tn).sum() / w.sum()), "taken_t": tt.tolist(), "taken_net": tn.tolist()}
 
 
+def screen_triples(S: np.ndarray, fams: Sequence[str], valid: np.ndarray, net: np.ndarray, w: np.ndarray,
+                   base_p: float, p: Params, device: str | None = None) -> list[tuple[tuple[int, int, int], float]]:
+    """GPU screen of every 3-condition AND across 3 different families (rising edges, no spacing rule).
+
+    Returns the ``confirm`` best (indices, approximate Edge) with >= ``min_firings`` firings.
+    """
+    import torch
+
+    dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    s = S.shape[1]
+    combos = [c for c in itertools.combinations(range(s), 3) if len({fams[c[0]], fams[c[1]], fams[c[2]]}) == 3]
+    if not combos:
+        return []
+    Sm = torch.as_tensor(S & valid[:, None], device=dev)
+    netv = np.nan_to_num(net)
+    win = netv > 0
+    V = torch.as_tensor(np.stack([np.ones_like(w), w, w * win, w * netv * win, w * -netv * ~win,
+                                  w * ~win], 1), dtype=torch.float32, device=dev)
+    idx = torch.as_tensor(np.asarray(combos), device=dev)
+    out = torch.empty((len(combos), 6), device=dev)
+    chunk = max(64, int(2e8 // max(1, S.shape[0])))
+    for a in range(0, len(combos), chunk):
+        ix = idx[a:a + chunk]
+        M = Sm[:, ix[:, 0]] & Sm[:, ix[:, 1]] & Sm[:, ix[:, 2]]
+        E = M.clone()
+        E[1:] &= ~M[:-1]
+        out[a:a + chunk] = E.T.to(torch.float32) @ V
+    o = out.cpu().numpy().astype(float)
+    cnt, sw, swin, spos, sneg, slw = o.T
+    conf = (swin + p.prior * base_p) / (sw + p.prior)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        avg_win = np.where(swin > 0, spos / np.maximum(swin, 1e-12), p.target)
+        avg_loss = np.where(slw > 0, sneg / np.maximum(slw, 1e-12), p.stop)
+    edge = conf * (avg_win / np.maximum(avg_loss, 1e-6)) - (1 - conf)
+    edge[cnt < p.min_firings] = -np.inf
+    best = np.argsort(-edge)[:p.confirm]
+    return [(combos[i], float(edge[i])) for i in best if np.isfinite(edge[i])]
+
+
 # --------------------------------------------------------------------------- one stock
 
 
-def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir: Path | None) -> dict[str, Any]:
+def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir: Path | None,
+              device: str | None = None) -> dict[str, Any]:
     from . import strategy_dsl as dsl
     from .lanes import all_bars, build_lane
     from .research import _ctx_for
@@ -187,18 +250,23 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
     m = lane.market
     ctx = _ctx_for(bars[tf], tf, lane, bars, {}, None)
     n = len(m)
+    if n < 60:
+        return {"symbol": data.symbol, "timeframe": tf, "status": "TOO_SHORT", "bars": n}
     cost = float(lane.costs.buy + lane.costs.sell)
     path_end = m.session_last if m.intraday else None
     hit, net = outcomes(m.open, m.high, m.low, m.close, p, cost, path_end)
     valid = ~np.isnan(net) & ~m.no_signal
     last = n - 1
-    # base rate of a profitable trade on any candle (recency-weighted, as of each candle -> prefix form)
     vi = np.nonzero(valid)[0]
     wv = weight(last - vi, p)
     base_now = float((wv * (net[vi] > 0)).sum() / wv.sum()) if vi.size else 0.0
-    cum_w = np.cumsum(np.where(valid, 1.0, 0.0))
-    cum_win = np.cumsum(np.where(valid, (np.nan_to_num(net) > 0).astype(float), 0.0))
-    base_at = np.where(cum_w > 0, cum_win / np.maximum(cum_w, 1), base_now)  # plain base rate to date (causal)
+    # causal base rate at candle t: only outcomes already closed (t' + horizon + 1 <= t)
+    closed_w = np.cumsum(np.where(valid, 1.0, 0.0))
+    closed_win = np.cumsum(np.where(valid, (np.nan_to_num(net) > 0).astype(float), 0.0))
+    lag = p.horizon + 1
+    cw = np.concatenate((np.zeros(lag), closed_w[:-lag])) if n > lag else np.zeros(n)
+    cwin = np.concatenate((np.zeros(lag), closed_win[:-lag])) if n > lag else np.zeros(n)
+    base_at = np.where(cw > 0, cwin / np.maximum(cw, 1), base_now)
 
     masks: dict[str, np.ndarray] = {}
     fam: dict[str, str] = {}
@@ -209,16 +277,28 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
             fam[name] = f
         except Exception as exc:  # noqa: BLE001 - one unsupported condition never stops the stock
             errors[name] = f"{type(exc).__name__}: {exc}"
-    cands: list[tuple[str, str, np.ndarray]] = [(k, "single", v) for k, v in masks.items()]
+    names = list(masks)
+    cands: list[tuple[str, str, np.ndarray]] = [(k, "single", masks[k]) for k in names]
     if p.pairs:
-        for a, b in itertools.combinations(masks, 2):
+        for a, b in itertools.combinations(names, 2):
             if fam[a] != fam[b]:
                 cands.append((f"{a} + {b}", "pair", masks[a] & masks[b]))
-    live = np.zeros(n, bool)
+    screened = 0
+    if p.triples and len(names) >= 3:
+        try:
+            S = np.stack([masks[k] for k in names], 1)
+            top = screen_triples(S, [fam[k] for k in names], valid, net, weight(last - np.arange(n), p),
+                                 base_now, p, device)
+            screened = len(top)
+            for (i, j, k), _e in top:
+                cands.append((f"{names[i]} + {names[j]} + {names[k]}", "triple",
+                              masks[names[i]] & masks[names[j]] & masks[names[k]]))
+        except Exception as exc:  # noqa: BLE001 - GPU trouble never stops the stock
+            errors["triples"] = f"{type(exc).__name__}: {exc}"
     rows: list[dict[str, Any]] = []
     seen: set[bytes] = set()
-    for name, kind, mask in cands:  # singles first, so a pair firing on the same days as a single is dropped
-        fire_now = bool(mask[last]) and not bool(mask[last - 1]) if n > 1 else False
+    for name, kind, mask in cands:  # singles first, so a hybrid firing on the same days as a simpler one is dropped
+        fire_now = bool(mask[last]) and not bool(mask[last - 1])
         t = firings(mask, valid, p.horizon)
         if t.size < p.min_firings or t.tobytes() in seen:
             continue
@@ -232,14 +312,23 @@ def run_stock(data: Any, tf: str, costs: Mapping[str, Any], p: Params, cache_dir
                      "lift": round(s["confidence"] / base_now, 3) if base_now else None,
                      **{k: (round(v, 5) if isinstance(v, float) else v) for k, v in wf.items()
                         if k not in ("taken_t", "taken_net")}})
-        if fire_now:
-            live[last] = True
     rows.sort(key=lambda r: -r["edge"])
     return {"symbol": data.symbol, "timeframe": tf, "status": "OK", "contract": CONTRACT, "params": asdict(p),
             "bars": n, "data_start": str(m.sessions[0]), "data_end": str(m.sessions[-1]),
             "data_fingerprint": lane.data_fingerprint, "cost_round_trip": cost, "base_rate": base_now,
-            "candles_with_upmove": int(np.nansum(hit)), "errors": errors, "triggers": rows,
-            "seconds": round(time.monotonic() - t0, 2)}
+            "candles_with_upmove": int(np.nansum(hit)), "triples_confirmed": screened, "errors": errors,
+            "triggers": rows, "seconds": round(time.monotonic() - t0, 2)}
+
+
+def _job(args: tuple) -> dict[str, Any]:
+    data, tf, costs, p, cache_dir, device, key, path = args
+    try:
+        r = run_stock(data, tf, costs, p, cache_dir, device)
+    except Exception as exc:  # noqa: BLE001 - one stock never stops the run
+        r = {"symbol": data.symbol, "timeframe": tf, "status": "FAILED", "error": f"{type(exc).__name__}: {exc}"}
+    r["key"] = key
+    Path(path).write_text(json.dumps(r, indent=1, default=str), encoding="utf-8")
+    return {k: r.get(k) for k in ("symbol", "status", "seconds", "error")} | {"n": len(r.get("triggers") or [])}
 
 
 # --------------------------------------------------------------------------- reports
@@ -251,62 +340,82 @@ def qualified(r: Mapping[str, Any]) -> bool:
             and (r.get("lift") or 0) > 1)
 
 
-def report(out: Path, results: Sequence[Mapping[str, Any]], p: Params) -> dict[str, Any]:
+def report(out: Path, results: Sequence[Mapping[str, Any]], p: Params, tf: str) -> dict[str, Any]:
     trig_rows, today = [], []
-    lines = ["# Up-move learner", "",
-             f"Up-move = +{p.target:.1%} within {p.horizon} candles before -{p.stop:.1%} (costs included). "
+    ok = [r for r in results if r.get("status") == "OK"]
+    lines = [f"# Up-move learner ({tf})", "",
+             f"Up-move = +{p.target:.2%} within {p.horizon} candles before -{p.stop:.2%} (costs included). "
              f"All history, weight (1 + age/{p.decay_bars:g})^-{p.decay_power:g}.",
              "Confidence = chance the trade ends in profit. RR = average win / average loss. "
              "Edge = Confidence x RR - (1 - Confidence): expected gain per 1 unit of risk.",
              "QUALIFIED = Edge > 0, beats the stock's base rate, and the live-like check (each firing scored "
-             "only from earlier firings) made money over >= 5 taken firings.", ""]
-    for r in results:
-        if r.get("status") != "OK":
-            lines.append(f"## {r['symbol']} {r['timeframe']}: {r.get('status')}")
-            continue
-        q = [x for x in r["triggers"] if qualified(x)]
-        lines += [f"## {r['symbol']} {r['timeframe']} ({r['data_start']} .. {r['data_end']}, {r['bars']} candles)",
-                  f"Base rate (any candle ends in profit): {r['base_rate']:.1%}. Candles that started an up-move: "
-                  f"{r['candles_with_upmove']}. Triggers ranked: {len(r['triggers'])}, qualified: {len(q)}.", "",
-                  "| # | Trigger | Firings (last 100) | Confidence | RR | Edge | Avg win / loss | Live-like: taken, "
-                  "win rate, weighted avg |", "|---|---|---|---|---|---|---|---|"]
-        for i, x in enumerate(q[:10]):
-            lines.append(f"| {i + 1} | {x['trigger']} | {x['firings']} ({x['firings_last100']}) | "
-                         f"{x['confidence']:.0%} | {x['rr']:.2f} | {x['edge']:+.2f} | "
-                         f"{x['avg_win']:+.2%} / -{x['avg_loss']:.2%} | {x['taken']}, {x['taken_win_rate']:.0%}, "
-                         f"{x['taken_w_mean_net']:+.2%} |")
-        lines.append("")
+             "only from earlier firings) made money over >= 5 taken firings.",
+             f"Stocks: {len(results)} ({len(ok)} OK).", ""]
+    per_trigger: dict[str, list[int]] = {}
+    for r in ok:
         for x in r["triggers"]:
             row = {"symbol": r["symbol"], "timeframe": r["timeframe"], "qualified": qualified(x), **x}
             trig_rows.append(row)
+            st = per_trigger.setdefault(x["trigger"], [0, 0])
+            st[0] += 1
+            st[1] += int(row["qualified"])
             if x["fires_now"]:
                 today.append(row)
+    # triggers that qualify on many stocks are the believable ones
+    common = sorted(((k, v[1], v[0]) for k, v in per_trigger.items() if v[0] >= 5), key=lambda z: -z[1] / z[2])
+    lines += ["## Triggers that qualify on the most stocks", "", "| Trigger | Qualified on | Ranked on | Share |",
+              "|---|---|---|---|"]
+    for k, q, nn in common[:25]:
+        lines.append(f"| {k} | {q} | {nn} | {q / nn:.0%} |")
+    lines += ["", "## Best qualified trigger per stock (top 60 by Edge)", "",
+              "| Stock | Trigger | Firings (last 100) | Confidence | RR | Edge | Live-like: taken, win rate, w-avg |",
+              "|---|---|---|---|---|---|---|"]
+    best = []
+    for r in ok:
+        q = [x for x in r["triggers"] if qualified(x)]
+        if q:
+            best.append((r["symbol"], q[0]))
+    for sym, x in sorted(best, key=lambda z: -z[1]["edge"])[:60]:
+        lines.append(f"| {sym} | {x['trigger']} | {x['firings']} ({x['firings_last100']}) | {x['confidence']:.0%} | "
+                     f"{x['rr']:.2f} | {x['edge']:+.2f} | {x['taken']}, {x['taken_win_rate']:.0%}, "
+                     f"{x['taken_w_mean_net']:+.2%} |")
 
     def write(name: str, rows: list[dict[str, Any]]) -> None:
         cols: list[str] = []
-        for x in rows:
+        for x in rows[:2000]:
             cols += [k for k in x if k not in cols]
         with (out / name).open("w", encoding="utf-8", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=cols or ["symbol"])
+            w = csv.DictWriter(fh, fieldnames=cols or ["symbol"], extrasaction="ignore")
             w.writeheader()
             w.writerows(rows)
 
     write("triggers.csv", trig_rows)
     today.sort(key=lambda x: (not x["qualified"], -x["edge"]))
     write("today.csv", today)
-    lines += ["## Firing on the latest candle", ""]
-    for x in today[:30]:
-        lines.append(f"- {x['symbol']} {x['timeframe']}: {x['trigger']} - Confidence {x['confidence']:.0%}, "
-                     f"RR {x['rr']:.2f}, Edge {x['edge']:+.2f}{' (QUALIFIED)' if x['qualified'] else ''}")
+    lines += ["", "## Qualified triggers firing on the latest candle", ""]
+    for x in [t for t in today if t["qualified"]][:60]:
+        lines.append(f"- {x['symbol']} ({x['last_fired']}): {x['trigger']} - Confidence {x['confidence']:.0%}, "
+                     f"RR {x['rr']:.2f}, Edge {x['edge']:+.2f}")
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return {"stocks": len(results), "triggers": len(trig_rows), "qualified": sum(r["qualified"] for r in trig_rows),
-            "firing_now": len(today)}
+    return {"stocks": len(results), "ok": len(ok), "triggers": len(trig_rows),
+            "qualified": sum(r["qualified"] for r in trig_rows), "qualified_firing_now":
+            sum(1 for t in today if t["qualified"])}
 
 
 # --------------------------------------------------------------------------- CLI
 
 
+def read_stocks(spec: str) -> list[str]:
+    src = spec[1:] if spec.startswith("@") else None
+    names = [x.strip().split(",")[0].upper() for x in
+             (Path(src).read_text(encoding="utf-8-sig").splitlines() if src else spec.split(","))
+             if x.strip() and not x.startswith("#")]
+    return [x if x.endswith("-EQ") else x + "-EQ" for x in names]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
     from .context import App
     from .db import sha
     from .ingest import ingest_many
@@ -315,48 +424,74 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--config")
     ap.add_argument("--home")
     ap.add_argument("--stocks", required=True, help="comma list or @file (one symbol per line)")
+    ap.add_argument("--max-symbols", type=int)
     ap.add_argument("--tf", default="1d")
     ap.add_argument("--name", required=True)
-    ap.add_argument("--target", type=float, default=Params.target)
-    ap.add_argument("--stop", type=float, default=Params.stop)
-    ap.add_argument("--horizon", type=int, default=Params.horizon)
+    ap.add_argument("--target", type=float)
+    ap.add_argument("--stop", type=float)
+    ap.add_argument("--horizon", type=int)
     ap.add_argument("--decay-bars", type=float, default=Params.decay_bars)
     ap.add_argument("--decay-power", type=float, default=Params.decay_power)
     ap.add_argument("--no-pairs", action="store_true")
+    ap.add_argument("--no-triples", action="store_true")
+    ap.add_argument("--workers", type=int, default=6, help="parallel stock processes (each may use the GPU)")
+    ap.add_argument("--device", help="cuda | cpu (default: cuda when available)")
     a = ap.parse_args(argv)
-    p = Params(a.target, a.stop, a.horizon, a.decay_bars, a.decay_power, pairs=not a.no_pairs)
-    src = a.stocks[1:] if a.stocks.startswith("@") else None
-    names = [x.strip().split(",")[0].upper() for x in
-             (Path(src).read_text(encoding="utf-8-sig").splitlines() if src else a.stocks.split(","))
-             if x.strip() and not x.startswith("#")]
-    syms = [x if x.endswith("-EQ") else x + "-EQ" for x in names]
+    tgt, stp, hz = TF_DEFAULTS.get(a.tf, TF_DEFAULTS["1d"])
+    p = Params(a.target or tgt, a.stop or stp, a.horizon or hz, a.decay_bars, a.decay_power,
+               pairs=not a.no_pairs, triples=not a.no_triples)
+    syms = read_stocks(a.stocks)[: a.max_symbols or None]
     app = App(a.config, a.home, quiet=True)
     try:
         out = app.s.reports_dir / "upmove" / a.name
         (out / "stocks").mkdir(parents=True, exist_ok=True)
-        results = []
+        costs = app.s.section("costs")
+        cache = app.s.cache_dir / "features"
+        pending, paths = {}, []
+        ex = ProcessPoolExecutor(max_workers=a.workers) if a.workers > 1 else None
+        done = reused = 0
+        t0 = time.monotonic()
         for i, sym in enumerate(syms):
-            data = next(iter(ingest_many(app.s, app.db, [sym], use_minute=a.tf.endswith("m")).values()), None)
+            f = out / "stocks" / f"{sym}-{a.tf}.json"
+            paths.append(f)
+            try:
+                data = next(iter(ingest_many(app.s, app.db, [sym], use_minute=a.tf.endswith("m")).values()), None)
+            except Exception as exc:  # noqa: BLE001
+                f.write_text(json.dumps({"symbol": sym, "timeframe": a.tf, "status": "NO_DATA",
+                                         "error": str(exc)}), encoding="utf-8")
+                continue
             if data is None:
-                results.append({"symbol": sym, "timeframe": a.tf, "status": "NO_DATA"})
+                f.write_text(json.dumps({"symbol": sym, "timeframe": a.tf, "status": "NO_DATA"}), encoding="utf-8")
                 continue
             key = sha({"c": CONTRACT, "fp": getattr(data, "fingerprint", None), "tf": a.tf, "p": asdict(p),
-                       "s": SINGLES, "code": app.code_sha, "cost": app.s.section("costs")})
-            f = out / "stocks" / f"{sym}-{a.tf}.json"
+                       "s": SINGLES, "code": app.code_sha, "cost": costs})
             if f.is_file():
-                old = json.loads(f.read_text(encoding="utf-8"))
-                if old.get("key") == key:
-                    results.append(old)
-                    print(f"[{i + 1}/{len(syms)}] {sym}: reused", flush=True)
-                    continue
-            r = run_stock(data, a.tf, app.s.section("costs"), p, app.s.cache_dir / "features")
-            r["key"] = key
-            f.write_text(json.dumps(r, indent=1, default=str), encoding="utf-8")
-            results.append(r)
-            print(f"[{i + 1}/{len(syms)}] {sym}: {len(r.get('triggers', []))} triggers in "
-                  f"{r.get('seconds')}s", flush=True)
-        print(json.dumps(report(out, results, p), indent=1))
-        print(f"summary: {out / 'summary.md'}")
+                try:
+                    if json.loads(f.read_text(encoding="utf-8")).get("key") == key:
+                        reused += 1
+                        continue
+                except (OSError, ValueError):
+                    pass
+            job = (data, a.tf, costs, p, cache, a.device, key, str(f))
+            if ex is None:
+                _job(job)
+                done += 1
+            else:
+                pending[ex.submit(_job, job)] = sym
+                while len(pending) >= a.workers * 2:
+                    fut = next(as_completed(pending))
+                    pending.pop(fut)
+                    done += 1
+            if (i + 1) % 25 == 0:
+                print(f"[{i + 1}/{len(syms)}] computed {done}, reused {reused}, "
+                      f"{time.monotonic() - t0:.0f}s", flush=True)
+        if ex is not None:
+            for fut in as_completed(list(pending)):
+                done += 1
+            ex.shutdown(wait=True)
+        results = [json.loads(f.read_text(encoding="utf-8")) for f in paths if f.is_file()]
+        print(json.dumps(report(out, results, p, a.tf), indent=1))
+        print(f"summary: {out / 'summary.md'}  ({time.monotonic() - t0:.0f}s, computed {done}, reused {reused})")
     finally:
         app.close()
     return 0

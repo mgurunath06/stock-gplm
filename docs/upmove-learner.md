@@ -22,3 +22,12 @@ Output `<home>/reports/upmove/<name>/`: `summary.md`, `triggers.csv`, `today.csv
 
 Library: `config/strategies/library/owner/owner-basics.json` adds O1-001..009 (EMA 13 x 20/50/100/200, MACD x signal,
 RSI x 50, volume surge, EMA 13 snap-back long/short with EMA 13 as the moving target) for the recency ranking.
+
+## Compute and the unattended pipeline
+- Triples (3-condition hybrids across 3 families) are screened on the GPU per stock; the best 150 plus all singles and
+  pairs are scored exactly on CPU. `--workers` stock processes (default 6). Per-TF up-move defaults: 1w 6%/3%/4,
+  1d 3%/1.5%/5, 60m 1.5%/0.75%/6, 30m 1.2%/0.6%/8, 15m 1%/0.5%/8, 5m 0.6%/0.3%/12 (target/stop/candles).
+- `python -m stock_gplm.app.pipeline [--run <name>]` runs four lanes in parallel: api (NSE then Yahoo history),
+  gpu (up-move 1d, 60m, 15m, whole universe), cpu (recency 15m/60m, top 200), long (after api: up-move 1d + recency
+  1d/1w on long history). Resumable; status/logs/SUMMARY.md in `<state>/reports/pipeline/<run>/`.
+- Note: decay 100 candles = ~4 trading days on 15m, so intraday rankings follow the last few sessions.
