@@ -158,8 +158,8 @@
                       "default_budget":  "standard"
                   },
     "m56":  {
-    "development_end": "2025-10-20",
-    "development_end_note": "Last session before the M3.2 locked holdout (starts 2025-10-21). M5.6 never builds lanes from later rows; raise only with a recorded governance decision.",
+    "development_end": "2026-08-13",
+    "development_end_note": "Owner decision 2026-11-20: no locked holdout. Train/validate on all candles up to 2026-08-13; 2026-08-14 onwards is the out-of-sample test period, then walk-forward retraining.",
                  "contract":  "stock-gplm.m56-policy.v1",
                  "reference_catalogue":  "H:\\Guru\\Learning\\StockGLPM\\app\\config\\strategies\\reference-300-strategies.txt",
                  "reference_is_minimum_not_ceiling":  true,
