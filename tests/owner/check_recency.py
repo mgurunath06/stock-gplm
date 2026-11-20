@@ -80,9 +80,9 @@ def main() -> int:
         for (sym, tf), r_ in res.items():
             w = rc.WINDOWS[tf]
             for c in r_.get("current") or []:
-                if c["recent_trades"] < w.min_trades or not c["score"] > 0:
+                if c["trades"] < w.min_trades or not c["score"] > 0:
                     bad.append(f"{sym} {tf} {c['strategy_id']}")
-        check("current picks: enough recent trades and positive score", not bad, ", ".join(bad[:5]))
+        check("current picks: enough trades and positive score", not bad, ", ".join(bad[:5]))
 
         import numpy as np
         split = None

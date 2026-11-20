@@ -7,12 +7,13 @@ Per lane (stock x timeframe):
 1. Every applicable library strategy (catalogue translations, user, AI and ML rules) x a few parameter
    combinations (``--max-combos``) is simulated once over the whole history with the normal engine
    (costs, next-open fills, no overlapping trades). Identical trade lists are kept once.
-2. Walk forward in calendar steps. At each decision date D, using only trades that *closed before D*
-   and were signalled in the lookback window, each variant gets a recency-weighted, shrunk average:
-       score = sum(w * net) / (sum(w) + PRIOR),  w = 0.5 ** (age_days / (lookback * HALF_LIFE))
-   HALF_LIFE defaults to 0.25 (owner, 2026-11-20: recent candles weigh more), so a trade's weight halves
-   every quarter of the lookback; the oldest trade in the window counts 1/16 of the newest.
-   The top ``top_k`` (one per strategy, score > 0, >= min_trades recent trades) are the picks.
+2. Walk forward in calendar steps. At each decision date D, using ALL trades that *closed before D*
+   (owner rule, 2026-11-20: always use all history; old bull/bear behaviour is kept, with less weight):
+       recent = trades that closed in the last RECENT_BARS candles (default 100), weight w = 1 - age_bars/100
+                (rolling: the newest candle weighs most, falling linearly to 0 at 100 candles)
+       older  = every earlier trade, equal weight
+       score  = SHARE * sum(w*net)/(sum(w)+PRIOR) + (1-SHARE) * sum(net_old)/(n_old+PRIOR),  SHARE = 0.7
+   The top ``top_k`` (one per strategy, score > 0, >= min_trades trades in all history) are the picks.
    We then record the picks' trades signalled in [D, D + step) and, as a control, the trades of every
    eligible variant in the same window ("pick anything that was active").
 3. Verdict per period: ``dev`` = steps whose forward window ends by ``m56.development_end``; ``test`` =
@@ -42,13 +43,13 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-CONTRACT = "stock-gplm.recency.v1"
+CONTRACT = "stock-gplm.recency.v2"
 TF_ALL = ("5m", "15m", "30m", "60m", "1d", "1w")
 
 
 @dataclass(frozen=True)
 class Window:
-    lookback_days: int
+    warmup_days: int            # history needed before the first decision (nothing is ever cut off)
     step_days: int
     min_trades: int
 
@@ -64,7 +65,8 @@ WINDOWS: dict[str, Window] = {
 class Policy:
     top_k: int = 3
     prior: float = 3.0          # pseudo-trades at zero return: few lucky trades cannot top the list
-    half_life: float = 0.25     # weight half-life as a fraction of the lookback (smaller = recent counts more)
+    recent_bars: int = 100      # the last N candles carry the extra, linearly decaying weight
+    recent_share: float = 0.7   # share of the score from those candles; the rest from all older history
     min_steps: int = 4          # steps with forward trades needed for a verdict
     min_fwd_trades: int = 10    # forward trades of the picks needed for a verdict
     current_list: int = 10      # how many current picks to report per lane
@@ -77,17 +79,23 @@ def _day_index(sessions: np.ndarray) -> np.ndarray:
     return np.asarray(sessions).astype("datetime64[D]").astype(np.int64)
 
 
-def score(vid: np.ndarray, net: np.ndarray, age: np.ndarray, n_var: int, lookback: int, prior: float,
-          half_life: float = 0.25) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-variant (score, count, plain mean) from the selected recent trades."""
-    w = 0.5 ** (age / max(1.0, lookback * half_life))
+def score(vid: np.ndarray, net: np.ndarray, age: np.ndarray, n_var: int, pol: Policy
+          ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-variant (score, all-history count, recent count, plain mean). ``age`` is in candles."""
+    rec = age < pol.recent_bars
+    w = np.where(rec, 1.0 - age / float(pol.recent_bars), 0.0)
     sw = np.bincount(vid, weights=w, minlength=n_var)
     swx = np.bincount(vid, weights=w * net, minlength=n_var)
+    old = ~rec
+    so = np.bincount(vid[old], weights=net[old], minlength=n_var)
+    no = np.bincount(vid[old], minlength=n_var)
     cnt = np.bincount(vid, minlength=n_var)
+    rcnt = np.bincount(vid[rec], minlength=n_var)
     sx = np.bincount(vid, weights=net, minlength=n_var)
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = np.where(cnt > 0, sx / np.maximum(cnt, 1), np.nan)
-    return swx / (sw + prior), cnt, mean
+    sc = pol.recent_share * swx / (sw + pol.prior) + (1.0 - pol.recent_share) * so / (no + pol.prior)
+    return sc, cnt, rcnt, mean
 
 
 def pick(sc: np.ndarray, cnt: np.ndarray, group: np.ndarray, min_trades: int, k: int) -> list[int]:
@@ -117,16 +125,13 @@ def walk(vid: np.ndarray, t: np.ndarray, e: np.ndarray, net: np.ndarray, day: np
     steps: list[dict[str, Any]] = []
     if n_bars == 0:
         return {"steps": steps, "current": [], "current_scores": []}
-    eday = day[e] if e.size else np.zeros(0, np.int64)
-    d = int(day[0]) + win.lookback_days
+    d = int(day[0]) + win.warmup_days
     last = int(day[-1])
     while d + win.step_days <= last + 1:
         r = int(np.searchsorted(day, d, "left"))
         r2 = int(np.searchsorted(day, d + win.step_days, "left"))
-        w0 = int(np.searchsorted(day, d - win.lookback_days, "left"))
-        past = (e < r) & (t >= w0)
-        sc, cnt, _ = score(vid[past], net[past], (d - eday[past]).astype(float), n_var, win.lookback_days, pol.prior,
-                     pol.half_life)
+        past = e < r
+        sc, cnt, _, _ = score(vid[past], net[past], (r - e[past]).astype(float), n_var, pol)
         picks = pick(sc, cnt, group, win.min_trades, pol.top_k)
         fwd = (t >= r) & (t < r2)
         fv, fn = vid[fwd], net[fwd]
@@ -141,13 +146,12 @@ def walk(vid: np.ndarray, t: np.ndarray, e: np.ndarray, net: np.ndarray, day: np
         d += win.step_days
     dn = last + 1
     sel = e < n_bars
-    sel &= t >= int(np.searchsorted(day, dn - win.lookback_days, "left"))
-    sc, cnt, mean = score(vid[sel], net[sel], (dn - eday[sel]).astype(float), n_var, win.lookback_days, pol.prior,
-                     pol.half_life)
+    sc, cnt, rcnt, mean = score(vid[sel], net[sel], (n_bars - e[sel]).astype(float), n_var, pol)
     cur = pick(sc, cnt, group, win.min_trades, pol.current_list)
     return {"steps": steps, "current": cur,
-            "current_scores": [{"variant": v, "score": float(sc[v]), "recent_trades": int(cnt[v]),
-                                "recent_mean_net": float(mean[v])} for v in cur]}
+            "current_scores": [{"variant": v, "score": float(sc[v]), "trades": int(cnt[v]),
+                                "recent_trades": int(rcnt[v]),
+                                "mean_net": float(mean[v])} for v in cur]}
 
 
 def verdict(steps: Sequence[Mapping[str, Any]], pol: Policy) -> dict[str, Any]:
@@ -430,8 +434,8 @@ def aggregate(out: Path, symbols: Sequence[str] | None = None, timeframes: Seque
         for i, c in enumerate(r.get("current") or []):
             cur_rows.append({**base, "rank": i + 1, "strategy_id": c["strategy_id"],
                              "params": json.dumps(c["params"], sort_keys=True), "direction": c["direction"],
-                             "score": c["score"], "recent_trades": c["recent_trades"],
-                             "recent_mean_net": c["recent_mean_net"], "origin": c["origin"],
+                             "score": c["score"], "trades": c["trades"],
+                             "recent_trades": c["recent_trades"], "mean_net": c["mean_net"], "origin": c["origin"],
                              "category": c["category"], "entry": c["entry"], "exit": c["exit"]})
         for s in r.get("steps") or []:
             step_rows.append({**base, **{k: (";".join(v) if isinstance(v, list) else v) for k, v in s.items()}})
@@ -505,8 +509,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--max-combos", type=int, default=4, help="parameter combinations per strategy (defaults first)")
     ap.add_argument("--top-k", type=int, default=Policy.top_k)
-    ap.add_argument("--half-life", type=float, default=Policy.half_life,
-                    help="recency weight half-life as a fraction of the lookback (default 0.25; smaller = more recent)")
+    ap.add_argument("--recent-bars", type=int, default=Policy.recent_bars,
+                    help="last N candles get extra, linearly decaying weight (default 100)")
+    ap.add_argument("--recent-share", type=float, default=Policy.recent_share,
+                    help="share of the score from those candles; the rest from all older history (default 0.7)")
     ap.add_argument("--strategies", help="library id patterns (comma list, globs ok)")
     ap.add_argument("--library", action="append", help="extra strategy-library root (repeatable), e.g. "
                                                        "state-intraday/strategy-library")
@@ -532,7 +538,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         syms, basis = resolve_universe(app, a.stocks, uni, a.max_symbols)
         pats = [x.strip() for x in (a.strategies or "").split(",") if x.strip()] or None
         print(f"Recency research: {len(syms)} stock(s) [{basis}] x {tfs} -> {out}", flush=True)
-        res = run(app, syms, tfs, out, workers=a.workers, max_combos=a.max_combos, policy=Policy(top_k=a.top_k, half_life=a.half_life),
+        res = run(app, syms, tfs, out, workers=a.workers, max_combos=a.max_combos, policy=Policy(top_k=a.top_k, recent_bars=a.recent_bars,
+                                                                       recent_share=a.recent_share),
                   patterns=pats, library_extra=a.library, start=a.start, end=a.end,
                   log=lambda s: print(s, flush=True))
         print(json.dumps({k: res[k] for k in ("lanes", "by_timeframe", "pooled")}, indent=2, default=str))

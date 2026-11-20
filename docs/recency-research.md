@@ -9,19 +9,20 @@ Stock behaviour changes, so this judges each stock × timeframe on recent candle
 1. Every applicable library strategy (catalogue, user, AI, ML) is simulated once over all candles, using the
    normal engine, costs and fills. Each strategy is run with up to `--max-combos` parameter sets, and
    identical trade lists are kept only once.
-2. Walk forward. At each step date it uses only trades that closed before that date, inside the lookback window.
-   Variants are ranked by a recency-weighted, shrunk average net return (recent trades weigh more: weight halves every
-   quarter of the lookback, so the oldest trade counts 1/16 of the newest; `--half-life` changes the fraction), and the top 3 (one per strategy) are
-   picked. What the picks earn in the next step is compared with every active variant (the control).
+2. Walk forward. At each step date it uses **all** trades that had closed before that date (owner rule: always all
+   history; old bull/bear behaviour stays in, with less weight). The last **100 candles** carry extra weight that falls
+   linearly, newest first (rolling). Score = 70% recent-100-candle weighted average + 30% average of all older trades,
+   both shrunk towards 0. The top 3 (one per strategy, at least `min trades` in all history) are picked. What the picks
+   earn in the next step is compared with every eligible variant (the control).
 
-   | TF | lookback | step | min recent trades |
+   | TF | warm-up before first pick | step | min trades |
    |---|---|---|---|
    | 5m, 15m (1m) | 30 days | 7 days | 5 |
    | 30m, 60m | 91 days | 14 days | 5 |
    | 1d | 365 days | 30 days | 4 |
    | 1w | 1095 days | 91 days | 3 |
 
-   You can override these in the config under `recency.windows.<tf>` = `{lookback_days, step_days, min_trades}`.
+   Overrides: config `recency.windows.<tf>` = `{warmup_days, step_days, min_trades}`; CLI `--recent-bars`, `--recent-share`.
 3. Verdict per period: **dev** covers steps whose next window ends by `m56.development_end` (2026-08-13), and **test**
    covers steps decided after it. HOLDS means the picks averaged above 0 and beat the control, over at least 4 steps
    with trades and at least 10 trades.

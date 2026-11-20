@@ -66,3 +66,10 @@ Older TODOs still open (see previous handover): commit, scorecard summary when r
 ## Update (owner, 2026-11-20): NSE first; recent candles weigh more
 - `yahoo_history build` skips stocks without NSE MCP history; the owner check fails fast on that precondition.
 - Recency weight half-life is now 0.25 × lookback (was 0.5); the oldest trade in the window counts 1/16. `--half-life` overrides it. The policy is part of the lane key, so the next run recomputes every lane.
+
+## Update (owner, 2026-11-20, later): always all history; last 100 candles weigh more (contract v2)
+- Score = 0.7 x (last 100 candles, weight 1-age/100) + 0.3 x (all older trades, equal weight), both shrunk (prior 3).
+  No lookback cut-off; `Window.lookback_days` -> `warmup_days`. CLI `--recent-bars`, `--recent-share`.
+- Top-5 1d (NSE MCP, data from 2021-11-22): BHARTIARTL WATCH (dev +1.43%/trade vs ctrl +0.25%, t 2.6), ICICIBANK WATCH,
+  HDFCBANK/RELIANCE/TCS NOT_USED. Output state-long/reports/recency/top5-1d.
+- Open point: rare strategies (5 trades, none recent) can top the list on a big old mean; consider higher 1d min_trades.
