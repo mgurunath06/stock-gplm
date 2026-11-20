@@ -10,10 +10,12 @@
     "applicability": {"symbols": "*", "timeframes": ["5m", "15m", "30m", "60m", "1d", "1w"]}
   },
   "exit_profiles": {
-    "swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5},
-    "to_ema13": {"max_hold_bars": 10, "stop_atr": 1.5, "when": "close >= ema(close, 13)"},
-    "short_to_ema13": {"max_hold_bars": 10, "stop_atr": 1.5, "when": "close <= ema(close, 13)"}
+    "swing": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}},
+    "to_ema13": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}},
+    "short_to_ema13": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}}
   },
+  "exit_note": "Owner rule 2026-11-20: on every timeframe stop 0.2% below the swing low (above the swing high for shorts), target at least 2x risk; intraday square-off 15:15 still applies. Previous ATR exits kept in exit_profiles_atr_previous.",
+  "exit_profiles_atr_previous": {"swing": {"max_hold_bars": 10, "stop_atr": 1.5, "target_atr": 2.5}, "to_ema13": {"max_hold_bars": 10, "stop_atr": 1.5, "when": "close >= ema(close, 13)"}, "short_to_ema13": {"max_hold_bars": 10, "stop_atr": 1.5, "when": "close <= ema(close, 13)"}},
   "strategies": [
     {"id": "O1-001", "name": "EMA 13 crosses above EMA 20", "entry": "cross_above(ema(close, 13), ema(close, 20))"},
     {"id": "O1-002", "name": "EMA 13 crosses above EMA 50", "entry": "cross_above(ema(close, 13), ema(close, 50))"},

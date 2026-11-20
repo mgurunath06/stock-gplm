@@ -231,6 +231,13 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
         v = ex.get(k)
         if v is not None and not (isinstance(v, (int, float)) and 0 < v <= 50):
             raise StrategyConfigError(f"exit.{k} must be null or in (0, 50]")
+    sw = ex.get("swing_stop")
+    if sw is not None:
+        if not isinstance(sw, dict) or set(sw) - {"buffer", "rr", "lookback"}:
+            raise StrategyConfigError("exit.swing_stop must be {buffer, rr, lookback}")
+        if not 0 <= float(sw.get("buffer", 0.002)) <= 0.05 or not 0.5 <= float(sw.get("rr", 2.0)) <= 10 \
+                or not 3 <= int(sw.get("lookback", 20)) <= 200:
+            raise StrategyConfigError("exit.swing_stop: buffer 0..0.05, rr 0.5..10, lookback 3..200")
     needs = dsl.requirements(enode)
     if xnode is not None:
         for k, v in dsl.requirements(xnode).items():

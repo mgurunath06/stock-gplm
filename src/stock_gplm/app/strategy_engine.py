@@ -37,7 +37,8 @@ from .strategy_library import StrategyDef
 # v2 (2026-11-15): the unconditional baseline applies the strategy's signal exit (exit.when) too, so the
 # excess-return test compares like with like; trade ledgers are returned for the audit trail.
 # v3 (2026-11-20): intraday square-off at 15:15 IST and no new entries after 14:45 IST (owner session rules).
-ENGINE_CONTRACT = "stock-gplm.strategy-engine.v3"
+# v4 (2026-11-20): owner swing exit (exit.swing_stop: stop 0.2% beyond the last swing low/high, target 2x risk).
+ENGINE_CONTRACT = "stock-gplm.strategy-engine.v4"
 
 
 @dataclass(frozen=True)
@@ -46,18 +47,33 @@ class Exit:
     stop_atr: float | None
     target_atr: float | None
     trail_atr: float | None
+    # owner swing exit (2026-11-20): stop `swing_buffer` beyond the last swing low (long) / high (short),
+    # target = `swing_rr` x risk. Swing = latest confirmed 2-2 pivot within `swing_lookback` bars on the
+    # right side of entry; fallback: lowest low / highest high of the last 5 bars.
+    swing_buffer: float | None = None
+    swing_rr: float = 2.0
+    swing_lookback: int = 20
 
     @staticmethod
     def of(d: Mapping[str, Any]) -> "Exit":
-        return Exit(int(d["max_hold_bars"]), d.get("stop_atr"), d.get("target_atr"), d.get("trail_atr"))
+        sw = d.get("swing_stop") or {}
+        return Exit(int(d["max_hold_bars"]), d.get("stop_atr"), d.get("target_atr"), d.get("trail_atr"),
+                    float(sw.get("buffer", 0.002)) if sw else None, float(sw.get("rr", 2.0)),
+                    int(sw.get("lookback", 20)))
 
     def key(self) -> str:
-        return ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
+        k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
+        if self.swing_buffer is not None:
+            k += f"|swing:{self.swing_buffer:g}:{self.swing_rr:g}:{self.swing_lookback}"
+        return k
 
     def text(self, when: str | None, short: bool) -> str:
         side = "above" if short else "below"
         other = "below" if short else "above"
         parts = [f"time exit after {self.max_hold} bars at the next open"]
+        if self.swing_buffer is not None:
+            parts.append(f"stop {self.swing_buffer:.1%} {side} the last swing {'high' if short else 'low'}, "
+                         f"target {self.swing_rr:g}x risk")
         if self.stop_atr:
             parts.append(f"stop {self.stop_atr:g}xATR(14) {side} entry")
         if self.target_atr:
@@ -69,6 +85,26 @@ class Exit:
         return "; ".join(parts)
 
 
+def swing_level(low: np.ndarray, high: np.ndarray, t: int, entry: float, short: bool, lookback: int) -> float | None:
+    """Last swing low (long) / high (short) known at the close of bar t, on the protective side of entry.
+
+    Pivot k: its low is the lowest of k-2..k+2 (high: highest), so it is confirmed by bar k+2 <= t.
+    Fallback: lowest low / highest high of bars t-4..t. None when no level is on the right side."""
+    lo_k = max(2, t - lookback)
+    for k in range(t - 2, lo_k - 1, -1):
+        if not short:
+            v = low[k]
+            if v < entry and v <= low[k - 2:k + 3].min():
+                return float(v)
+        else:
+            v = high[k]
+            if v > entry and v >= high[k - 2:k + 3].max():
+                return float(v)
+    w = slice(max(0, t - 4), t + 1)
+    v = float(high[w].max()) if short else float(low[w].min())
+    return v if (v > entry if short else v < entry) else None
+
+
 def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndarray | None
           ) -> tuple[int, float, str] | None:
     entry = m.open[t + 1]
@@ -78,6 +114,12 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     sgn = -1.0 if short else 1.0
     stop = entry - sgn * p.stop_atr * atr if p.stop_atr else (math.inf if short else -math.inf)
     target = entry + sgn * p.target_atr * atr if p.target_atr else (-math.inf if short else math.inf)
+    if p.swing_buffer is not None:
+        lvl = swing_level(m.low, m.high, t, entry, short, p.swing_lookback)
+        if lvl is None:
+            return None  # entry opened beyond the swing level: no valid stop, no trade
+        stop = lvl * (1 + p.swing_buffer) if short else lvl * (1 - p.swing_buffer)
+        target = entry - p.swing_rr * (stop - entry) if short else entry + p.swing_rr * (entry - stop)
     time_bar = t + 1 + p.max_hold
     if m.intraday:
         sess_end = int(m.exit_last[t + 1])  # square-off bar (15:15 IST), owner rule 2026-11-20
@@ -91,7 +133,7 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         return None
     if m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
         return None
-    simple = not (p.stop_atr or p.target_atr or p.trail_atr) and xmask is None
+    simple = not (p.stop_atr or p.target_atr or p.trail_atr or p.swing_buffer is not None) and xmask is None
     if not simple:
         water = entry
         o_, h_, l_ = m.open, m.high, m.low

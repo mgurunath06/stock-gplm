@@ -10,11 +10,13 @@
     "applicability": {"symbols": "*", "timeframes": ["1d"]}
   },
   "exit_profiles": {
-    "trend": {"max_hold_bars": 25, "stop_atr": 2.0, "trail_atr": 2.0},
-    "meanrev": {"max_hold_bars": 8, "stop_atr": 1.5, "target_atr": 2.0},
-    "intraday": {"max_hold_bars": 12, "stop_atr": 1.2, "target_atr": 2.5},
-    "claude": {"max_hold_bars": 60, "stop_atr": 2.0, "when": "close < ema(close, 21) and ema(close, 9) < ema(close, 21)"}
+    "trend": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}},
+    "meanrev": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}},
+    "intraday": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}},
+    "claude": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}, "when": "close < ema(close, 21) and ema(close, 9) < ema(close, 21)"}
   },
+  "exit_note": "Owner rule 2026-11-20: on every timeframe stop 0.2% below the swing low (above the swing high for shorts), target at least 2x risk; intraday square-off 15:15 still applies. Previous ATR exits kept in exit_profiles_atr_previous.",
+  "exit_profiles_atr_previous": {"trend": {"max_hold_bars": 25, "stop_atr": 2.0, "trail_atr": 2.0}, "meanrev": {"max_hold_bars": 8, "stop_atr": 1.5, "target_atr": 2.0}, "intraday": {"max_hold_bars": 12, "stop_atr": 1.2, "target_atr": 2.5}, "claude": {"max_hold_bars": 60, "stop_atr": 2.0, "when": "close < ema(close, 21) and ema(close, 9) < ema(close, 21)"}},
   "strategies": [
     {"id": "O2-001", "name": "GMAnalysis", "description": "Version: EMA 9 x 45. Daily EMA 9 crosses above EMA 45", "entry": "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50 and (cross_above(ema(close, 9), ema(close, 45)))", "applicability": {"symbols": "*", "timeframes": ["1d"]}, "tags": ["chartink", "segment:nifty200", "screenshot:200442", "execution:cash-long"], "exit": "trend"},
     {"id": "O2-002", "name": "GMAnalysis", "description": "Version: EMA 9 x 200. Daily EMA 9 crosses above EMA 200", "entry": "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50 and (cross_above(ema(close, 9), ema(close, 200)))", "applicability": {"symbols": "*", "timeframes": ["1d"]}, "tags": ["chartink", "segment:nifty200", "screenshot:200442", "execution:cash-long"], "exit": "trend"},
