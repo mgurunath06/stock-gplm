@@ -61,8 +61,10 @@ traceback in RESEARCH_LANE_FAILED events. Codex: `library.py` 4h feature regex f
 ## TODO (in order)
 1. When asked: check `var/runs/research-feed.log`, then read `state/reports/scorecard/latest/scorecard.md`
    (Assigned section first) and `state/reports/profiles/latest/profile.md`; summarise for the owner.
-2. Review all uncommitted work (mine + Codex), run the small targeted tests, commit (test ledger, roadmap note
-   "M8.1 prototype + research automation"). Don't commit `.git.wsl-backup`, `notifications1.mp4`, `var/`.
+2. ~~Review + commit~~ DONE 2026-11-20: commit `6adbb03`, ledger `docs/m81-test-budget.md` (6/10 run, 6 passed),
+   roadmap note added. Left uncommitted on purpose: `.git.wsl-backup`, `notifications1.mp4`, `var/`.
+   Review note: `cloud_link.pull()` raises if the Oracle transfer-ledger RPC fails (and calls it even for an
+   empty list); intended (receipts required) but watch for it.
 3. Feed the scorecard the `state-wide` runs (pooled daily priors) and the intraday ML/LLM runs; add a daily (1d)
    test-period replay.
 4. Live lab: use scorecard `assigned.csv` to choose which strategies alert per stock×TF (instead of all 210).
