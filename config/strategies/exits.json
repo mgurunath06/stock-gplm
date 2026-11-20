@@ -580,77 +580,55 @@
         "max_swing_pct": 0.01,
         "rr": 1.5,
         "learned": {
-          "from": "2026-01-01",
+          "from": "2026-01-19",
           "to": "latest",
-          "trades": 145,
-          "win_rate": 0.338,
-          "total_net_pct": -75.85
+          "trades": 134,
+          "win_rate": 0.328,
+          "total_net_pct": -82.81
         },
         "strategies": {
           "O2-032": {
             "max_swing_pct": 0.01,
             "rr": 1.5,
             "learned": {
-              "from": "2026-01-01",
+              "from": "2026-01-19",
               "to": "latest",
               "trades": 11,
               "win_rate": 0.364,
               "total_net_pct": -6.38
             }
           },
-          "O2-038": {
-            "max_swing_pct": 0.01,
-            "rr": 1.5,
-            "learned": {
-              "from": "2026-01-01",
-              "to": "latest",
-              "trades": 8,
-              "win_rate": 0.0,
-              "total_net_pct": -13.84
-            }
-          },
-          "O2-039": {
-            "max_swing_pct": 0.01,
-            "rr": 1.5,
-            "learned": {
-              "from": "2026-01-01",
-              "to": "latest",
-              "trades": 8,
-              "win_rate": 0.0,
-              "total_net_pct": -15.94
-            }
-          },
           "O2-047": {
             "max_swing_pct": 0.04,
             "rr": 1.5,
             "learned": {
-              "from": "2026-01-01",
+              "from": "2026-01-19",
               "to": "latest",
-              "trades": 18,
-              "win_rate": 0.333,
-              "total_net_pct": -9.74
+              "trades": 17,
+              "win_rate": 0.353,
+              "total_net_pct": -8.36
             }
           },
           "O2-058": {
             "max_swing_pct": 0.01,
             "rr": 1.5,
             "learned": {
-              "from": "2026-01-01",
+              "from": "2026-01-19",
               "to": "latest",
-              "trades": 23,
-              "win_rate": 0.391,
-              "total_net_pct": -9.94
+              "trades": 22,
+              "win_rate": 0.409,
+              "total_net_pct": -8.75
             }
           },
           "O2-066": {
-            "max_swing_pct": 0.04,
-            "rr": 2.0,
+            "max_swing_pct": 0.025,
+            "rr": 3.0,
             "learned": {
-              "from": "2026-01-01",
+              "from": "2026-01-19",
               "to": "latest",
               "trades": 11,
-              "win_rate": 0.727,
-              "total_net_pct": 25.85
+              "win_rate": 0.545,
+              "total_net_pct": 16.35
             }
           }
         }

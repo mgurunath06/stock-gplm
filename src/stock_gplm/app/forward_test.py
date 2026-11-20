@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import time
+from contextlib import contextmanager
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -101,6 +104,26 @@ def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, na
     return out
 
 
+@contextmanager
+def _exits_lock(timeout: float = 120.0):
+    lock = EXITS_FILE.with_name(".exits.lock")
+    t0 = time.monotonic()
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if time.monotonic() - t0 > timeout:  # stale lock from a killed run
+                lock.unlink(missing_ok=True)
+                t0 = time.monotonic()
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        os.close(fd)
+        lock.unlink(missing_ok=True)
+
+
 def _fmt(mx, rr) -> str:
     return f"{'none' if mx is None else f'{mx:.1%}'} / {rr:g}x"
 
@@ -139,7 +162,6 @@ def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strat
                 "total_net_pct": round(100 * r[0], 2)}
 
     sym = stock.upper().removesuffix("-EQ")
-    doc = json.loads(EXITS_FILE.read_text(encoding="utf-8")) if EXITS_FILE.is_file() else {"default": {}, "stocks": {}}
     best = pick(lambda res: [x for v in res.values() for x in v], min_trades)
     entry: dict[str, Any] = {}
     lines = []
@@ -158,8 +180,12 @@ def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strat
         entry["strategies"] = strat
         lines.append(f"  - {len(strat)} strategies learned their own exit (>= {min_strategy_trades} trades); "
                      f"the rest use the line above")
-    doc.setdefault("stocks", {}).setdefault(sym, {})[tf] = entry
-    EXITS_FILE.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    with _exits_lock():  # parallel stocks (forward_batch) update the same file
+        doc = json.loads(EXITS_FILE.read_text(encoding="utf-8")) if EXITS_FILE.is_file() else {"default": {}, "stocks": {}}
+        doc.setdefault("stocks", {}).setdefault(sym, {})[tf] = entry
+        tmp = EXITS_FILE.with_name(f".exits.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, EXITS_FILE)
     import stock_gplm.app.strategy_engine as eng
     eng._EXITS = None  # reload
     return "\n".join(lines)
