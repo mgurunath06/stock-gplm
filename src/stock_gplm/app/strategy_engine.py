@@ -192,7 +192,15 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     else:
         sess_end = -1
         hold_end = time_bar - 1
-    if hold_end > last or (not m.intraday and time_bar > last):
+    # owner 2026-11-20: daily/weekly swing trades hold until stop or target - no bar limit. A trade still
+    # running at the end of the range is closed there at the close and labelled OPEN_END.
+    hold_open = p.swing_buffer is not None and not m.intraday
+    if hold_open:
+        time_bar = last + 1
+        hold_end = last
+    if not hold_open and (hold_end > last or (not m.intraday and time_bar > last)):
+        return None
+    if hold_end < t + 1:
         return None
     if m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
         return None
@@ -233,6 +241,8 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
                     return j + 1, float(m.open[j + 1]), "SIGNAL_EXIT"
     if m.intraday and time_bar > sess_end:
         return sess_end, float(m.close[sess_end]), "SESSION_CLOSE"
+    if hold_open:
+        return last, float(m.close[last]), "OPEN_END"
     return time_bar, float(m.open[time_bar]), "TIME"
 
 

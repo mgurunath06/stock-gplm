@@ -34,7 +34,6 @@ import json
 from .strategy_library import StrategyLibrary
 
 REPO = Path(__file__).resolve().parents[3]
-SPLIT = "2026-08-14"  # first day of the out-of-sample test period (owner decision)
 
 
 GRID_MAX = [0.01, 0.015, 0.025, 0.04, None]  # None: always the swing level
@@ -202,30 +201,36 @@ def _stats(ts: list[dict[str, Any]]) -> str:
 
 
 def _summary(stock, start, end, tfs, trades, status, strategies, head=()) -> str:
+    """Per TF: every strategy with Confidence / RR / Edge and ACTIVE status (config/strategies/confidence.json)."""
+    import pandas as pd
+    from .confidence import score
     names = {s.id: s.doc.get("name", s.id) for s in strategies}
-    by = defaultdict(list)
-    for t in trades:
-        by[(t["strategy_id"], t["timeframe"])].append(t)
+    sides = {s.id: s.direction for s in strategies}
+    sc = score(pd.DataFrame(trades).assign(stock=stock)) if trades else pd.DataFrame()
     lines = [f"# Forward test {stock}: {start} .. {end or 'latest'}", "",
-             "Every trigger traded with the strategy's exit (owner swing exit), default parameters, costs included. "
-             f"Columns: trades | win rate | average net | total net (sum of trades) | profit factor. "
-             f"Split at {SPLIT} (before / after 13 Aug, for comparison).", "", *head]
+             "Every trigger traded with the strategy's exit (owner swing exit: intraday until stop / target / 15:15, "
+             "daily until stop / target), default parameters, costs included. Confidence = chance a trade ends in "
+             "profit (recent trades weigh more; few trades pulled toward this stock's base rate); "
+             "Edge = Confidence x RR - (1 - Confidence). ACTIVE per config/strategies/confidence.json.", "", *head]
     for tf in tfs:
-        rows = sorted({k for k in status if k[1] == tf}, key=lambda k: -sum(t["net_pct"] for t in by.get(k, [])))
-        if not rows:
+        keys = [k for k in status if k[1] == tf]
+        if not keys:
             continue
-        lines += [f"## {tf}", "", "| Strategy | Side | All 2026: trades | win | avg | total | PF | "
-                  f"Before {SPLIT}: trades | win | avg | total | PF | From {SPLIT}: trades | win | avg | total | PF |",
-                  "|---|---|" + "---|" * 15]
-        for k in rows:
-            ts = by.get(k, [])
-            side = next((s.direction for s in strategies if s.id == k[0]), "")
+        x = sc[sc["timeframe"] == tf].set_index("strategy_id") if len(sc) else pd.DataFrame()
+        keys.sort(key=lambda k: -(x.loc[k[0], "edge"] if k[0] in x.index else -9))
+        lines += [f"## {tf}", "", "| Strategy | Side | Status | Confidence | RR | Edge | Trades | Win | Avg net | Total net | Why not active |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|"]
+        for k in keys:
+            nm = f"{names[k[0]]} ({k[0]})"
             if status[k] != "OK":
-                lines.append(f"| {names[k[0]]} ({k[0]}) | {side} | {status[k]} |" + " |" * 14)
+                lines.append(f"| {nm} | {sides.get(k[0], '')} | {status[k]} |" + " |" * 8)
                 continue
-            pre = [t for t in ts if t["signal"][:10] < SPLIT]
-            post = [t for t in ts if t["signal"][:10] >= SPLIT]
-            lines.append(f"| {names[k[0]]} ({k[0]}) | {side} | {_stats(ts)} | {_stats(pre)} | {_stats(post)} |")
+            if k[0] not in x.index:
+                lines.append(f"| {nm} | {sides.get(k[0], '')} | NO SIGNALS | - | - | - | 0 | - | - | - | |")
+                continue
+            r = x.loc[k[0]]
+            lines.append(f"| {nm} | {r.side} | {r.status} | {r.confidence:.0%} | {r.rr:.2f} | {r.edge:+.2f} | {r.trades} | "
+                         f"{r.win_rate:.0%} | {r.avg_net_pct:+.2f}% | {r.total_net_pct:+.1f}% | {r.why} |")
         lines.append("")
     months = defaultdict(list)
     for t in trades:

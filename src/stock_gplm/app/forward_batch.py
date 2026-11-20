@@ -62,36 +62,8 @@ def report(root: Path, stocks: list[str], start: str) -> Path:
         return root / "ALL_STOCKS.md"
     t = pd.concat(frames, ignore_index=True)
     t.to_csv(root / "all_trades.csv", index=False)
-    win = lambda x: (x > 0).mean()  # noqa: E731
-    g = t.groupby(["timeframe", "strategy_id", "name", "side"])
-    per_stock = t.groupby(["timeframe", "strategy_id", "stock"]).net_pct.sum().reset_index()
-    prof = per_stock.groupby(["timeframe", "strategy_id"]).net_pct.agg(stocks="size", profitable=lambda x: (x > 0).sum())
-    s = g.net_pct.agg(trades="size", win=win, avg="mean", total="sum").reset_index()
-    s = s.merge(prof.reset_index(), on=["timeframe", "strategy_id"])
-    best = per_stock.sort_values("net_pct", ascending=False).groupby(["timeframe", "strategy_id"]).head(3) \
-        .groupby(["timeframe", "strategy_id"]).apply(lambda x: ", ".join(f"{r.stock} {r.net_pct:+.1f}%" for r in x.itertuples()),
-                                                      include_groups=False).rename("best_stocks").reset_index()
-    s = s.merge(best, on=["timeframe", "strategy_id"], how="left")
-    lines = [f"# All stocks: {len(frames)} stocks, {len(t)} trades, from {start}", "",
-             "Per strategy x timeframe across all stocks (each stock with its own learned exits). "
-             "Profitable = stocks where the strategy's total net > 0.", ""]
-    for tf in ("1d", "60m", "15m", "5m"):
-        x = s[s.timeframe == tf].sort_values("total", ascending=False)
-        if x.empty:
-            continue
-        lines += [f"## {tf}", "", "| Strategy | Side | Stocks | Profitable stocks | Trades | Win | Avg net | Total net | Best stocks |",
-                  "|---|---|---|---|---|---|---|---|---|"]
-        for r in x.itertuples():
-            lines.append(f"| {r.name} ({r.strategy_id}) | {r.side} | {r.stocks} | {r.profitable} ({r.profitable / r.stocks:.0%}) | "
-                         f"{r.trades} | {r.win:.0%} | {r.avg:+.2f}% | {r.total:+.1f}% | {r.best_stocks} |")
-        lines.append("")
-    st = t.groupby(["stock", "timeframe"]).net_pct.agg(trades="size", win=win, total="sum").reset_index()
-    lines += ["## Per stock (all strategies together)", "", "| Stock | TF | Trades | Win | Total net |", "|---|---|---|---|---|"]
-    for r in st.sort_values(["stock", "timeframe"]).itertuples():
-        lines.append(f"| {r.stock} | {r.timeframe} | {r.trades} | {r.win:.0%} | {r.total:+.1f}% |")
-    out = root / "ALL_STOCKS.md"
-    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return out
+    from .confidence import write_reports
+    return write_reports(root, t, f"from {start}")
 
 
 def main(argv: list[str] | None = None) -> int:
