@@ -17,7 +17,9 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -27,6 +29,7 @@ sys.path.insert(0, str(HOME / "StockGPLMDownloads" / "scripts"))
 sys.path.insert(0, str(HOME / "gplm-live"))
 import gplm_jobs as J  # noqa: E402
 from live_collector import session_api  # noqa: E402
+from adaptive_workers import AdaptiveWorkers  # noqa: E402
 from transfer_ledger import archived, download_event  # noqa: E402
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -90,6 +93,10 @@ def minute_have(sym):
 
 BACKOFF = [60, 300, 1800, 7200]  # seconds between retries of one (symbol, session)
 MAX_ATTEMPTS = 5
+MAX_WORKERS = 4
+# Owner 2026-11-20: index history for relative-strength rules (Shoonya master: Exchange NSE, Instrument INDEX).
+# Daily candles use the trading symbol ("Nifty 50"); minute candles use the token. Fetched first in every sweep.
+INDICES = {"Nifty 50": "26000"}
 STATE = LIVE / "fetch_state.json"
 
 
@@ -177,25 +184,34 @@ def main():
                     help="file of extra symbols (bare, comma/space separated) filled AFTER the watchlist, in file order")
     ap.add_argument("--floor", default=None, help="seed: earliest session the provider still serves (YYYY-MM-DD)")
     a = ap.parse_args()
-    syms = watchlist(a.watchlist)
+    syms = list(INDICES) + watchlist(a.watchlist)
     extra = []
     if a.universe and Path(a.universe).exists():
         raw = Path(a.universe).read_text().replace(",", " ").split()
         extra = [x.upper() + "-EQ" for x in raw if x.upper() + "-EQ" not in syms]
         extra = list(dict.fromkeys(extra))
     retry = Retry()
-    if a.floor and a.floor > retry.s.get("_floor", ""):
-        retry.s["_floor"] = a.floor
+    # The configured provider floor is authoritative. Do not infer a global
+    # history boundary from missing rows of recently listed/suspended stocks.
+    provider_floor = a.floor or retry.s.get("_floor")
+    if not provider_floor:
+        raise SystemExit("--floor is required until a registered provider-window source exists")
+    def save_retry():
+        retry.s["_floor"] = provider_floor
         retry.save()
+    save_retry()
     while True:
+        sweep_no = int(retry.s.get("_sweep", 0)) + 1
+        failed_symbols = set()
         notes = {}
         for rq in take_requests():  # PC: "reset SYM" clears its backoff so it is tried again now
             if rq.get("op") == "reset" and rq.get("symbol"):
                 retry.reset(rq["symbol"] + "|")
-        retry.save()
+        save_retry()
         try:
             api = session_api()
             tok = J.symbol_map()
+            tok.update(INDICES)
         except SystemExit as exc:
             write_atomic(LIVE / "inventory.json", {"contract": CONTRACT, "generated": now().isoformat(timespec="seconds"),
                                                   "state": "AUTH_FAILED", "error": str(exc)})
@@ -205,14 +221,20 @@ def main():
             time.sleep(120)
             continue
         want = [d for d in sessions_back(a.minute_sessions, include_today=True)
-                if str(d) >= retry.s.get("_floor", "")]
+                if str(d) >= provider_floor]
         # daily first (one call per symbol), then minute gaps newest-first so recent days close quickly
         yday = now().date() - timedelta(days=1)
         ok_n = fail_n = 0
         failed_now = []
-        pace = {"p": a.pause}
+        adaptive = AdaptiveWorkers(minimum=1, maximum=MAX_WORKERS, start=2)
+        state_lock = threading.RLock()
+        worker_local = threading.local()
         streak: list = []
-        unavail: dict = {}
+
+        def worker_api():
+            if not hasattr(worker_local, "api"):
+                worker_local.api = session_api()
+            return worker_local.api
 
         def base_pause():
             t = now()
@@ -222,35 +244,32 @@ def main():
         def attempt(key, fn):
             """Adaptive pace: speed up on success, double the pause on errors (throttling/network)."""
             nonlocal ok_n, fail_n
-            if not retry.due(key):
-                return "skip"
+            with state_lock:
+                if not retry.due(key):
+                    return "skip"
+            adaptive.wait(base_pause())
             err = None
             download_event(key, "CLOUD_DOWNLOAD_STARTED")
             try:
                 fn()
                 download_event(key, "CLOUD_DOWNLOAD_COMPLETED")
-                retry.ok(key)
-                ok_n += 1
-                streak.clear()
-                pace["p"] = max(base_pause(), pace["p"] * 0.9)
+                with state_lock:
+                    retry.ok(key)
+                    ok_n += 1
+                    streak.clear()
+                adaptive.success()
             except Exception as exc:  # noqa: BLE001
                 err = f"{type(exc).__name__}: {str(exc)[:120]}"
                 download_event(key, "CLOUD_DOWNLOAD_FAILED", {"error": err})
                 if "MINUTE_UNAVAILABLE" not in err:
-                    fail_n += 1
-                    pace["p"] = min(10.0, max(pace["p"], base_pause()) * 2)
-                    if a.order == "symbol":  # remember now (a pass can last days); outage streaks are undone
-                        retry.fail(key, err)
-                        streak.append(key)
-                        if len(streak) >= 10:
-                            log(f"OUTAGE suspected ({err}); pausing 5 min, failures not charged")
-                            for k in streak:
-                                retry.s.pop(k, None)
-                            streak.clear()
-                            time.sleep(300)
-                    else:
-                        failed_now.append((key, err))
-            time.sleep(pace["p"])
+                    adaptive.failure()
+                    with state_lock:
+                        fail_n += 1
+                        if a.order == "symbol":
+                            retry.fail(key, err)
+                            streak.append(key)
+                        else:
+                            failed_now.append((key, err))
             return err
 
         for s in syms:
@@ -263,45 +282,35 @@ def main():
         def fill(s, days):
             have = minute_have(s)
             oldest = sorted(want)[:20]
-            failures_this_pass = 0
             for d in sorted(days):  # oldest first: those days are the next to leave the provider window
-                if str(d) in have or str(d) < retry.s.get("_floor", ""):
+                if str(d) in have or str(d) < provider_floor:
                     continue
                 if s not in tok:
-                    retry.s[f"{s}|master"] = {"status": "GAVE_UP", "attempts": MAX_ATTEMPTS,
-                                              "last_error": "symbol not in current Shoonya master (renamed/delisted?)"}
-                    return
+                    key = f"{s}|master"
+                    with state_lock:
+                        r = retry.s.setdefault(key, {"attempts": 0})
+                        r.update(status="GAVE_UP" if r["attempts"] + 1 >= MAX_ATTEMPTS else "RETRYING",
+                                 attempts=min(MAX_ATTEMPTS, r["attempts"] + 1),
+                                 last_error="symbol not in current Shoonya master (renamed/delisted?)")
+                        failed_symbols.add(s)
+                        notes[s] = f"deferred in sweep {sweep_no}: symbol absent from current master"
+                    return False
                 key = f"{s}|minute|{d}"
-                err = attempt(key, lambda s=s, d=d: J.minute(api, d, s, tok[s], allow_today=True))
+                err = attempt(key, lambda s=s, d=d: J.minute(worker_api(), d, s, tok[s], allow_today=True))
+                if err == "skip":
+                    with state_lock:
+                        failed_symbols.add(s)
+                        notes[s] = f"deferred in sweep {sweep_no}: retry pending for {d}"
+                    return False
                 if err and err != "skip" and "MINUTE_UNAVAILABLE" in err:
-                    if d in oldest:  # old day: provider history window; 3 stocks agreeing moves the floor
-                        retry.s[key] = {"status": "UNAVAILABLE", "attempts": 1, "last_error": err[:160]}
-                        cnt = unavail.setdefault(str(d), set())
-                        cnt.add(s)
-                        if len(cnt) >= 3 and str(d) >= retry.s.get("_floor", ""):
-                            retry.s["_floor"] = str(d + timedelta(days=1))
-                            log(f"provider window floor -> {retry.s['_floor']}")
-                    else:  # recent day without data: suspension/listing gap or transient; normal retries
+                    with state_lock:
                         retry.fail(key, err)
-                if err and err != "skip":
-                    failures_this_pass += 1
-                    if failures_this_pass >= 5:
-                        notes[s] = "deferred after 5 failed sessions this pass"
-                        break
-
-        def sweep(limit=10):
-            """Retry a bounded number of earlier failures without starving new symbols."""
-            attempted = 0
-            for key, r in list(retry.s.items()):
-                if key.startswith("_") or "|minute|" not in key or r.get("status") != "RETRYING" or not retry.due(key):
-                    continue
-                s_, _, d_ = key.split("|")
-                if s_ in tok and d_ >= retry.s.get("_floor", ""):
-                    attempt(key, lambda s_=s_, d_=d_: J.minute(api, date.fromisoformat(d_), s_, tok[s_],
-                                                                allow_today=True))
-                    attempted += 1
-                    if attempted >= limit:
-                        break
+                if err:
+                    with state_lock:
+                        failed_symbols.add(s)
+                        notes[s] = f"deferred in sweep {sweep_no}: {err[:120]}"
+                    return False
+            return True
 
         try:
             previous_rows = json.loads((LIVE / "universe_progress.json").read_text()).get("have", {})
@@ -317,19 +326,37 @@ def main():
             write_atomic(LIVE / "universe_progress.json",
                          {"generated": now().isoformat(timespec="seconds"), "expected": len(want),
                           "window": [str(want[-1]), str(want[0])] if want else None, "current": current,
+                          "sweep": sweep_no, "max_attempts": MAX_ATTEMPTS,
+                          "failed_this_sweep": len(failed_symbols),
+                          "adaptive_workers": adaptive.snapshot(),
                           "complete": sorted(k for k, v in progress_rows.items() if v >= len(want)),
                           "have": progress_rows})
 
         if a.order == "symbol":  # one stock fully, then the next: research can start per finished stock
-            for index, s in enumerate(syms + extra):
-                fill(s, want)
-                if index and index % 100 == 0:
-                    sweep(10)
-                retry.save()
-                if s in syms:
-                    write_atomic(LIVE / "inventory.json", inventory(syms, want, notes, retry) | {"state": "FILLING"})
-                progress(s)
-            sweep(10)
+            queue = iter(syms + extra)
+            active = {}
+            exhausted = False
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="candle") as pool:
+                while active or not exhausted:
+                    while not exhausted and len(active) < adaptive.snapshot()["target"]:
+                        try:
+                            s = next(queue)
+                        except StopIteration:
+                            exhausted = True
+                            break
+                        active[pool.submit(fill, s, want)] = s
+                    if not active:
+                        continue
+                    finished, _ = wait(active, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        s = active.pop(future)
+                        future.result()
+                        with state_lock:
+                            save_retry()
+                            if s in syms:
+                                write_atomic(LIVE / "inventory.json", inventory(syms, want, notes, retry) |
+                                             {"state": "FILLING"})
+                        progress(s)
         else:
             for d in want:
                 for s in syms:
@@ -341,7 +368,8 @@ def main():
         if not outage:
             for key, err in failed_now:
                 retry.fail(key, err)
-        retry.save()
+        retry.s["_sweep"] = sweep_no
+        save_retry()
         inv = inventory(syms, want, notes, retry)
         gaps = inv["missing_total"]
         inv["state"] = "OUTAGE" if outage else "COMPLETE" if not gaps else "GAPS_REMAIN"
@@ -351,7 +379,7 @@ def main():
         log(f"pass done: ok={ok_n} failed={fail_n} outage={outage} missing={gaps} problems={list(inv['problems'])}")
         if a.once:
             return
-        time.sleep(60 if gaps and not outage else a.every)
+        time.sleep(60 if (gaps or failed_symbols) and not outage else a.every)
 
 
 if __name__ == "__main__":
