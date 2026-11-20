@@ -219,8 +219,8 @@
     "default_budget": "standard"
   },
   "m56": {
-    "development_end": "2026-08-13",
-    "development_end_note": "Owner decision 2026-11-20: no locked holdout. Train/validate on all candles up to 2026-08-13; 2026-08-14 onwards is the out-of-sample test period, then walk-forward retraining.",
+    "development_end": "latest",
+    "development_end_note": "Owner 2026-11-20: no date lock; research uses every candle up to today (latest).",
     "contract": "stock-gplm.m56-policy.v1",
     "reference_catalogue": "H:\\Guru\\Learning\\StockGLPM\\app\\config\\strategies\\reference-300-strategies.txt",
     "reference_is_minimum_not_ceiling": true,

@@ -483,6 +483,9 @@ def run_m56(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend
         return result
     # Development-period boundary: rows after it never reach a lane, feature, label or score.
     dev_end = cfg.get("development_end")
+    if dev_end == "latest":  # owner 2026-11-20: no date lock, use every candle up to today
+        from datetime import date as _d
+        dev_end = _d.today().isoformat()
     if dev_end:
         if end and end > dev_end:
             raise ValueError(f"--end {end} is after m56.development_end {dev_end}; the locked holdout stays closed")

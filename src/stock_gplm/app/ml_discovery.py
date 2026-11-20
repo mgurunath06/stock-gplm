@@ -202,6 +202,9 @@ def run(app: App, symbols: Sequence[str], timeframes: Sequence[str], backend: Ba
         out: Path, budget: str = "quick", start: str | None = None, end: str | None = None) -> dict[str, Any]:
     cfg = app.s.section("m56")
     dev_end = cfg.get("development_end")
+    if dev_end == "latest":  # owner 2026-11-20: no date lock, use every candle up to today
+        from datetime import date as _d
+        dev_end = _d.today().isoformat()
     if not dev_end:
         raise ValueError("m56.development_end is not configured; refusing to read data without a holdout boundary")
     if end and end > dev_end:
