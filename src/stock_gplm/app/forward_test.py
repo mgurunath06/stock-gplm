@@ -37,7 +37,9 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 GRID_MAX = [0.01, 0.015, 0.025, 0.04, None]  # None: always the swing level
-GRID_RR = [2.0, 2.5, 3.0]  # owner rule: target at least 2x risk
+# owner 2026-11-20 (later): wants 70-80% win rates, so targets below the risk are allowed; the learner first
+# requires exits.json target_win_rate (default 0.70), then maximises profit.
+GRID_RR = [0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 
 
 def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, name: str, learn: bool = False,
@@ -148,13 +150,26 @@ def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strat
                                                                s.direction == "short", xm)]
             per[(mx, rr)] = res
 
+    want = float((json.loads(EXITS_FILE.read_text(encoding="utf-8")).get("default") or {}).get("target_win_rate", 0.70)
+                 if EXITS_FILE.is_file() else 0.70)
+
     def pick(get, need):
+        """Settings reaching the target win rate -> most profitable; else highest win rate that still makes
+        money; else least loss. Row: (total, trades, max_swing, rr, win_rate)."""
         rows = []
         for (mx, rr), res in per.items():
             net = get(res)
             if len(net) >= need:
                 rows.append((sum(net), len(net), mx, rr, float((np.array(net) > 0).mean())))
-        return max(rows, key=lambda r: r[0]) if rows else None
+        if not rows:
+            return None
+        hit = [r for r in rows if r[4] >= want and r[0] > 0]
+        if hit:
+            return max(hit, key=lambda r: r[0])
+        pos = [r for r in rows if r[0] > 0]
+        if pos:
+            return max(pos, key=lambda r: (r[4], r[0]))
+        return max(rows, key=lambda r: r[0])
 
     def ev(r):
         return {"from": start, "to": end or "latest", "trades": r[1], "win_rate": round(r[4], 3),

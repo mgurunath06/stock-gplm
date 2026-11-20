@@ -1,6 +1,12 @@
 {
   "contract": "stock-gplm.confidence.v1",
   "note": "Owner 2026-11-20: strategies are judged by Confidence (chance a trade ends in profit, recency-weighted, few trades pulled toward the stock's base rate), RR and Edge = Confidence x RR - (1 - Confidence). A strategy is ACTIVE for a stock x TF when trades >= min_trades, confidence >= min_confidence and edge >= min_edge. Precedence: default < stocks.SYM.\"*\" < stocks.SYM.<tf>. Example: \"stocks\": {\"RELIANCE\": {\"*\": {\"min_confidence\": 0.5}, \"5m\": {\"min_confidence\": 0.55, \"min_trades\": 20}}}",
-  "default": {"min_confidence": 0.45, "min_edge": 0.0, "min_trades": 10, "prior": 5, "decay_sessions": 100},
+  "default": {
+    "min_confidence": 0.7,
+    "min_edge": 0.0,
+    "min_trades": 10,
+    "prior": 5,
+    "decay_sessions": 100
+  },
   "stocks": {}
 }
