@@ -263,11 +263,12 @@ class Ingestor:
     def ingest(self, symbol: str, *, use_minute: bool = True) -> SymbolData:
         symbol = normalize_symbol(symbol)
         daily_parts: list[dict[str, Any]] = []
-        ddir = self.s.daily_root / symbol
-        if ddir.is_dir():
-            for p in sorted(ddir.iterdir()):
-                if _DAILY.fullmatch(p.name):
-                    daily_parts.append(self._daily_partition(p, symbol))
+        for droot in (self.s.daily_root, *getattr(self.s, "daily_extra_roots", ())):
+            ddir = droot / symbol
+            if ddir.is_dir():
+                for p in sorted(ddir.iterdir()):
+                    if _DAILY.fullmatch(p.name):
+                        daily_parts.append(self._daily_partition(p, symbol))
         minute_by_session: dict[str, list[dict[str, Any]]] = {}
         if use_minute:
             for root in self.s.minute_roots:

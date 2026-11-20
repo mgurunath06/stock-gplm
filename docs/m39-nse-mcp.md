@@ -110,3 +110,6 @@ model data. Before any wider integration, a person must resolve at least redistr
 retention, derived-report publication, request-volume, commercial research, and trading-use
 rights with NSE. This code does not scrape, automate a browser, use NSE website cookies, call an
 unofficial API, evade a rate limit, or bypass access control.
+
+> **2026-11-20 (owner):** the reference-only restriction is withdrawn. NSE MCP is the project's NSE data source; `stock_gplm.app.nse_history` uses it for long daily history. `m39/policy.py` limits apply only to the old M3.9 CLI.
+
