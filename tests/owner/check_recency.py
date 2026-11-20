@@ -3,7 +3,7 @@
     $env:PYTHONPATH="src"; python tests/owner/check_recency.py [--stocks RELIANCE,TCS,INFY] [--library ..\\state-intraday\\strategy-library]
 
 Checks: offline unit tests; full run on all timeframes (no lane fails); outputs written; current picks obey
-the rules (enough recent trades, positive score); dev/test steps sit on the right side of the split date;
+the rules (enough recent trades, positive score); steps are rolling and evenly spaced (no split date);
 a second identical run reuses every lane; NO LOOK-AHEAD: a run on candles cut at --cut gives the same
 picks for every step decided before the cut. Prints PASS/FAIL per check and the summary.
 """
@@ -85,17 +85,13 @@ def main() -> int:
         check("current picks: enough trades and positive score", not bad, ", ".join(bad[:5]))
 
         import numpy as np
-        split = None
         wrong = []
         for (sym, tf), r_ in res.items():
-            split = split or json.loads((full / "run-config.json").read_text())["split_development_end"]
-            sd = int(np.datetime64(split, "D").astype(np.int64))
             step = rc.WINDOWS[tf].step_days
-            for s in r_.get("steps") or []:
-                d = int(np.datetime64(s["date"], "D").astype(np.int64))
-                if s["period"] == "dev" and d + step > sd + 1 or s["period"] == "test" and d <= sd:
-                    wrong.append(f"{sym} {tf} {s['date']}")
-        check(f"steps on the right side of the split ({split})", not wrong, ", ".join(wrong[:5]))
+            ds = [int(np.datetime64(s["date"], "D").astype(np.int64)) for s in r_.get("steps") or []]
+            if any(b - a != step for a, b in zip(ds, ds[1:])):
+                wrong.append(f"{sym} {tf}")
+        check("steps are chronological and evenly spaced (rolling, no split date)", not wrong, ", ".join(wrong[:5]))
 
         code, text, secs = run(base + ["--out", str(full)])
         check("second identical run reuses every lane", code == 0 and '"computed": 0' in text, f"{secs:.0f} s")

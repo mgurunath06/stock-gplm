@@ -23,18 +23,16 @@ def test_persistent_winner_found_and_no_lookahead():
     win, pol = Window(30, 7, 5), Policy(top_k=1, min_steps=4, min_fwd_trades=10)
     vid, t, e, net = _trades(rng, n, [lambda b: 0.004, lambda b: -0.002, lambda b: 0.0])
     group = np.arange(3)
-    w = walk(vid, t, e, net, day, group, win, pol, split_day=int(day[250]))
+    w = walk(vid, t, e, net, day, group, win, pol)
     assert w["steps"] and all(s["picks"] == [0] for s in w["steps"])
-    dev = verdict([s for s in w["steps"] if s["period"] == "dev"], pol)
-    test = verdict([s for s in w["steps"] if s["period"] == "test"], pol)
-    assert dev["verdict"] == "HOLDS" and test["verdict"] == "HOLDS"
-    assert lane_status(dev, test) == "ASSIGNED"
+    tr = verdict(w["steps"], pol)
+    assert tr["verdict"] == "WORKS" and lane_status(tr) == "ASSIGNED"
     assert w["current"] == [0]
 
     # Changing the future must not change any earlier decision.
     net2 = net.copy()
     net2[t >= 300] = -net2[t >= 300]
-    w2 = walk(vid, t, e, net2, day, group, win, pol, split_day=int(day[250]))
+    w2 = walk(vid, t, e, net2, day, group, win, pol)
     early = [s["picks"] for s in w["steps"] if s["date"] <= str(np.datetime64(int(day[299]), "D"))]
     early2 = [s["picks"] for s in w2["steps"] if s["date"] <= str(np.datetime64(int(day[299]), "D"))]
     assert early == early2
@@ -48,7 +46,7 @@ def test_regime_flip_fails_and_rotates():
     # variant 0 wins early then loses; variant 1 the opposite -> the pick must rotate to 1.
     vid, t, e, net = _trades(rng, n, [lambda b: 0.004 if b < 200 else -0.004,
                                       lambda b: -0.004 if b < 200 else 0.004])
-    w = walk(vid, t, e, net, day, np.arange(2), win, pol, split_day=int(day[399]))
+    w = walk(vid, t, e, net, day, np.arange(2), win, pol)
     assert w["steps"][0]["picks"] == [0] and w["steps"][-1]["picks"] == [1]
     assert w["current"] == [1]
 
@@ -59,6 +57,5 @@ def test_random_noise_is_not_assigned():
     day = np.arange(n, dtype=np.int64) + 19000
     pol = Policy(top_k=3)
     vid, t, e, net = _trades(rng, n, [lambda b: -0.001] * 20)
-    w = walk(vid, t, e, net, day, np.arange(20), Window(30, 7, 5), pol, split_day=int(day[250]))
-    dev = verdict([s for s in w["steps"] if s["period"] == "dev"], pol)
-    assert dev["verdict"] != "HOLDS"
+    w = walk(vid, t, e, net, day, np.arange(20), Window(30, 7, 5), pol)
+    assert verdict(w["steps"], pol)["verdict"] != "WORKS"

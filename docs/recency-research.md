@@ -17,17 +17,17 @@ Stock behaviour changes, so this judges each stock × timeframe on recent candle
 
    | TF | warm-up before first pick | step | min trades |
    |---|---|---|---|
-   | 5m, 15m (1m) | 30 days | 7 days | 5 |
-   | 30m, 60m | 91 days | 14 days | 5 |
-   | 1d | 365 days | 30 days | 4 |
-   | 1w | 1095 days | 91 days | 3 |
+   | 5m, 15m (1m) | 30 days | 2 days | 5 |
+   | 30m, 60m | 91 days | 5 days | 5 |
+   | 1d | 365 days | 7 days | 4 |
+   | 1w | 1095 days | 28 days | 3 |
 
    Overrides: config `recency.windows.<tf>` = `{warmup_days, step_days, min_trades}`; CLI `--recent-bars`, `--recent-share`.
-3. Verdict per period: **dev** covers steps whose next window ends by `m56.development_end` (2026-08-13), and **test**
-   covers steps decided after it. HOLDS means the picks averaged above 0 and beat the control, over at least 4 steps
-   with trades and at least 10 trades.
-4. Lane status: **ASSIGNED** (holds in dev and in test), **WATCH** (holds in dev, too few test trades),
-   **DROPPED_IN_TEST**, **NOT_USED**, **NO_DATA**.
+3. **No split date** (owner, 2026-11-20). Rolling track record: each step's picks are judged only on the candles
+   after that pick, like live use. Weighted like the ranking: last 12 steps give 70% (newest most, shrunk towards the
+   long-run record when they hold few trades), all older steps 30%. WORKS = weighted picks > 0 and beat the control
+   (every eligible variant), with >= 4 steps with trades, >= 10 trades, >= 1 trade in the recent steps.
+4. Lane status: **ASSIGNED** (works now), **WATCH** (too few trades), **NOT_USED**, **NO_DATA**.
 
 Run it again each day. Lanes whose data changed are recomputed and the ranking rotates. Unchanged lanes are reused.
 

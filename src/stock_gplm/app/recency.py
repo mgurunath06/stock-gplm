@@ -16,11 +16,13 @@ Per lane (stock x timeframe):
    The top ``top_k`` (one per strategy, score > 0, >= min_trades trades in all history) are the picks.
    We then record the picks' trades signalled in [D, D + step) and, as a control, the trades of every
    eligible variant in the same window ("pick anything that was active").
-3. Verdict per period: ``dev`` = steps whose forward window ends by ``m56.development_end``; ``test`` =
-   steps decided after it (the final judge). The method HOLDS when picks made money (mean net > 0) and
-   beat the control, over at least ``min_steps`` steps and ``min_fwd_trades`` trades.
-4. Current picks: ranking at the latest candle. A lane is ASSIGNED when the method holds in dev and in
-   test, WATCH when it holds in dev and test has too few trades, otherwise not used.
+3. Rolling track record (owner, 2026-11-20: no fixed split date). Every step's picks are judged only on the
+   candles after that pick, exactly like live use. The track record is weighted the same way as the ranking:
+   the last ``recent_steps`` steps give 70% (newest most), all older steps 30%. The method WORKS when the
+   picks' weighted average is > 0 and beats the control, over >= ``min_steps`` steps and ``min_fwd_trades``
+   trades, with at least one pick trade among the recent steps.
+4. Current picks: ranking at the latest candle. ASSIGNED = the method works now on this lane, WATCH = too
+   few trades to judge yet, NOT_USED = it does not work now.
 
 Re-run daily: the ranking rotates as new candles arrive (lanes whose data changed are recomputed;
 unchanged lanes are reused from ``lanes/<SYMBOL>/<tf>.json``).
@@ -55,9 +57,9 @@ class Window:
 
 
 WINDOWS: dict[str, Window] = {
-    "1m": Window(30, 7, 5), "5m": Window(30, 7, 5), "15m": Window(30, 7, 5),
-    "30m": Window(91, 14, 5), "60m": Window(91, 14, 5),
-    "1d": Window(365, 30, 4), "1w": Window(1095, 91, 3),
+    "1m": Window(30, 2, 5), "5m": Window(30, 2, 5), "15m": Window(30, 2, 5),
+    "30m": Window(91, 5, 5), "60m": Window(91, 5, 5),
+    "1d": Window(365, 7, 4), "1w": Window(1095, 28, 3),
 }
 
 
@@ -68,6 +70,7 @@ class Policy:
     recent_bars: int = 100      # the last N candles carry the extra, linearly decaying weight
     recent_share: float = 0.7   # share of the score from those candles; the rest from all older history
     min_steps: int = 4          # steps with forward trades needed for a verdict
+    recent_steps: int = 12      # the last N steps give ``recent_share`` of the track record (newest most)
     min_fwd_trades: int = 10    # forward trades of the picks needed for a verdict
     current_list: int = 10      # how many current picks to report per lane
 
@@ -114,7 +117,7 @@ def pick(sc: np.ndarray, cnt: np.ndarray, group: np.ndarray, min_trades: int, k:
 
 
 def walk(vid: np.ndarray, t: np.ndarray, e: np.ndarray, net: np.ndarray, day: np.ndarray, group: np.ndarray,
-         win: Window, pol: Policy, split_day: int) -> dict[str, Any]:
+         win: Window, pol: Policy) -> dict[str, Any]:
     """Walk-forward validation of "recent winner keeps winning" plus the current ranking.
 
     ``vid/t/e/net``: flat trades (variant, signal bar, exit bar, net return); ``day``: per-bar day number;
@@ -138,8 +141,7 @@ def walk(vid: np.ndarray, t: np.ndarray, e: np.ndarray, net: np.ndarray, day: np
         elig = cnt >= win.min_trades
         pm = np.isin(fv, picks)
         cm = elig[fv]
-        period = "dev" if d + win.step_days <= split_day + 1 else ("test" if d > split_day else "straddle")
-        steps.append({"date": str(np.datetime64(d, "D")), "period": period, "eligible": int(elig.sum()),
+        steps.append({"date": str(np.datetime64(d, "D")), "eligible": int(elig.sum()),
                       "picks": picks, "pick_n": int(pm.sum()), "pick_sum": float(fn[pm].sum()),
                       "pick_sumsq": float((fn[pm] ** 2).sum()), "ctrl_n": int(cm.sum()),
                       "ctrl_sum": float(fn[cm].sum())})
@@ -155,31 +157,45 @@ def walk(vid: np.ndarray, t: np.ndarray, e: np.ndarray, net: np.ndarray, day: np
 
 
 def verdict(steps: Sequence[Mapping[str, Any]], pol: Policy) -> dict[str, Any]:
+    """Rolling, recency-weighted track record of the picks over every step (no split date)."""
     used = [s for s in steps if s["pick_n"] > 0]
     n = sum(s["pick_n"] for s in used)
     tot = sum(s["pick_sum"] for s in used)
     sq = sum(s["pick_sumsq"] for s in used)
-    cn = sum(s["ctrl_n"] for s in steps)
-    cs = sum(s["ctrl_sum"] for s in steps)
-    mean = tot / n if n else None
-    cmean = cs / cn if cn else None
-    sd = math.sqrt(max(0.0, (sq - n * mean * mean) / (n - 1))) if n > 1 and mean is not None else None
-    tstat = mean / (sd / math.sqrt(n)) if sd else None
+    plain = tot / n if n else None
+    sd = math.sqrt(max(0.0, (sq - n * plain * plain) / (n - 1))) if n > 1 and plain is not None else None
+    tstat = plain / (sd / math.sqrt(n)) if sd else None
     hit = sum(1 for s in used if s["pick_sum"] > 0) / len(used) if used else None
-    if len(used) < pol.min_steps or n < pol.min_fwd_trades:
+    k = max(1, pol.recent_steps)
+    rec, old = list(steps[-k:]), list(steps[:-k])
+    wts = [(i + 1) / len(rec) for i in range(len(rec))]  # newest recent step = 1, oldest lightest
+
+    def blend(nk: str, sk: str) -> float | None:
+        rn = sum(w * s[nk] for w, s in zip(wts, rec))
+        rs = sum(w * s[sk] for w, s in zip(wts, rec))
+        on, osum = sum(s[nk] for s in old), sum(s[sk] for s in old)
+        o = osum / on if on else None
+        if o is None:
+            return rs / rn if rn else None
+        r = (rs + pol.prior * o) / (rn + pol.prior)  # few recent trades lean on the long-run record
+        return pol.recent_share * r + (1 - pol.recent_share) * o
+
+    mean, cmean = blend("pick_n", "pick_sum"), blend("ctrl_n", "ctrl_sum")
+    recent_n = sum(s["pick_n"] for s in rec)
+    if len(used) < pol.min_steps or n < pol.min_fwd_trades or recent_n == 0:
         v = "TOO_FEW"
     elif mean is not None and mean > 0 and (cmean is None or mean > cmean):
-        v = "HOLDS"
+        v = "WORKS"
     else:
         v = "FAILS"
     return {"verdict": v, "steps": len(steps), "steps_with_trades": len(used), "pick_trades": n,
-            "pick_mean_net": mean, "pick_t": tstat, "step_hit_rate": hit, "ctrl_trades": cn, "ctrl_mean_net": cmean}
+            "recent_pick_trades": recent_n, "pick_mean_net": mean, "pick_plain_mean_net": plain, "pick_t": tstat,
+            "step_hit_rate": hit, "ctrl_trades": sum(s["ctrl_n"] for s in steps), "ctrl_mean_net": cmean,
+            "last_step": steps[-1]["date"] if steps else None}
 
 
-def lane_status(dev: Mapping[str, Any], test: Mapping[str, Any]) -> str:
-    if dev["verdict"] != "HOLDS":
-        return "NOT_USED"
-    return {"HOLDS": "ASSIGNED", "TOO_FEW": "WATCH"}.get(test["verdict"], "DROPPED_IN_TEST")
+def lane_status(track: Mapping[str, Any]) -> str:
+    return {"WORKS": "ASSIGNED", "TOO_FEW": "WATCH"}.get(track["verdict"], "NOT_USED")
 
 
 # --------------------------------------------------------------------------- lane computation (worker-safe)
@@ -262,11 +278,9 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
     vid, t, e, net = cat(vid_l, np.int64), cat(t_l, np.int64), cat(e_l, np.int64), cat(net_l, float)
     group = np.asarray(grp_l, np.int64)
     day = _day_index(m.sessions)
-    split = int(np.datetime64(job["split"], "D").astype(np.int64))
-    w = walk(vid, t, e, net, day, group, win, pol, split)
-    dev = verdict([s for s in w["steps"] if s["period"] == "dev"], pol)
-    test = verdict([s for s in w["steps"] if s["period"] == "test"], pol)
-    status = lane_status(dev, test)
+    w = walk(vid, t, e, net, day, group, win, pol)
+    track = verdict(w["steps"], pol)
+    status = lane_status(track)
 
     def vrow(v: int) -> dict[str, Any]:
         return {"variant": v, **variants[v]}
@@ -276,7 +290,7 @@ def compute_lane(job: Mapping[str, Any]) -> dict[str, Any]:
     current = [{**vrow(c["variant"]), **c} for c in w["current_scores"]]
     return {**out, "status": status, "bars": n, "data_start": m.label(0), "data_end": m.label(n - 1),
             "data_fingerprint": lane.data_fingerprint, "strategies": len(job["strategies"]),
-            "variants": len(variants), "trades": int(net.size), "skipped": skipped, "dev": dev, "test": test,
+            "variants": len(variants), "trades": int(net.size), "skipped": skipped, "track": track,
             "steps": steps, "current": current, "seconds": round(time.monotonic() - t0, 2)}
 
 
@@ -305,12 +319,11 @@ def run(app: Any, symbols: Sequence[str], timeframes: Sequence[str], out: Path, 
     from .research import _ref_symbols
 
     pol = policy or Policy()
-    split = app.s.section("m56").get("development_end") or "2026-08-13"
     windows = {**WINDOWS, **{k: Window(**v) for k, v in (app.s.section("recency").get("windows") or {}).items()}}
     pool = _load_pool(app, patterns, library_extra)
     benchmark = app.s.section("research").get("benchmark_symbol")
     out.mkdir(parents=True, exist_ok=True)
-    meta = {"contract": CONTRACT, "split_development_end": split, "symbols": len(symbols),
+    meta = {"contract": CONTRACT, "symbols": len(symbols),
             "timeframes": list(timeframes), "windows": {k: asdict(windows[k]) for k in timeframes},
             "policy": asdict(pol), "max_combos": max_combos, "strategies": len(pool), "patterns": list(patterns or []),
             "window": {"start": start, "end": end}, "config_sha256": app.s.sha256, "code_sha": app.code_sha,
@@ -369,7 +382,7 @@ def run(app: Any, symbols: Sequence[str], timeframes: Sequence[str], out: Path, 
                 appl = [d for d, s in zip(sdocs, pool) if tf in s.timeframes and s.applies(sym, tf)]
                 key = sha({"c": CONTRACT, "sym": sym, "tf": tf, "fp": data.fingerprint,
                            "lib": sha(sorted(d["sha256"] for d in appl)), "w": asdict(windows[tf]),
-                           "pol": asdict(pol), "mc": max_combos, "cfg": app.s.sha256, "split": split,
+                           "pol": asdict(pol), "mc": max_combos, "cfg": app.s.sha256,
                            "code": app.code_sha})
                 p = _lane_path(out, data.symbol, tf)
                 if p.is_file():
@@ -382,7 +395,7 @@ def run(app: Any, symbols: Sequence[str], timeframes: Sequence[str], out: Path, 
                 job = {"data": data, "timeframe": tf, "window": asdict(windows[tf]), "policy": asdict(pol),
                        "costs": app.s.section("costs"), "feature_cache": app.s.cache_dir / "features",
                        "refs": refs, "benchmark": benchmark, "strategies": appl, "max_combos": max_combos,
-                       "split": split, "key": key}
+                       "key": key}
                 if ex is None:
                     try:
                         save(compute_lane(job))
@@ -425,9 +438,8 @@ def aggregate(out: Path, symbols: Sequence[str] | None = None, timeframes: Seque
         base = {"symbol": r["symbol"], "timeframe": r["timeframe"], "status": r["status"]}
         row = {**base, "bars": r.get("bars"), "data_end": r.get("data_end"), "variants": r.get("variants"),
                "trades": r.get("trades")}
-        for per in ("dev", "test"):
-            for k, v in (r.get(per) or {}).items():
-                row[f"{per}_{k}"] = v
+        for k, v in (r.get("track") or {}).items():
+            row[k] = v
         top = (r.get("current") or [{}])[0]
         row["current_top"] = top.get("strategy_id")
         lane_rows.append(row)
@@ -457,33 +469,26 @@ def aggregate(out: Path, symbols: Sequence[str] | None = None, timeframes: Seque
     for r in lane_rows:
         d = by_tf.setdefault(r["timeframe"], {})
         d[r["status"]] = d.get(r["status"], 0) + 1
-    pooled = {}
-    for per in ("dev", "test"):
-        n = sum(int(r.get(f"{per}_pick_trades") or 0) for r in lane_rows)
-        s = sum((r.get(f"{per}_pick_mean_net") or 0) * int(r.get(f"{per}_pick_trades") or 0) for r in lane_rows)
-        cn = sum(int(r.get(f"{per}_ctrl_trades") or 0) for r in lane_rows)
-        cs = sum((r.get(f"{per}_ctrl_mean_net") or 0) * int(r.get(f"{per}_ctrl_trades") or 0) for r in lane_rows)
-        pooled[per] = {"pick_trades": n, "pick_mean_net": s / n if n else None, "ctrl_trades": cn,
-                       "ctrl_mean_net": cs / cn if cn else None}
+    n = sum(int(r.get("pick_trades") or 0) for r in lane_rows)
+    s = sum((r.get("pick_plain_mean_net") or 0) * int(r.get("pick_trades") or 0) for r in lane_rows)
+    pooled = {"pick_trades": n, "pick_mean_net": s / n if n else None}
+    states = ("ASSIGNED", "WATCH", "NOT_USED", "NO_DATA")
     lines = ["# Recency research: what works now", "",
-             "Recent winners are picked using only past trades, then checked on the following week/month.",
-             f"Lanes: {len(lane_rows)}.", "",
-             "| Period | Picks' trades | Picks avg/trade | Everything-active avg/trade |", "|---|---|---|---|"]
-    for per, name in (("dev", "Development (to split date)"), ("test", "Test (after split date)")):
-        p = pooled[per]
-        lines.append(f"| {name} | {p['pick_trades']} | {_pct(p['pick_mean_net'])} | {_pct(p['ctrl_mean_net'])} |")
-    lines += ["", "| TF | " + " | ".join(("ASSIGNED", "WATCH", "DROPPED_IN_TEST", "NOT_USED", "NO_DATA")) + " |",
-              "|---" * 6 + "|"]
+             "Every step picks recent winners from past trades only (all history, last 100 candles weigh most),",
+             "then records how the picks did on the following candles. The track record is weighted the same way:",
+             "recent steps count most. No fixed split date.",
+             f"Lanes: {len(lane_rows)}; picks' trades: {n}, plain avg {_pct(pooled['pick_mean_net'])}/trade.", "",
+             "| TF | " + " | ".join(states) + " |", "|---" * (len(states) + 1) + "|"]
     for tf in [x for x in TF_ALL + ("1m",) if x in by_tf]:
         d = by_tf[tf]
-        lines.append(f"| {tf} | " + " | ".join(str(d.get(k, 0)) for k in
-                                               ("ASSIGNED", "WATCH", "DROPPED_IN_TEST", "NOT_USED", "NO_DATA")) + " |")
+        lines.append(f"| {tf} | " + " | ".join(str(d.get(k, 0)) for k in states) + " |")
     asg = [r for r in lane_rows if r["status"] == "ASSIGNED"]
     lines += ["", f"## Assigned now ({len(asg)})", ""]
-    for r in sorted(asg, key=lambda x: -(x.get("test_pick_mean_net") or 0))[:40]:
-        lines.append(f"- {r['symbol']} {r['timeframe']}: {r['current_top'] or '(no current pick)'} - test "
-                     f"{_pct(r.get('test_pick_mean_net'))}/trade over {r.get('test_pick_trades')} trades")
-    lines += ["", "ASSIGNED = method held before and after the split date. WATCH = held before, too few trades after.",
+    for r in sorted(asg, key=lambda x: -(x.get("pick_mean_net") or 0))[:40]:
+        lines.append(f"- {r['symbol']} {r['timeframe']}: {r['current_top'] or '(no current pick)'} - picks "
+                     f"{_pct(r.get('pick_mean_net'))}/trade (weighted) vs {_pct(r.get('ctrl_mean_net'))} for all, "
+                     f"{r.get('pick_trades')} trades")
+    lines += ["", "ASSIGNED = recent winners keep winning on this lane now. WATCH = too few trades to judge.",
               "Files: lanes.csv, current.csv (today's ranking), assigned.csv, steps.csv (every walk-forward step)."]
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"lanes_reported": len(lane_rows), "by_timeframe": by_tf, "pooled": pooled}

@@ -73,3 +73,10 @@ Older TODOs still open (see previous handover): commit, scorecard summary when r
 - Top-5 1d (NSE MCP, data from 2021-11-22): BHARTIARTL WATCH (dev +1.43%/trade vs ctrl +0.25%, t 2.6), ICICIBANK WATCH,
   HDFCBANK/RELIANCE/TCS NOT_USED. Output state-long/reports/recency/top5-1d.
 - Open point: rare strategies (5 trades, none recent) can top the list on a big old mean; consider higher 1d min_trades.
+
+## Update (owner, 2026-11-20, latest): no 13-Aug split; rolling recency-weighted track record
+- verdict() = one rolling track record over all steps (last 12 steps 70%, shrunk by prior 3 to the long-run record;
+  older 30%). Status ASSIGNED/WATCH/NOT_USED; DROPPED_IN_TEST removed. Steps: 5m/15m 2d, 30m/60m 5d, 1d 7d, 1w 28d.
+- Top-5 1d: only ICICIBANK ASSIGNED (weighted +1.59% vs +0.93%, but plain +0.01%, t 0.03 -> weak).
+  BHARTIARTL NOT_USED (plain +1.31%, t 2.6, but recent picks trail the control +1.42%).
+- Proposed next (owner to choose): regime-matched ranking (bull/bear/sideways), wider parameter search.
