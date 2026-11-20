@@ -80,3 +80,18 @@ Library now: 256 strategies (155 catalogue, 85 Chartink, 9 O1, 7 GeminiNeon); lo
 2. Daily (1d) library research on the new library: the feeder runs intraday TFs only; most Chartink scans are 1d.
 3. Pre-existing failures (also on clean HEAD): `tests/test_verify_suite.py::test_writes_auditable_outputs` (correctness FAIL),
    `tests/test_m5_historical_adapter.py` (Windows temp-dir permission check).
+
+## Session 3 (2026-11-20 late night) - state for the next session
+- Library = owner Chartink (85) + GN (7) only; catalogue, O1 and ~32.6k ML rules parked (see commit dc4fb62).
+- Exit (owner): stop 0.2% beyond last swing low/high, candle low/high when the swing is > max_swing_pct away;
+  intraday until stop/target/15:15, daily until stop/target (OPEN_END at range end). Targets learned per stock x TF x
+  strategy for `exits.json` target_win_rate 0.70 (rr 0.3-3) by `forward_test --learn-exits`.
+- No date lock (`development_end = "latest"`), no date splits; judge by Confidence/RR/Edge (`confidence.py`), ACTIVE
+  thresholds in `config/strategies/confidence.json` (default min_confidence 0.70, min_edge 0, min_trades 10).
+  Re-score without rerunning trades: `python -m stock_gplm.app.confidence <forward run dir>`.
+- Results: `state/reports/forward/watchlist-2026-v3/` (50 stocks; 90 ACTIVE combos, 74.5% win, +0.18%/trade net, in-sample).
+- Overnight chain `state/reports/pipeline/2026-11-20/overnight_chain.cmd` (writes overnight.done): pull indices,
+  forward_batch `complete-2026` (330 stocks complete from 19 Jan, all TFs), `universe-1d-2026` (daily, whole universe).
+- Open: live alerts should use `active.json` + learned exits (live lab still on old library/ATR exits); nightly
+  automatic re-run; unblock GN-StrongestKidInClass after checking index rows; calendar lacks special sessions
+  (1 Feb Budget, 8 Nov Muhurat) so their minute data was never fetched.
