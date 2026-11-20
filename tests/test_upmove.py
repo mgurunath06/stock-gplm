@@ -1,0 +1,38 @@
+"""Offline checks of the up-move learner core (synthetic candles)."""
+import numpy as np
+
+from stock_gplm.app.upmove import Params, firings, outcomes, summarize, walk_forward
+
+
+def test_outcomes_target_stop_timeout_and_stop_first():
+    p = Params(target=0.03, stop=0.015, horizon=3)
+    o = np.array([100, 100, 100, 100, 100, 100, 100.0])
+    h = np.array([100, 104, 100, 100, 104, 100, 100.0])   # t=0 -> bar1 hits +3% (target)
+    lo = np.array([100, 99.9, 98, 100, 98, 100, 100.0])   # t=1 -> bar2 hits -1.5% (stop); t=3 -> bar4 both: stop first
+    c = np.array([100, 100, 100, 100, 100, 100, 101.0])
+    hit, net = outcomes(o, h, lo, c, p, cost=0.001)
+    assert hit[0] == 1 and abs(net[0] - 0.029) < 1e-9
+    assert hit[1] == 0 and abs(net[1] + 0.016) < 1e-9
+    assert hit[3] == 0 and abs(net[3] + 0.016) < 1e-9
+    assert np.isnan(net[4]) and np.isnan(net[6])          # no full 3-candle path left
+
+
+def test_firings_edge_and_spacing():
+    m = np.array([0, 1, 1, 0, 1, 0, 0, 0, 1, 1], bool)
+    assert firings(m, np.ones(10, bool), 5).tolist() == [1, 8]
+
+
+def test_edge_ranks_better_trigger_and_walk_forward_is_causal():
+    p = Params(prior=2)
+    w = np.ones(20)
+    good = summarize(np.r_[np.full(12, 0.03), np.full(8, -0.015)], np.r_[np.ones(12), np.zeros(8)], w, 0.35, p)
+    bad = summarize(np.r_[np.full(5, 0.03), np.full(15, -0.015)], np.r_[np.ones(5), np.zeros(15)], w, 0.35, p)
+    assert good["edge"] > 0 > bad["edge"] and good["rr"] > 1.9
+    t = np.arange(0, 400, 10)
+    net = np.where(np.arange(t.size) % 2 == 0, 0.03, -0.015)
+    hit = (net > 0).astype(float)
+    a = walk_forward(t, net, hit, np.full(t.size, 0.35), p, 400)
+    net2 = net.copy()
+    net2[-5:] = -0.015  # changing later results must not change which earlier firings were taken
+    b = walk_forward(t, net2, hit, np.full(t.size, 0.35), p, 400)
+    assert a["taken_t"][: len(a["taken_t"]) - 5] == b["taken_t"][: len(a["taken_t"]) - 5]

@@ -88,3 +88,10 @@ Older TODOs still open (see previous handover): commit, scorecard summary when r
   holding, holds 6-30 bars). Top picks show 1-5 trades in the last 100 candles.
 - Top-5 1d now: ICICIBANK, RELIANCE ASSIGNED (weak: plain averages negative); others NOT_USED. Verdicts flip with
   weighting choices -> no robust 1d edge on these 5; judge on 50 stocks before more tuning.
+
+## Update (owner, 2026-11-20, latest 3): up-move learner + owner basic strategies
+- `src/stock_gplm/app/upmove.py` + `docs/upmove-learner.md` + `tests/test_upmove.py` (3 pass). Confidence / RR / Edge
+  per trigger, live-like walk-forward check, today's firings. Top-5 1d: qualified RELIANCE 3, HDFCBANK 25, TCS 0,
+  BHARTIARTL 14, ICICIBANK 14. ~760 triggers tested -> some qualify by luck; weighted live-like avg leans on few recent firings.
+- `config/strategies/library/owner/owner-basics.json`: O1-001..009 (library now 359).
+- Next: run on 50 stocks; feed QUALIFIED triggers into live-lab alerts with Confidence/RR/Edge.
