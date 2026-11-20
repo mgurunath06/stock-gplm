@@ -8,19 +8,17 @@ Per lane (stock x timeframe):
    combinations (``--max-combos``) is simulated once over the whole history with the normal engine
    (costs, next-open fills, no overlapping trades). Identical trade lists are kept once.
 2. Walk forward in calendar steps. At each decision date D, using ALL trades that *closed before D*
-   (owner rule, 2026-11-20: always use all history; old bull/bear behaviour is kept, with less weight):
-       recent = trades that closed in the last RECENT_BARS candles (default 100), weight w = 1 - age_bars/100
-                (rolling: the newest candle weighs most, falling linearly to 0 at 100 candles)
-       older  = every earlier trade, equal weight
-       score  = SHARE * sum(w*net)/(sum(w)+PRIOR) + (1-SHARE) * sum(net_old)/(n_old+PRIOR),  SHARE = 0.7
-   The top ``top_k`` (one per strategy, score > 0, >= min_trades trades in all history) are the picks.
-   We then record the picks' trades signalled in [D, D + step) and, as a control, the trades of every
-   eligible variant in the same window ("pick anything that was active").
+   (owner rule, 2026-11-20: always all history; old bull/bear behaviour stays, with less weight), each
+   variant gets a smoothly recency-weighted, shrunk average (no fixed split of recent vs old):
+       w = (1 + age_candles / DECAY_BARS) ** -DECAY_POWER     (defaults 100, 2: 100 candles back = 1/4,
+                                                               200 back = 1/9, 1000 back = 1/121; never 0)
+       score = sum(w * net) / (sum(w) + PRIOR)
+   The top ``top_k`` (one per strategy, score > 0, >= min_trades trades) are the picks.
 3. Rolling track record (owner, 2026-11-20: no fixed split date). Every step's picks are judged only on the
-   candles after that pick, exactly like live use. The track record is weighted the same way as the ranking:
-   the last ``recent_steps`` steps give 70% (newest most), all older steps 30%. The method WORKS when the
-   picks' weighted average is > 0 and beats the control, over >= ``min_steps`` steps and ``min_fwd_trades``
-   trades, with at least one pick trade among the recent steps.
+   candles after that pick, exactly like live use, and each step's trades get the same smooth weight by their
+   age at the latest step. The method WORKS when the picks' weighted average is > 0 and beats the control
+   (every eligible variant), over >= ``min_steps`` steps with trades and an effective >= ``min_fwd_trades``
+   trades (effective = (sum w)^2 / sum w^2, so old trades count less here too).
 4. Current picks: ranking at the latest candle. ASSIGNED = the method works now on this lane, WATCH = too
    few trades to judge yet, NOT_USED = it does not work now.
 
@@ -67,10 +65,9 @@ WINDOWS: dict[str, Window] = {
 class Policy:
     top_k: int = 3
     prior: float = 3.0          # pseudo-trades at zero return: few lucky trades cannot top the list
-    recent_bars: int = 100      # the last N candles carry the extra, linearly decaying weight
-    recent_share: float = 0.7   # share of the score from those candles; the rest from all older history
+    decay_bars: float = 100.0   # smooth weight w = (1 + age_candles/decay_bars) ** -decay_power
+    decay_power: float = 2.0
     min_steps: int = 4          # steps with forward trades needed for a verdict
-    recent_steps: int = 12      # the last N steps give ``recent_share`` of the track record (newest most)
     min_fwd_trades: int = 10    # forward trades of the picks needed for a verdict
     current_list: int = 10      # how many current picks to report per lane
 
@@ -82,23 +79,23 @@ def _day_index(sessions: np.ndarray) -> np.ndarray:
     return np.asarray(sessions).astype("datetime64[D]").astype(np.int64)
 
 
+def weight(age: np.ndarray | float, pol: Policy) -> np.ndarray | float:
+    """Smooth recency weight by age in candles: 1 now, 1/4 at ``decay_bars`` (power 2), never 0."""
+    return (1.0 + np.maximum(age, 0) / max(1e-9, pol.decay_bars)) ** -pol.decay_power
+
+
 def score(vid: np.ndarray, net: np.ndarray, age: np.ndarray, n_var: int, pol: Policy
           ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Per-variant (score, all-history count, recent count, plain mean). ``age`` is in candles."""
-    rec = age < pol.recent_bars
-    w = np.where(rec, 1.0 - age / float(pol.recent_bars), 0.0)
+    """Per-variant (score, all-history count, count within ``decay_bars``, plain mean). ``age`` in candles."""
+    w = weight(age, pol)
     sw = np.bincount(vid, weights=w, minlength=n_var)
     swx = np.bincount(vid, weights=w * net, minlength=n_var)
-    old = ~rec
-    so = np.bincount(vid[old], weights=net[old], minlength=n_var)
-    no = np.bincount(vid[old], minlength=n_var)
     cnt = np.bincount(vid, minlength=n_var)
-    rcnt = np.bincount(vid[rec], minlength=n_var)
+    rcnt = np.bincount(vid[age < pol.decay_bars], minlength=n_var)
     sx = np.bincount(vid, weights=net, minlength=n_var)
     with np.errstate(invalid="ignore", divide="ignore"):
         mean = np.where(cnt > 0, sx / np.maximum(cnt, 1), np.nan)
-    sc = pol.recent_share * swx / (sw + pol.prior) + (1.0 - pol.recent_share) * so / (no + pol.prior)
-    return sc, cnt, rcnt, mean
+    return swx / (sw + pol.prior), cnt, rcnt, mean
 
 
 def pick(sc: np.ndarray, cnt: np.ndarray, group: np.ndarray, min_trades: int, k: int) -> list[int]:
@@ -141,7 +138,7 @@ def walk(vid: np.ndarray, t: np.ndarray, e: np.ndarray, net: np.ndarray, day: np
         elig = cnt >= win.min_trades
         pm = np.isin(fv, picks)
         cm = elig[fv]
-        steps.append({"date": str(np.datetime64(d, "D")), "eligible": int(elig.sum()),
+        steps.append({"date": str(np.datetime64(d, "D")), "bar": r, "eligible": int(elig.sum()),
                       "picks": picks, "pick_n": int(pm.sum()), "pick_sum": float(fn[pm].sum()),
                       "pick_sumsq": float((fn[pm] ** 2).sum()), "ctrl_n": int(cm.sum()),
                       "ctrl_sum": float(fn[cm].sum())})
@@ -166,30 +163,25 @@ def verdict(steps: Sequence[Mapping[str, Any]], pol: Policy) -> dict[str, Any]:
     sd = math.sqrt(max(0.0, (sq - n * plain * plain) / (n - 1))) if n > 1 and plain is not None else None
     tstat = plain / (sd / math.sqrt(n)) if sd else None
     hit = sum(1 for s in used if s["pick_sum"] > 0) / len(used) if used else None
-    k = max(1, pol.recent_steps)
-    rec, old = list(steps[-k:]), list(steps[:-k])
-    wts = [(i + 1) / len(rec) for i in range(len(rec))]  # newest recent step = 1, oldest lightest
+    last = steps[-1]["bar"] if steps else 0
+    ws = [float(weight(last - s["bar"], pol)) for s in steps]
 
-    def blend(nk: str, sk: str) -> float | None:
-        rn = sum(w * s[nk] for w, s in zip(wts, rec))
-        rs = sum(w * s[sk] for w, s in zip(wts, rec))
-        on, osum = sum(s[nk] for s in old), sum(s[sk] for s in old)
-        o = osum / on if on else None
-        if o is None:
-            return rs / rn if rn else None
-        r = (rs + pol.prior * o) / (rn + pol.prior)  # few recent trades lean on the long-run record
-        return pol.recent_share * r + (1 - pol.recent_share) * o
+    def wmean(nk: str, sk: str) -> float | None:
+        den = sum(w * s[nk] for w, s in zip(ws, steps))
+        return sum(w * s[sk] for w, s in zip(ws, steps)) / den if den else None
 
-    mean, cmean = blend("pick_n", "pick_sum"), blend("ctrl_n", "ctrl_sum")
-    recent_n = sum(s["pick_n"] for s in rec)
-    if len(used) < pol.min_steps or n < pol.min_fwd_trades or recent_n == 0:
+    mean, cmean = wmean("pick_n", "pick_sum"), wmean("ctrl_n", "ctrl_sum")
+    sw = sum(w * s["pick_n"] for w, s in zip(ws, steps))
+    sw2 = sum(w * w * s["pick_n"] for w, s in zip(ws, steps))
+    n_eff = sw * sw / sw2 if sw2 else 0.0
+    if len(used) < pol.min_steps or n_eff < pol.min_fwd_trades:
         v = "TOO_FEW"
     elif mean is not None and mean > 0 and (cmean is None or mean > cmean):
         v = "WORKS"
     else:
         v = "FAILS"
     return {"verdict": v, "steps": len(steps), "steps_with_trades": len(used), "pick_trades": n,
-            "recent_pick_trades": recent_n, "pick_mean_net": mean, "pick_plain_mean_net": plain, "pick_t": tstat,
+            "effective_pick_trades": round(n_eff, 1), "pick_mean_net": mean, "pick_plain_mean_net": plain, "pick_t": tstat,
             "step_hit_rate": hit, "ctrl_trades": sum(s["ctrl_n"] for s in steps), "ctrl_mean_net": cmean,
             "last_step": steps[-1]["date"] if steps else None}
 
@@ -474,9 +466,9 @@ def aggregate(out: Path, symbols: Sequence[str] | None = None, timeframes: Seque
     pooled = {"pick_trades": n, "pick_mean_net": s / n if n else None}
     states = ("ASSIGNED", "WATCH", "NOT_USED", "NO_DATA")
     lines = ["# Recency research: what works now", "",
-             "Every step picks recent winners from past trades only (all history, last 100 candles weigh most),",
-             "then records how the picks did on the following candles. The track record is weighted the same way:",
-             "recent steps count most. No fixed split date.",
+             "Every step picks recent winners from past trades only (all history, weight falls smoothly with age),",
+             "then records how the picks did on the following candles. The track record is weighted the same way.",
+             "No fixed split date.",
              f"Lanes: {len(lane_rows)}; picks' trades: {n}, plain avg {_pct(pooled['pick_mean_net'])}/trade.", "",
              "| TF | " + " | ".join(states) + " |", "|---" * (len(states) + 1) + "|"]
     for tf in [x for x in TF_ALL + ("1m",) if x in by_tf]:
@@ -514,10 +506,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--max-combos", type=int, default=4, help="parameter combinations per strategy (defaults first)")
     ap.add_argument("--top-k", type=int, default=Policy.top_k)
-    ap.add_argument("--recent-bars", type=int, default=Policy.recent_bars,
-                    help="last N candles get extra, linearly decaying weight (default 100)")
-    ap.add_argument("--recent-share", type=float, default=Policy.recent_share,
-                    help="share of the score from those candles; the rest from all older history (default 0.7)")
+    ap.add_argument("--decay-bars", type=float, default=Policy.decay_bars,
+                    help="smooth recency weight (1 + age/decay_bars)^-power; 100 = a candle 100 back counts 1/4")
+    ap.add_argument("--decay-power", type=float, default=Policy.decay_power)
     ap.add_argument("--strategies", help="library id patterns (comma list, globs ok)")
     ap.add_argument("--library", action="append", help="extra strategy-library root (repeatable), e.g. "
                                                        "state-intraday/strategy-library")
@@ -543,8 +534,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         syms, basis = resolve_universe(app, a.stocks, uni, a.max_symbols)
         pats = [x.strip() for x in (a.strategies or "").split(",") if x.strip()] or None
         print(f"Recency research: {len(syms)} stock(s) [{basis}] x {tfs} -> {out}", flush=True)
-        res = run(app, syms, tfs, out, workers=a.workers, max_combos=a.max_combos, policy=Policy(top_k=a.top_k, recent_bars=a.recent_bars,
-                                                                       recent_share=a.recent_share),
+        res = run(app, syms, tfs, out, workers=a.workers, max_combos=a.max_combos, policy=Policy(top_k=a.top_k, decay_bars=a.decay_bars,
+                                                                       decay_power=a.decay_power),
                   patterns=pats, library_extra=a.library, start=a.start, end=a.end,
                   log=lambda s: print(s, flush=True))
         print(json.dumps({k: res[k] for k in ("lanes", "by_timeframe", "pooled")}, indent=2, default=str))

@@ -10,10 +10,10 @@ Stock behaviour changes, so this judges each stock × timeframe on recent candle
    normal engine, costs and fills. Each strategy is run with up to `--max-combos` parameter sets, and
    identical trade lists are kept only once.
 2. Walk forward. At each step date it uses **all** trades that had closed before that date (owner rule: always all
-   history; old bull/bear behaviour stays in, with less weight). The last **100 candles** carry extra weight that falls
-   linearly, newest first (rolling). Score = 70% recent-100-candle weighted average + 30% average of all older trades,
-   both shrunk towards 0. The top 3 (one per strategy, at least `min trades` in all history) are picked. What the picks
-   earn in the next step is compared with every eligible variant (the control).
+   history; old bull/bear behaviour stays in, with less weight). Weight falls smoothly with age in candles, no fixed
+   split: w = (1 + age/100)^-2, so 100 candles back counts 1/4, 200 back 1/9, 1000 back 1/121 (never 0). Score =
+   weighted average net return, shrunk towards 0. The top 3 (one per strategy) are picked. What the picks earn in the
+   next step is compared with every eligible variant (the control).
 
    | TF | warm-up before first pick | step | min trades |
    |---|---|---|---|
@@ -22,11 +22,10 @@ Stock behaviour changes, so this judges each stock × timeframe on recent candle
    | 1d | 365 days | 7 days | 4 |
    | 1w | 1095 days | 28 days | 3 |
 
-   Overrides: config `recency.windows.<tf>` = `{warmup_days, step_days, min_trades}`; CLI `--recent-bars`, `--recent-share`.
+   Overrides: config `recency.windows.<tf>` = `{warmup_days, step_days, min_trades}`; CLI `--decay-bars`, `--decay-power`.
 3. **No split date** (owner, 2026-11-20). Rolling track record: each step's picks are judged only on the candles
-   after that pick, like live use. Weighted like the ranking: last 12 steps give 70% (newest most, shrunk towards the
-   long-run record when they hold few trades), all older steps 30%. WORKS = weighted picks > 0 and beat the control
-   (every eligible variant), with >= 4 steps with trades, >= 10 trades, >= 1 trade in the recent steps.
+   after that pick, like live use, weighted by the same smooth decay. WORKS = weighted picks > 0 and beat the control
+   (every eligible variant), with >= 4 steps with trades and >= 10 effective trades.
 4. Lane status: **ASSIGNED** (works now), **WATCH** (too few trades), **NOT_USED**, **NO_DATA**.
 
 Run it again each day. Lanes whose data changed are recomputed and the ranking rotates. Unchanged lanes are reused.

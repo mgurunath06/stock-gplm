@@ -80,3 +80,11 @@ Older TODOs still open (see previous handover): commit, scorecard summary when r
 - Top-5 1d: only ICICIBANK ASSIGNED (weighted +1.59% vs +0.93%, but plain +0.01%, t 0.03 -> weak).
   BHARTIARTL NOT_USED (plain +1.31%, t 2.6, but recent picks trail the control +1.42%).
 - Proposed next (owner to choose): regime-matched ranking (bull/bear/sideways), wider parameter search.
+
+## Update (owner, 2026-11-20, latest 2): smooth decay, no 70:30
+- Weight w = (1 + age_candles/100)^-2 everywhere (ranking and track record); `--decay-bars`, `--decay-power`.
+  Track record needs >= 10 *effective* trades ((sum w)^2/sum w^2). recent_bars/recent_share/recent_steps removed.
+- Firing-rate fact (top-5 1d): ~26 trades/variant over 5 years (~0.45/month); busiest ~0.8/month (no new entry while
+  holding, holds 6-30 bars). Top picks show 1-5 trades in the last 100 candles.
+- Top-5 1d now: ICICIBANK, RELIANCE ASSIGNED (weak: plain averages negative); others NOT_USED. Verdicts flip with
+  weighting choices -> no robust 1d edge on these 5; judge on 50 stocks before more tuning.
