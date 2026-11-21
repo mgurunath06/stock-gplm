@@ -50,7 +50,8 @@ class Cycle:
         self.root = self.home / "learning"
         self.today = date.today().isoformat()
         self.tag = f"{self.today}-{cadence}"
-        self.start = (date.today() - timedelta(days=365)).isoformat()
+        # owner 2026-11-21: no pre-2026 data without explicit permission -> window never starts before 2026-01-01
+        self.start = max((date.today() - timedelta(days=365)).isoformat(), "2026-01-01")
         self.runs = self.s.reports_dir / "forward" / "cycle"
 
     def log(self, msg: str) -> None:
