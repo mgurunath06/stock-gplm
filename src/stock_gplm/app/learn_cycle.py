@@ -178,9 +178,9 @@ class Cycle:
             shutil.copy2(EXITS, exits)
             env = {"GPLM_EXITS_FILE": str(exits)}
         self.log(f"start: universe {len(stocks)}, intraday-complete {len(intra)}, learn exits={learn}")
-        dirs = [self.batch("daily", stocks, self.start, "1d", learn, env=env)]
+        dirs = [self.batch("daily", stocks, self.start, "1d,1w", learn, env=env)]
         if intra:
-            dirs.append(self.batch("intraday", intra, max(self.start, INTRADAY_FROM), "5m,15m,60m", learn, env=env))
+            dirs.append(self.batch("intraday", intra, max(self.start, INTRADAY_FROM), "5m,15m,30m,60m", learn, env=env))
         if learn:
             shutil.copy2(EXITS, exits.with_name("exits.before.json"))
             tmp = EXITS.with_name(".exits.promote.tmp")

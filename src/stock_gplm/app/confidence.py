@@ -87,7 +87,7 @@ def active_map(scored: pd.DataFrame) -> dict[str, dict[str, list[str]]]:
     return out
 
 
-TFS = ("1d", "60m", "15m", "5m")
+TFS = ("1mo", "1w", "1d", "60m", "30m", "15m", "5m")
 
 
 def write_reports(root: Path, trades: pd.DataFrame, title: str = "") -> Path:

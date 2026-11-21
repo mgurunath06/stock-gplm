@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stock", required=True)
     ap.add_argument("--from", dest="start", default="2026-01-01")
     ap.add_argument("--to", dest="end")
-    ap.add_argument("--timeframes", default="5m,15m,60m,1d")
+    ap.add_argument("--timeframes", default="5m,15m,30m,60m,1d,1w")
     ap.add_argument("--config", default=str(REPO / "config" / "app" / "gplm.windows.json"))
     ap.add_argument("--name")
     ap.add_argument("--learn-exits", action="store_true",
