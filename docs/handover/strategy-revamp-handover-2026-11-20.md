@@ -142,3 +142,9 @@ Never commit: `config/strategies/ChartInk/` (screenshots with P&L/email), `*.mp4
   trades before 2009-05-18). Now only the trade's own path is checked. 2026 reports were built with the old check
   (minor effect; re-run when convenient).
 - Smoke (3 stocks): 2026-ACTIVE combos keep ~78% win pre-2026 but avg net drops to ~+0.07% (low-RR targets) - watch avg/PF, not win rate.
+- Learning cycle (`learn_cycle.py`, Task Scheduler folder `StockGPLM`): LearnDaily Mon-Fri 19:30 (NSE MCP recent daily
+  candles -> `data/derived/nse-mcp-recent`, 12-month re-test with current exits, stock x TF + sector x TF re-score),
+  LearnWeekly Sat 07:00 (+ exits re-learned, staged then promoted), LearnMonthly 1st Sun 07:00 (+ long-history check,
+  exits-long not promoted). Outputs `state/learning/current/` (active.json for live alerts) + `history/`; log `cycle.log`.
+- Found: universe daily candles on the PC stopped at 2026-10-29 (sync pulls minute only); the 2026 universe-1d results
+  therefore end there for most stocks. The daily job now fills the gap from NSE MCP.
