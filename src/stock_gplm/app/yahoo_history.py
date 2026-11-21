@@ -11,7 +11,8 @@ Steps (each skips work already done):
           reply, kept as it came. Not asked again unless you pass --refresh.
   build   drop rows with missing or impossible prices (counted in the report). Join onto Shoonya using
           the median close ratio of the first 20 overlap days, which must agree within 1%. Keep only dates
-          before the oldest existing daily candle, from Shoonya or the NSE MCP derived files. Write Shoonya-format
+          before Shoonya's first candle (2026-11-21: NSE MCP derived files are no longer used); cross-check vs raw NSE
+          (p95 > 1% -> stock dropped before Shoonya). Write Shoonya-format
           yearly files to data/derived/yahoo-adjusted/NSE/<SYM>-EQ/, plus build-report.json.
   config  rewrite config/app/gplm.windows.longdaily.json (NSE MCP + Yahoo extra roots, home state-long).
   --research  research-matrix 1d,1w on that config (same as nse_history --research).
@@ -150,21 +151,52 @@ def drop_prelisting(rows: list[tuple]) -> list[tuple]:
     return rows[cut:]
 
 
-def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: Path,
+NSE_CHECK_P95 = 0.01  # owner 2026-11-21: Yahoo is dropped before Shoonya when it disagrees with raw NSE (p95 > 1%)
+
+
+def nse_raw_closes(sym: str, nse_raw: Path) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for f in sorted((nse_raw / sym).glob("*.json")) if (nse_raw / sym).is_dir() else []:
+        try:
+            for r in nh.parse_rows(json.loads(f.read_text(encoding="utf-8")), sym):
+                out[r[0]] = r[4]
+        except (ValueError, OSError):
+            continue
+    return out
+
+
+def nse_check(keep: list[tuple], nse: dict[str, float]) -> tuple[bool, str]:
+    """Yahoo (scaled) vs raw NSE closes on common days: scale by the median ratio, then p95 deviation."""
+    common = [(c, nse[d]) for d, o, h, lo, c, v in keep if d in nse and nse[d] > 0 and c > 0]
+    if len(common) < 5:
+        return True, "no NSE overlap to check"
+    k = sorted(n / c for c, n in common)[len(common) // 2]
+    dev = sorted(abs(n / (c * k) - 1) for c, n in common)
+    p95 = dev[min(len(dev) - 1, int(0.95 * len(dev)))]
+    return p95 <= NSE_CHECK_P95, f"vs NSE {len(common)} days, p95 {100 * p95:.2f}%"
+
+
+def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_raw: Path,
           start: str = HISTORY_FROM) -> dict[str, str]:
+    """Owner 2026-11-21: Yahoo is the only source before Shoonya (the NSE MCP adjusted build was mis-scaled and
+    NSE's history has holes); it is cross-checked against raw NSE wherever both have the day."""
     report: dict[str, str] = {}
     for s in stocks:
         files = sorted((raw / s).glob("*.json"))
         if not files:
             report[s] = "not fetched"
             continue
-        if not (nse_out / f"{s}-EQ").is_dir():  # owner rule: NSE MCP history first, Yahoo only fills before it
-            report[s] = "no NSE history: run nse_history first"
-            continue
         rows, rej = parse(json.loads(files[-1].read_text(encoding="utf-8")))
-        before = oldest_existing(s, shoonya_root, nse_out)
-        keep, note = link(rows, nh.shoonya_closes(shoonya_root / f"{s}-EQ"), before or "")
+        sh = nh.shoonya_closes(shoonya_root / f"{s}-EQ")
+        before = min(sh) if sh else ""
+        keep, note = link(rows, sh, before)
         keep = drop_prelisting([x for x in keep if x[0] >= start])
+        if keep:
+            ok, chk = nse_check(keep, nse_raw_closes(s, nse_raw))
+            note = f"{note}; {chk}"
+            if not ok:
+                note = "DROPPED: Yahoo disagrees with NSE; " + note
+                keep = []
         rtxt = f"; rejected {rej}" if rej else ""
         report[s] = (f"{note}; {len(keep)} older days ({keep[0][0]}..{keep[-1][0]}){rtxt}" if keep
                      else f"{note}{rtxt}")
@@ -181,7 +213,8 @@ def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: 
     out.mkdir(parents=True, exist_ok=True)
     (out / "build-report.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
     ok = sum(1 for v in report.values() if v.startswith("ok"))
-    nh.log(f"build: {ok}/{len(report)} stocks extended; details {out / 'build-report.json'}")
+    drop = sum(1 for v in report.values() if v.startswith("DROPPED"))
+    nh.log(f"build: {ok}/{len(report)} stocks extended, {drop} dropped (disagree with NSE); details {out / 'build-report.json'}")
     return report
 
 
@@ -200,14 +233,10 @@ def main() -> int:
               for x in (Path(src).read_text(encoding="utf-8").splitlines() if src else a.stocks.split(","))
               if x.strip() and not x.startswith("#")]
     shoonya, raw, out, nse_out = paths()
-    missing = [s for s in stocks if not (nse_out / f"{s}-EQ").is_dir()]
-    if a.step in ("build", "all") and missing:
-        nh.log(f"NSE history missing for {len(missing)} stock(s) (e.g. {missing[:5]}); run nse_history first. "
-               "Those stocks are skipped.")
     if a.step in ("fetch", "all"):
         fetch(stocks, raw, a.pause, a.refresh)
     if a.step in ("build", "all"):
-        build(stocks, raw, out, shoonya, nse_out, a.start)
+        build(stocks, raw, out, shoonya, nh.paths()[1], a.start)
     if a.step in ("config", "all"):
         out.mkdir(parents=True, exist_ok=True)
         conf = nh.write_config(nse_out)

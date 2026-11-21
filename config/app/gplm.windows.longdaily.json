@@ -10,7 +10,7 @@
   },
   "data": {
     "daily_root": "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\shoonya\\NSE",
-    "index_root":  "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\nse-index\\NSE",
+    "index_root": "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\nse-index\\NSE",
     "minute_roots": [
       "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\shoonya\\NSE\\minute",
       "H:\\Guru\\Learning\\StockGLPM\\data\\raw\\shoonya-minute\\NSE"
@@ -20,7 +20,7 @@
     "session_last_bar": "15:29",
     "closing_phase_start": "15:20",
     "daily_extra_roots": [
-      "H:\\Guru\\Learning\\StockGLPM\\data\\derived\\nse-mcp-adjusted\\NSE"
+      "H:\\Guru\\Learning\\StockGLPM\\data\\derived\\yahoo-adjusted\\NSE"
     ]
   },
   "refresh": {

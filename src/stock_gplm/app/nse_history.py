@@ -256,7 +256,8 @@ def write_config(out: Path) -> Path:
     """Long-daily config: NSE MCP and (if built) Yahoo derived roots; each covers different dates."""
     c = cfg()
     yahoo = out.parent.parent / "yahoo-adjusted" / "NSE"
-    c["data"]["daily_extra_roots"] = [str(out)] + ([str(yahoo)] if yahoo.is_dir() else [])
+    # owner 2026-11-21: nse-mcp-adjusted is not read (mis-scaled, holes); Yahoo (checked vs raw NSE) fills before Shoonya
+    c["data"]["daily_extra_roots"] = [str(yahoo)] if yahoo.is_dir() else []
     c["home"] = str(Path(c["home"]).parent / "state-long")
     p = CFG.with_name("gplm.windows.longdaily.json")
     p.write_text(json.dumps(c, indent=2), encoding="utf-8")
