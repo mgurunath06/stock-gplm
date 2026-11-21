@@ -98,6 +98,19 @@ MAX_WORKERS = 4
 # Daily candles use the trading symbol ("Nifty 50"); minute candles use the token. Fetched first in every sweep.
 INDICES = {"Nifty 50": "26000"}
 STATE = LIVE / "fetch_state.json"
+# 2026-11-21: first trading day per symbol (listing or rename), written on the PC by universe_build.py.
+# Sessions before it are neither fetched nor expected (new listings/renames used to count as never complete).
+LISTING = LIVE / "listing.json"
+
+
+def listing_dates():
+    try:
+        return {k.upper(): v for k, v in json.loads(LISTING.read_text()).items()}
+    except (OSError, ValueError):
+        return {}
+
+
+TOKEN_FILE = HOME / ".config" / "stock-gplm" / "shoonya_token.json"
 
 
 class Retry:
@@ -222,6 +235,11 @@ def main():
             continue
         want = [d for d in sessions_back(a.minute_sessions, include_today=True)
                 if str(d) >= provider_floor]
+        listed = listing_dates()
+
+        def want_for(s):
+            first = listed.get(s.removesuffix("-EQ").upper())
+            return [d for d in want if not first or str(d) >= first]
         # daily first (one call per symbol), then minute gaps newest-first so recent days close quickly
         yday = now().date() - timedelta(days=1)
         ok_n = fail_n = 0
@@ -232,8 +250,10 @@ def main():
         streak: list = []
 
         def worker_api():
-            if not hasattr(worker_local, "api"):
+            token_mtime = TOKEN_FILE.stat().st_mtime_ns
+            if not hasattr(worker_local, "api") or worker_local.token_mtime != token_mtime:
                 worker_local.api = session_api()
+                worker_local.token_mtime = token_mtime
             return worker_local.api
 
         def base_pause():
@@ -282,8 +302,9 @@ def main():
         def fill(s, days):
             have = minute_have(s)
             oldest = sorted(want)[:20]
+            first = listed.get(s.removesuffix("-EQ").upper())
             for d in sorted(days):  # oldest first: those days are the next to leave the provider window
-                if str(d) in have or str(d) < provider_floor:
+                if str(d) in have or str(d) < provider_floor or (first and str(d) < first):
                     continue
                 if s not in tok:
                     key = f"{s}|master"
@@ -319,18 +340,21 @@ def main():
         # Resume the last snapshot and refresh each symbol when it is processed.
         # A full pre-scan delayed every restart without improving transfer safety.
         progress_rows = {x: int(previous_rows.get(x, 0)) for x in syms + extra}
+        expected_rows = {x: len(want_for(x)) for x in syms + extra}
         def progress(current):
             # Recheck only the symbol just processed. Rewalking the full universe
             # after every symbol made progress O(symbols squared).
-            progress_rows[current] = sum(1 for d in want if str(d) in minute_have(current))
+            progress_rows[current] = sum(1 for d in want_for(current) if str(d) in minute_have(current))
+            expected_rows[current] = len(want_for(current))
             write_atomic(LIVE / "universe_progress.json",
                          {"generated": now().isoformat(timespec="seconds"), "expected": len(want),
                           "window": [str(want[-1]), str(want[0])] if want else None, "current": current,
                           "sweep": sweep_no, "max_attempts": MAX_ATTEMPTS,
                           "failed_this_sweep": len(failed_symbols),
                           "adaptive_workers": adaptive.snapshot(),
-                          "complete": sorted(k for k, v in progress_rows.items() if v >= len(want)),
-                          "have": progress_rows})
+                          "complete": sorted(k for k, v in progress_rows.items()
+                                             if v >= expected_rows.get(k, len(want))),
+                          "have": progress_rows, "expected_per_symbol": expected_rows})
 
         if a.order == "symbol":  # one stock fully, then the next: research can start per finished stock
             queue = iter(syms + extra)

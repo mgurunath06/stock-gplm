@@ -80,8 +80,23 @@ class Cycle:
                 if d.is_dir():
                     have |= {f[:10] for f in os.listdir(d) if f.endswith(".json.gz.done") and f[:10] >= INTRADAY_FROM}
             cnt[s] = len(have)
+        # 2026-11-21: a stock listed / renamed after INTRADAY_FROM is complete with every session since that day
+        # (data/reference/listing_dates.json from universe_build.py); reference calendar = the fullest stock.
         full = max(cnt.values(), default=0)
-        return [s for s, n in cnt.items() if full and n >= 0.97 * full]
+        if not full:
+            return []
+        ref_sym = max(cnt, key=cnt.get)
+        cal = sorted({f[:10] for r in self.s.minute_roots if (r / f"{ref_sym}-EQ").is_dir()
+                      for f in os.listdir(r / f"{ref_sym}-EQ") if f.endswith(".json.gz.done") and f[:10] >= INTRADAY_FROM})
+        lf = REPO.parent / "data" / "reference" / "listing_dates.json"
+        listed = json.loads(lf.read_text(encoding="utf-8")) if lf.is_file() else {}
+        out = []
+        for s, n in cnt.items():
+            first = listed.get(s, INTRADAY_FROM)
+            expected = sum(1 for d in cal if d >= first) or full
+            if n >= 0.97 * expected and n >= 20:
+                out.append(s)
+        return out
 
     # ---------------------------------------------------------------- 2. trades
     def batch(self, name: str, stocks: list[str], start: str, tfs: str, learn: bool, cfg: Path = CFG,

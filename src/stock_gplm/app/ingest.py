@@ -261,19 +261,26 @@ class Ingestor:
 
     # ------------------------------------------------------------------ one symbol
     def ingest(self, symbol: str, *, use_minute: bool = True) -> SymbolData:
+        """Candles of one symbol, with splits / bonuses / rights adjusted (corp_actions, owner 2026-11-21)."""
+        from .corp_actions import apply
+        return apply(self._ingest_raw(symbol, use_minute=use_minute))
+
+    def _ingest_raw(self, symbol: str, *, use_minute: bool = True) -> SymbolData:
         symbol = normalize_symbol(symbol)
+        # renamed symbols (data/reference/symbol_aliases.json, new -> old): the old folders hold the earlier history
+        names = [symbol] + [a for a in _aliases(symbol) if a != symbol]
         daily_parts: list[dict[str, Any]] = []
         idx = getattr(self.s, "index_root", None)
         for droot in (self.s.daily_root, *getattr(self.s, "daily_extra_roots", ()), *((idx,) if idx else ())):
-            ddir = droot / symbol
-            if ddir.is_dir():
-                for p in sorted(ddir.iterdir()):
-                    if _DAILY.fullmatch(p.name):
-                        daily_parts.append(self._daily_partition(p, symbol))
+            for name in names:
+                ddir = droot / name
+                if ddir.is_dir():
+                    for p in sorted(ddir.iterdir()):
+                        if _DAILY.fullmatch(p.name):
+                            daily_parts.append(self._daily_partition(p, symbol))
         minute_by_session: dict[str, list[dict[str, Any]]] = {}
         if use_minute:
-            for root in self.s.minute_roots:
-                mdir = root / symbol
+            for root, mdir in ((r, r / n) for r in self.s.minute_roots for n in names):
                 if not mdir.is_dir():
                     continue
                 for p in sorted(mdir.iterdir()):
@@ -446,6 +453,26 @@ class Ingestor:
                    "minute_last": usable[-1]["session"] if usable else None,
                    "reconciliation": rec_summary}
         return SymbolData(symbol, d, m, fp, summary)
+
+
+_ALIAS_FILE = Path(__file__).resolve().parents[4] / "data" / "reference" / "symbol_aliases.json"
+_ALIAS_CACHE: dict[str, Any] = {}
+
+
+def _aliases(symbol: str) -> list[str]:
+    """Old folder names of a renamed symbol (file maps bare NEW -> bare OLD or a list of them)."""
+    try:
+        mtime = _ALIAS_FILE.stat().st_mtime
+    except OSError:
+        return []
+    if _ALIAS_CACHE.get("mtime") != mtime:
+        try:
+            _ALIAS_CACHE.update(mtime=mtime, map=json.loads(_ALIAS_FILE.read_text(encoding="utf-8")))
+        except ValueError:
+            _ALIAS_CACHE.update(mtime=mtime, map={})
+    old = _ALIAS_CACHE["map"].get(symbol.removesuffix("-EQ"))
+    olds = [old] if isinstance(old, str) else list(old or [])
+    return [normalize_symbol(o) for o in olds]
 
 
 def ingest_many(settings: Settings, db: AuditDB, symbols: Iterable[str], *, use_minute: bool = True,
