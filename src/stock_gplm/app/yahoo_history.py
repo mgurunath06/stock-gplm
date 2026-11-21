@@ -151,7 +151,8 @@ def drop_prelisting(rows: list[tuple]) -> list[tuple]:
     return rows[cut:]
 
 
-NSE_CHECK_P95 = 0.01  # owner 2026-11-21: Yahoo is dropped before Shoonya when it disagrees with raw NSE (p95 > 1%)
+NSE_CHECK_P95 = 0.01  # owner 2026-11-21: Yahoo is dropped before Shoonya when it disagrees with raw NSE
+NSE_CHECK_BAD_SHARE = 0.02  # ... on more than 2% of the common days (day-to-day changes, so corporate actions don't count)
 
 
 def nse_raw_closes(sym: str, nse_raw: Path) -> dict[str, float]:
@@ -166,14 +167,24 @@ def nse_raw_closes(sym: str, nse_raw: Path) -> dict[str, float]:
 
 
 def nse_check(keep: list[tuple], nse: dict[str, float]) -> tuple[bool, str]:
-    """Yahoo (scaled) vs raw NSE closes on common days: scale by the median ratio, then p95 deviation."""
-    common = [(c, nse[d]) for d, o, h, lo, c, v in keep if d in nse and nse[d] > 0 and c > 0]
-    if len(common) < 5:
+    """Yahoo vs raw NSE on common days, compared as day-to-day close changes (2026-11-21).
+
+    Raw NSE is not adjusted for splits / bonuses / rights and Yahoo is, so their price LEVELS differ by a step at
+    each corporate action (the first version of this check dropped 113 stocks for exactly that). Day-to-day
+    changes agree except on the ex-date itself. A stock fails when more than NSE_CHECK_BAD_SHARE of the common
+    day pairs differ by more than NSE_CHECK_P95 (1%)."""
+    pairs = [(d, c, nse[d]) for d, o, h, lo, c, v in keep if d in nse and nse[d] > 0 and c > 0]
+    if len(pairs) < 6:
         return True, "no NSE overlap to check"
-    k = sorted(n / c for c, n in common)[len(common) // 2]
-    dev = sorted(abs(n / (c * k) - 1) for c, n in common)
-    p95 = dev[min(len(dev) - 1, int(0.95 * len(dev)))]
-    return p95 <= NSE_CHECK_P95, f"vs NSE {len(common)} days, p95 {100 * p95:.2f}%"
+    bad = steps = 0
+    for (_, c0, n0), (_, c1, n1) in zip(pairs, pairs[1:]):
+        diff = abs((c1 / c0) - (n1 / n0))
+        if diff > NSE_CHECK_P95:
+            bad += 1
+            steps += diff > 0.05  # a corporate-action step (or a bad print)
+    share = bad / (len(pairs) - 1)
+    return share <= NSE_CHECK_BAD_SHARE, (f"vs NSE {len(pairs)} days, {bad} day(s) differ > 1% "
+                                         f"({steps} corporate-action-size steps)")
 
 
 def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_raw: Path,
