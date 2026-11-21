@@ -55,3 +55,28 @@ def test_strategy_level_setting_wins(tmp_path):
     assert swing_settings("RELIANCE", "1d", f, strategy_id="O2-066") == {
         "buffer": 0.002, "rr": 3.0, "lookback": 20, "max_swing_pct": None}
     assert swing_settings("RELIANCE", "1d", f, strategy_id="O2-001")["rr"] == 1.5
+
+
+def test_daily_hold_to_target_only_checks_its_own_path_for_blocked_bars():
+    """2026-11-21: a blocked bar after the trade's exit must not drop the trade (daily trades hold to target)."""
+    from stock_gplm.m54.backtest import LaneMarket
+    from stock_gplm.app.strategy_engine import simulate
+    n = 30
+    close = np.full(n, 100.0)
+    close[10:] = 110.0  # target hit at bar 10
+    low = close - 1.0
+    low[5] = 95.0  # swing low (pivot) before the signal at bar 7
+    high = close + 1.0
+    blocked = np.zeros(n, bool)
+    blocked[20] = True  # after the exit
+    m = LaneMarket("1d", np.array([f"2020-01-{i + 1:02d}" for i in range(n)]), np.arange(n), np.arange(n) * 86_400 * 10**9,
+                   close.copy(), high, low, close, np.ones(n), np.full(n, 0.01), blocked, np.zeros(n, bool), False, 250.0)
+    mask = np.zeros(n, bool)
+    mask[7] = True
+    ex = Exit(25, None, None, None, 0.002, 1.0, 20, None)
+    tr = simulate(m, mask, (0, n), ex, 0.0, 0.0)
+    assert len(tr) == 1 and tr[0]["exit_reason"] in ("TARGET", "TARGET_GAP") and tr[0]["exit_index"] == 10
+    blocked[9] = True  # now the path itself touches a blocked bar
+    m2 = LaneMarket("1d", m.sessions, m.session_id, m.end_ns, m.open, high, low, close, m.volume, m.natr, blocked,
+                    m.no_signal, False, 250.0)
+    assert simulate(m2, mask, (0, n), ex, 0.0, 0.0) == []

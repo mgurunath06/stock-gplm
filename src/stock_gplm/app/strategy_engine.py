@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import time
 from dataclasses import dataclass
@@ -97,7 +98,9 @@ class Exit:
         return "; ".join(parts)
 
 
-EXITS_FILE = Path(__file__).resolve().parents[3] / "config" / "strategies" / "exits.json"
+# GPLM_EXITS_FILE (2026-11-21): use / learn into another exits file, e.g. full-history exits side by side with 2026's.
+EXITS_FILE = Path(os.environ.get("GPLM_EXITS_FILE")
+                  or Path(__file__).resolve().parents[3] / "config" / "strategies" / "exits.json")
 _EXITS: dict[str, Any] | None = None
 
 
@@ -202,7 +205,9 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         return None
     if hold_end < t + 1:
         return None
-    if m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
+    # hold-to-target: the path ends at the exit, not at the range end - checked on the real path in simulate()
+    # (2026-11-21: one blocked bar used to drop every earlier daily trade, e.g. all RELIANCE trades before 2009-05-18)
+    if not hold_open and m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
         return None
     simple = not (p.stop_atr or p.target_atr or p.trail_atr or p.swing_buffer is not None) and xmask is None
     if not simple:
@@ -259,6 +264,7 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
     trades: list[dict[str, Any]] = []
     nxt = -1
     sid = m.session_id
+    hold = p.swing_buffer is not None and not m.intraday
     for t in fired.tolist():
         if t < nxt or t + 1 > last:
             continue
@@ -268,6 +274,8 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
         if fill is None:
             continue
         e, px, reason = fill
+        if hold and m._blocked_cum[min(e, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
+            continue  # the trade's own path touches a blocked (discontinuity) bar
         ent = float(m.open[t + 1])
         if short:
             net = (ent * (1 - sell) - px * (1 + buy)) / ent

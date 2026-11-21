@@ -130,3 +130,15 @@ Next (proposed, owner approval pending):
 6. Re-run 2026 forward tests once the cloud backfill completes more stocks.
 7. LLM strategy variations (GPU, local qwen3:14b) with guardrails, gated by the long-history check.
 Never commit: `config/strategies/ChartInk/` (screenshots with P&L/email), `*.mp4`, `tests/test_research_feed_window.py`.
+
+## Session 5 (2026-11-21 evening) - long-history check running
+- Owner gave the go for step 1. Chain `state/reports/pipeline/2026-11-21/long_check_chain.cmd` (detached, 20 workers,
+  rerun to resume) writes to `state-long/reports/forward/long-1d/`:
+  A) `oos-frozen2026/` pre-2026 daily (2000..2025) with the 2026 exits frozen (`exits-2026-frozen.json`) -> `COMPARE.md`, `A.done`;
+  B) `full-learned/` 2000..latest with exits re-learned into `exits-long.json` (config exits.json untouched) ->
+  `COMPARE.md` (adds the full-history section), `long_check.done`. Adopting exits-long.json = owner decision.
+- `GPLM_EXITS_FILE` env var points the engine/learner at another exits file. `os.replace` retry added (step 4 half done).
+- Bug fixed: daily hold-to-target trades were dropped when ANY blocked bar came later in the range (RELIANCE lost all
+  trades before 2009-05-18). Now only the trade's own path is checked. 2026 reports were built with the old check
+  (minor effect; re-run when convenient).
+- Smoke (3 stocks): 2026-ACTIVE combos keep ~78% win pre-2026 but avg net drops to ~+0.07% (low-RR targets) - watch avg/PF, not win rate.

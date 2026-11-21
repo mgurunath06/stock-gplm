@@ -199,7 +199,14 @@ def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strat
         doc.setdefault("stocks", {}).setdefault(sym, {})[tf] = entry
         tmp = EXITS_FILE.with_name(f".exits.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, EXITS_FILE)
+        for i in range(40):  # Windows: readers holding exits.json open make os.replace fail briefly
+            try:
+                os.replace(tmp, EXITS_FILE)
+                break
+            except PermissionError:
+                if i == 39:
+                    raise
+                time.sleep(0.25)
     import stock_gplm.app.strategy_engine as eng
     eng._EXITS = None  # reload
     return "\n".join(lines)
