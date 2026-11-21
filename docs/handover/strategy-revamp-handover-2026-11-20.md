@@ -95,3 +95,38 @@ Library now: 256 strategies (155 catalogue, 85 Chartink, 9 O1, 7 GeminiNeon); lo
 - Open: live alerts should use `active.json` + learned exits (live lab still on old library/ATR exits); nightly
   automatic re-run; unblock GN-StrongestKidInClass after checking index rows; calendar lacks special sessions
   (1 Feb Budget, 8 Nov Muhurat) so their minute data was never fetched.
+
+## Session 4 (2026-11-21, Saturday) - start here
+Results (in-sample: exits learned and judged on the same 2026 data):
+- `state/reports/forward/complete-2026/` (330 stocks, all TFs, from 19 Jan): ACTIVE 598 combos on 238 stocks, 18,697 trades,
+  75.0% win, +0.32%/trade net (1d 310, 15m 143, 60m 92, 5m 53).
+- `state/reports/forward/universe-1d-2026/` (daily, 1,002 liquid stocks, from 1 Jan): ACTIVE 500 combos on 298 stocks,
+  6,863 trades, 77.4% win, +1.04%/trade net.
+- Each dir: `ALL_STOCKS.md`, `active.json`, `confidence.csv`. Top: Bear 5 EMA - Daily (short), 44EMA High,
+  9 gt 20 at 45 deg, GM W Pattern, GM Bullish Daily Pinbar, 44EMA Low, 5 day price increase, GMAnalysis.
+- Fix 89d4aff: signal exit on the latest candle with hold-to-target -> OPEN_END (5 stocks had crashed; re-run, reports rebuilt).
+- Long-daily pipeline (`state/reports/pipeline/2026-11-20/SUMMARY.md`) finished 2026-11-21 13:23: NSE MCP history for 2,690
+  stocks (1,507 extended), Yahoo history, up-move 1d long (`state-long/reports/upmove/universe-1d-long`), recency long.
+
+Cloud (sne-cloud):
+- Shoonya token expired 2026-11-21 09:38 -> backfill stalled until the owner gave a fresh OAuth code; login must use the
+  venv: `printf '%s\n' <code> | ssh -T sne-cloud '~/stock-gplm-venv/bin/python ~/shoonya_session.py'`
+  (system python3 lacks NorenRestApiPy). Backfill resumed by itself (sweep 2; 648/2,690 stocks complete from 19 Jan).
+- The token expires daily. The auto re-login (m25 auth service/timer) exists only as UNCOMMITTED local edits
+  (`deploy/oracle/m25/*`, `src/stock_gplm/m25/browser.py`, `tests/test_m25_auth.py`, docs) and is NOT installed on the cloud.
+- Index history cron (`5 17,20 * * *`) runs fine (153 indices).
+
+PC processes (since 2026-11-20 16:07): `live_lab --port 8765` (still OLD library -> restart needed), `universe_sync`
+(pulls cloud minute files), `cloud_retention` (deletes cloud files once safe on PC). No training running; GPU idle.
+
+Next (proposed, owner approval pending):
+1. Long-history check (recommended to owner, awaiting go): forward test Chartink+GN on pre-2026 daily history with the
+   2026 exits frozen (honest out-of-sample check of the 75-77% win rates), then re-learn exits on full history and rebuild
+   ACTIVE/reports side by side. CPU, detached, writes a done-file.
+2. Review + install the m25 auto re-login on the cloud.
+3. Live alerts from `active.json` + learned exits; restart live lab on the 92-strategy library.
+4. Nightly automatic re-run; `exits.json` os.replace retry on Windows contention (~20 first-attempt failures per batch).
+5. Unblock GN-StrongestKidInClass (index rows present now); special sessions in the calendar.
+6. Re-run 2026 forward tests once the cloud backfill completes more stocks.
+7. LLM strategy variations (GPU, local qwen3:14b) with guardrails, gated by the long-history check.
+Never commit: `config/strategies/ChartInk/` (screenshots with P&L/email), `*.mp4`, `tests/test_research_feed_window.py`.
