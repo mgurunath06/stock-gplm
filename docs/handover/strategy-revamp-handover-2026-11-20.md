@@ -148,3 +148,9 @@ Never commit: `config/strategies/ChartInk/` (screenshots with P&L/email), `*.mp4
   exits-long not promoted). Outputs `state/learning/current/` (active.json for live alerts) + `history/`; log `cycle.log`.
 - Found: universe daily candles on the PC stopped at 2026-10-29 (sync pulls minute only); the 2026 universe-1d results
   therefore end there for most stocks. The daily job now fills the gap from NSE MCP.
+- Data fixes (code only, owner runs): `universe_build` (clean ETFs/REITs/DUMMY, index fill order, listing_dates.json,
+  symbol_aliases.json), `corp_actions fetch` (NSE MCP splits/bonus/rights; applied at ingest only where the step is
+  in the data; log data/reference/corporate-actions/_applied.jsonl), cloud_sync reads ~/gplm-live/listing.json
+  (needs scp + restart), `data_audit`, Yahoo check by day-to-day changes. NSE MCP adjusted daily no longer read.
+- Weekly (3) + 30m (1) strategies now run; SS_Portfolio_Entry_Monthly (O2-032-M, 1mo) on ema_all/rsi_all.
+- Owner rules saved: never test/run myself (give PowerShell commands); trades/judgement from 2010, older data warm-up only.
