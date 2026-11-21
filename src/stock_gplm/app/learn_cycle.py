@@ -356,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--workers", type=int, default=20)
     ap.add_argument("--skip-fetch", action="store_true")
     ap.add_argument("--stocks", help="comma list instead of the universe (smoke runs)")
+    ap.add_argument("--fetch-only", action="store_true", help="only refresh recent daily candles from NSE MCP")
     ap.add_argument("--home", help="state home override for smoke runs (keeps learning/current untouched)")
     a = ap.parse_args(argv)
     c = Cycle(a.cadence, a.workers)
@@ -373,7 +374,11 @@ def main(argv: list[str] | None = None) -> int:
         lock.unlink(missing_ok=True)  # stale (killed run)
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     try:
-        c.run(fetch=not a.skip_fetch, only=a.stocks.upper().split(",") if a.stocks else None)
+        if a.fetch_only:
+            c.fetch_daily(a.stocks.upper().split(",") if a.stocks else
+                          [x.strip() for x in UNIVERSE.read_text(encoding="utf-8").split() if x.strip()])
+        else:
+            c.run(fetch=not a.skip_fetch, only=a.stocks.upper().split(",") if a.stocks else None)
     except Exception as e:
         c.log(f"FAILED: {type(e).__name__}: {e}")
         raise

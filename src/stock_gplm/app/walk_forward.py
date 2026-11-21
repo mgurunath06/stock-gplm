@@ -57,7 +57,28 @@ def passes(st: dict[str, float]) -> bool:
 
 
 # ------------------------------------------------------------------ one stock
-def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, name: str) -> Path:
+def _start(label: str) -> str:
+    """First day of a period label: 2026-04 (month), 2026-Q2 (quarter), 2026 (year)."""
+    if len(label) == 4:
+        return f"{label}-01-01"
+    if "-Q" in label:
+        y, q = label.split("-Q")
+        return f"{y}-{3 * int(q) - 2:02d}-01"
+    return f"{label}-01"
+
+
+def periods(sessions, first_test: str, step: str) -> list[str]:
+    """Test period labels from ``first_test`` on (owner 2026-11-21: monthly for 2026, yearly for long history)."""
+    out = []
+    for d in sessions:
+        d = str(d)
+        lab = d[:4] if step == "year" else (f"{d[:4]}-Q{(int(d[5:7]) - 1) // 3 + 1}" if step == "quarter" else d[:7])
+        if _start(lab) >= first_test[:10] and (not out or out[-1] != lab):
+            out.append(lab)
+    return out
+
+
+def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, name: str, step: str = "month") -> Path:
     from . import strategy_dsl as dsl
     from .context import App
     from .forward_test import exit_grid, pick_exit, recency_weights, _fmt
@@ -99,11 +120,10 @@ def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, na
             sigs.append((s, mask, xm))
         if not sigs or a0 >= n:
             continue
-        months = sorted({x[:7] for x in ses[a0:]})
-        tests = [mo for mo in months if mo >= first_test[:7]]
+        tests = periods(ses[a0:], first_test, step)
         ids = [s.id for s, _, _ in sigs]
         for k, mo in enumerate(tests + [None]):
-            M = int(np.searchsorted(ses, f"{mo}-01")) if mo else n
+            M = int(np.searchsorted(ses, _start(mo))) if mo else n
             if M - a0 < 20:
                 continue
             per = exit_grid(stock, m, sigs, (a0, M), lane.costs.buy, lane.costs.sell)
@@ -121,7 +141,7 @@ def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, na
                 entry["strategies"] = {i: {"max_swing_pct": v[0], "rr": v[1]} for i, v in chosen.items()}
                 final[tf] = entry
                 break
-            nxt = int(np.searchsorted(ses, f"{tests[k + 1]}-01")) if k + 1 < len(tests) else n
+            nxt = int(np.searchsorted(ses, _start(tests[k + 1]))) if k + 1 < len(tests) else n
             base = swing_settings(stock, "*")
             for s, mask, xm in sigs:
                 d = dict(s.doc["exit"])
@@ -243,10 +263,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--name", required=True)
     ap.add_argument("--workers", type=int, default=20)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--step", choices=["month", "quarter", "year"], default="month",
+                    help="length of each unseen period (expanding window); year for long history")
     a = ap.parse_args(argv)
     tfs = a.timeframes.split(",")
     if a.one:
-        run(a.one, a.start, a.first_test, tfs, a.config, a.name)
+        run(a.one, a.start, a.first_test, tfs, a.config, a.name, a.step)
         return 0
     from .settings import load
     stocks = read_stocks(a.stocks)
@@ -257,7 +279,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def one(sym: str) -> int:
         cmd = [sys.executable, "-m", "stock_gplm.app.walk_forward", "--stocks", sym, "--one", sym, "--from", a.start,
-               "--first-test", a.first_test, "--timeframes", a.timeframes, "--config", a.config, "--name", a.name]
+               "--first-test", a.first_test, "--timeframes", a.timeframes, "--config", a.config, "--name", a.name,
+               "--step", a.step]
         t0 = time.monotonic()
         (root / sym).mkdir(parents=True, exist_ok=True)
         with (root / sym / "run.log").open("w", encoding="utf-8") as fh:
@@ -272,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         failed = [s for s, rc in zip(todo, ex.map(one, todo)) if rc]
     for s in failed:
         one(s)
-    out = report(root, stocks, f"{a.start} .. latest, unseen months from {a.first_test}")
+    out = report(root, stocks, f"{a.start} .. latest, unseen {a.step}s from {a.first_test}")
     (root / "batch.done").write_text(time.strftime("%Y-%m-%d %H:%M:%S") + "\n", encoding="utf-8")
     print(out)
     return 0
