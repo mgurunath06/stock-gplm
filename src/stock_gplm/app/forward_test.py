@@ -37,8 +37,7 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 GRID_MAX = [0.01, 0.015, 0.025, 0.04, None]  # None: always the swing level
-# owner 2026-11-20 (later): wants 70-80% win rates, so targets below the risk are allowed; the learner first
-# requires exits.json target_win_rate (default 0.70), then maximises profit.
+# owner 2026-11-21: exits are chosen by recency-weighted expectancy (pick_exit); targets 0.3x-3x risk stay in the grid.
 GRID_RR = [0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 
 
@@ -129,65 +128,78 @@ def _fmt(mx, rr) -> str:
     return f"{'none' if mx is None else f'{mx:.1%}'} / {rr:g}x"
 
 
-def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strategy_trades: int = 8) -> str:
-    """Grid over max_swing_pct x rr. Learned twice, most specific wins when used:
-    * stock x timeframe (all its strategies together, >= ``min_trades``): the fallback;
-    * stock x timeframe x strategy (>= ``min_strategy_trades`` of its own trades): owner 2026-11-20 "granular".
-    Written to exits.json stocks.<SYM>.<tf> (+ .strategies.<id>) with the evidence of the chosen setting."""
+DECAY_SESSIONS = 100.0  # owner 2026-11-21: recent trades weigh more - same decay as confidence.py
+
+
+def recency_weights(m, ts, seg_end: int) -> np.ndarray:
+    """(1 + age/100)^-2 with age in sessions before the last session of the segment (half weight ~40 sessions)."""
+    sid = np.asarray(m.session_id)
+    if not len(ts):
+        return np.zeros(0)
+    age = sid[seg_end - 1] - sid[np.asarray(ts, dtype=np.int64)]
+    return (1.0 + np.maximum(age, 0) / DECAY_SESSIONS) ** -2
+
+
+def exit_grid(stock, m, sigs, seg, buy, sell) -> dict[tuple, dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """Every max_swing_pct x rr setting: per strategy (net returns, recency weights) of its trades in ``seg``."""
     from .strategy_engine import Exit
     base = {k: v for k, v in swing_settings(stock, "*").items()}
-    per: dict[tuple, dict[str, list[float]]] = {}
+    per: dict[tuple, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
     for mx in GRID_MAX:
         for rr in GRID_RR:
             sw = {**base, "max_swing_pct": mx, "rr": rr}
-            res: dict[str, list[float]] = {}
+            res: dict[str, tuple[np.ndarray, np.ndarray]] = {}
             for s, mask, xm in sigs:
                 d = dict(s.doc["exit"])
                 if d.get("swing_stop") is None:
                     continue
                 d["swing_stop"] = sw
-                res[s.id] = [x["net_return"] for x in simulate(m, mask, seg, Exit.of(d), buy, sell,
-                                                               s.direction == "short", xm)]
+                tr = simulate(m, mask, seg, Exit.of(d), buy, sell, s.direction == "short", xm)
+                res[s.id] = (np.array([x["net_return"] for x in tr]),
+                             recency_weights(m, [x["t"] for x in tr], seg[1]))
             per[(mx, rr)] = res
+    return per
 
-    want = float((json.loads(EXITS_FILE.read_text(encoding="utf-8")).get("default") or {}).get("target_win_rate", 0.70)
-                 if EXITS_FILE.is_file() else 0.70)
 
-    def pick(get, need):
-        """Settings reaching the target win rate -> most profitable; else highest win rate that still makes
-        money; else least loss. Row: (total, trades, max_swing, rr, win_rate)."""
-        rows = []
-        for (mx, rr), res in per.items():
-            net = get(res)
-            if len(net) >= need:
-                rows.append((sum(net), len(net), mx, rr, float((np.array(net) > 0).mean())))
-        if not rows:
-            return None
-        hit = [r for r in rows if r[4] >= want and r[0] > 0]
-        if hit:
-            return max(hit, key=lambda r: r[0])
-        pos = [r for r in rows if r[0] > 0]
-        if pos:
-            return max(pos, key=lambda r: (r[4], r[0]))
-        return max(rows, key=lambda r: r[0])
+def pick_exit(per, ids, need: int):
+    """Owner 2026-11-21: best recency-weighted average net per trade (expectancy), not a win-rate target.
+    ``ids`` = strategy ids pooled together. Row: (total, trades, max_swing, rr, win_rate, weighted_avg)."""
+    rows = []
+    for (mx, rr), res in per.items():
+        parts = [res[i] for i in ids if i in res]
+        net = np.concatenate([p[0] for p in parts]) if parts else np.zeros(0)
+        w = np.concatenate([p[1] for p in parts]) if parts else np.zeros(0)
+        if len(net) >= need and w.sum() > 0:
+            rows.append((float(net.sum()), len(net), mx, rr, float((net > 0).mean()), float((w * net).sum() / w.sum())))
+    return max(rows, key=lambda r: (r[5], r[0])) if rows else None
+
+
+def _learn(stock, tf, m, sigs, seg, buy, sell, min_trades, start, end, min_strategy_trades: int = 8) -> str:
+    """Grid over max_swing_pct x rr, chosen by recency-weighted expectancy. Learned twice, most specific wins:
+    * stock x timeframe (all its strategies together, >= ``min_trades``): the fallback;
+    * stock x timeframe x strategy (>= ``min_strategy_trades`` of its own trades): owner 2026-11-20 "granular".
+    Written to exits.json stocks.<SYM>.<tf> (+ .strategies.<id>) with the evidence of the chosen setting."""
+    per = exit_grid(stock, m, sigs, seg, buy, sell)
 
     def ev(r):
         return {"from": start, "to": end or "latest", "trades": r[1], "win_rate": round(r[4], 3),
-                "total_net_pct": round(100 * r[0], 2)}
+                "total_net_pct": round(100 * r[0], 2), "recent_avg_net_pct": round(100 * r[5], 3),
+                "objective": "recency-weighted expectancy"}
 
     sym = stock.upper().removesuffix("-EQ")
-    best = pick(lambda res: [x for v in res.values() for x in v], min_trades)
+    all_ids = [s.id for s, _, _ in sigs]
+    best = pick_exit(per, all_ids, min_trades)
     entry: dict[str, Any] = {}
     lines = []
     if best:
         entry = {"max_swing_pct": best[2], "rr": best[3], "learned": ev(best)}
         lines.append(f"- {tf} (all strategies): {_fmt(best[2], best[3])} - {best[1]} trades, {best[4]:.0%} win, "
-                     f"total {100 * best[0]:+.1f}%")
+                     f"recent avg {100 * best[5]:+.2f}%/trade, total {100 * best[0]:+.1f}%")
     else:
         lines.append(f"- {tf} (all strategies): not enough trades; default used")
     strat: dict[str, Any] = {}
     for s, _, _ in sigs:
-        r = pick(lambda res, i=s.id: res.get(i, []), min_strategy_trades)
+        r = pick_exit(per, [s.id], min_strategy_trades)
         if r:
             strat[s.id] = {"max_swing_pct": r[2], "rr": r[3], "learned": ev(r)}
     if strat:

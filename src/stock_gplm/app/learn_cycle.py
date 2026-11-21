@@ -136,7 +136,13 @@ class Cycle:
         ex = json.loads(exits_file.read_text(encoding="utf-8")).get("stocks", {})
         sc["exit"] = [_exit_text(ex, r.stock, r.timeframe, r.strategy_id) for r in sc.itertuples()]
         sc.to_csv(out / "stock_tf.csv", index=False)
-        act = sc[sc.status == "ACTIVE"].copy()
+        wf_file = self.root / "walkforward" / "active.json"
+        wf_map = json.loads(wf_file.read_text(encoding="utf-8")) if wf_file.is_file() else None
+        if wf_map is not None:  # owner 2026-11-21: tables follow the walk-forward ACTIVE list (unseen months)
+            keys = {(s, tf, i) for s, x in wf_map.items() for tf, ids in x.items() for i in ids}
+            act = sc[[k in keys for k in zip(sc.stock, sc.timeframe, sc.strategy_id)]].copy()
+        else:
+            act = sc[sc.status == "ACTIVE"].copy()
         act["total"] = (act.trades * act.avg_net_pct).round(1)
         cols = ["stock", "sector", "timeframe", "name", "strategy_id", "side", "trades", "win_rate", "avg_net_pct",
                 "max_trade", "worst_trade", "total", "confidence", "rr", "edge", "exit", "last_trade"]
@@ -144,7 +150,9 @@ class Cycle:
             out / "CURRENT_LEARNINGS.csv", index=False)
         act.sort_values(["stock", "edge"], ascending=[True, False]).groupby("stock").head(1)[cols].to_csv(
             out / "BEST_STRATEGY_PER_STOCK.csv", index=False)
-        new_active = active_map(sc)
+        (out / "active_insample.json").write_text(json.dumps(active_map(sc), indent=1), encoding="utf-8")
+        wf_active = self.root / "walkforward" / "active.json"  # owner 2026-11-21: ACTIVE = walk-forward (unseen) only
+        new_active = json.loads(wf_active.read_text(encoding="utf-8")) if wf_active.is_file() else {}
         (out / "active.json").write_text(json.dumps(new_active, indent=1), encoding="utf-8")
         # sector x TF: the same scoring with all stocks of a sector pooled (a prior for stocks with few trades)
         st = t.assign(stock=t.stock.map(sec).fillna("Unknown"))
@@ -185,28 +193,62 @@ class Cycle:
             self.fetch_daily(stocks)
         intra = self.intraday_stocks(stocks)
         learn = self.cadence in ("weekly", "monthly")
-        exits = EXITS
-        env = None
-        if learn:  # learn into a staged copy; promote when everything finished
-            exits = self.root / "history" / self.tag / "exits.staged.json"
-            exits.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(EXITS, exits)
-            env = {"GPLM_EXITS_FILE": str(exits)}
-        self.log(f"start: universe {len(stocks)}, intraday-complete {len(intra)}, learn exits={learn}")
-        dirs = [self.batch("daily", stocks, self.start, "1d,1w,1mo", learn, env=env)]
+        self.log(f"start: universe {len(stocks)}, intraday-complete {len(intra)}, walk-forward={learn}")
+        if learn:  # owner 2026-11-21: ACTIVE + exits come from the walk-forward (unseen months only)
+            self.walk_forward(stocks, intra)
+        dirs = [self.batch("daily", stocks, self.start, "1d,1w,1mo", False)]
         if intra:
-            dirs.append(self.batch("intraday", intra, max(self.start, INTRADAY_FROM), "5m,15m,30m,60m", learn, env=env))
-        if learn:
-            shutil.copy2(EXITS, exits.with_name("exits.before.json"))
-            tmp = EXITS.with_name(".exits.promote.tmp")
-            shutil.copy2(exits, tmp)
-            os.replace(tmp, EXITS)
-            self.log("exits.json promoted (previous kept as exits.before.json in history)")
+            dirs.append(self.batch("intraday", intra, max(self.start, INTRADAY_FROM), "5m,15m,30m,60m", False))
         self.report(dirs, EXITS)
         if self.cadence == "monthly":
             self.long_check(stocks, dirs[0])
         self.prune()
         (self.root / f"{self.cadence}.done").write_text(self.tag + "\n", encoding="utf-8")
+
+    def walk_forward(self, stocks: list[str], intra: list[str]) -> None:
+        """Expanding monthly walk-forward over 2026 (walk_forward.py): ACTIVE = unseen record passes the rule;
+        exits learned on all data are promoted into exits.json (previous copy kept in history)."""
+        from .walk_forward import report as wf_report  # noqa: F401  (import check before a long run)
+        runs = [("wf-daily", stocks, "2026-01-01", "1d,1w,1mo")]
+        if intra:
+            runs.append(("wf-intraday", intra, INTRADAY_FROM, "5m,15m,30m,60m"))
+        active: dict[str, dict[str, list[str]]] = {}
+        learned: dict[str, dict] = {}
+        out = self.root / "history" / self.tag
+        out.mkdir(parents=True, exist_ok=True)
+        for name, syms, start, tfs in runs:
+            lst = self.runs / f"{self.tag}-{name}.txt"
+            lst.parent.mkdir(parents=True, exist_ok=True)
+            lst.write_text("\n".join(syms) + "\n", encoding="utf-8")
+            cmd = [sys.executable, "-m", "stock_gplm.app.walk_forward", "--stocks", f"@{lst}", "--from", start,
+                   "--timeframes", tfs, "--name", f"cycle/{self.tag}/{name}", "--workers", str(self.workers)]
+            t0 = time.monotonic()
+            rc = subprocess.run(cmd, cwd=REPO, env={**os.environ, "PYTHONPATH": str(REPO / "src")},
+                                capture_output=True, text=True).returncode
+            self.log(f"walk-forward {name}: {len(syms)} stocks, {tfs}, rc={rc}, {(time.monotonic() - t0) / 60:.0f} min")
+            if rc:
+                raise RuntimeError(f"walk_forward {name} failed (rc={rc})")
+            d = self.s.reports_dir / "forward" / "cycle" / self.tag / name
+            for s, tfm in json.loads((d / "active.json").read_text(encoding="utf-8")).items():
+                active.setdefault(s, {}).update(tfm)
+            for s, tfm in json.loads((d / "exits_learned.json").read_text(encoding="utf-8")).get("stocks", {}).items():
+                learned.setdefault(s, {}).update(tfm)
+            shutil.copy2(d / "WALK_FORWARD.md", out / f"WALK_FORWARD-{name}.md")
+            shutil.copy2(d / "unseen.csv", out / f"unseen-{name}.csv")
+        (out / "active_walkforward.json").write_text(json.dumps(active, indent=1), encoding="utf-8")
+        wf = self.root / "walkforward"
+        wf.mkdir(parents=True, exist_ok=True)
+        (wf / "active.json").write_text(json.dumps(active, indent=1), encoding="utf-8")
+        (wf / "tag.txt").write_text(self.tag + "\n", encoding="utf-8")
+        shutil.copy2(EXITS, out / "exits.before.json")
+        doc = json.loads(EXITS.read_text(encoding="utf-8"))
+        for s, tfm in learned.items():
+            doc.setdefault("stocks", {}).setdefault(s, {}).update(tfm)
+        tmp = EXITS.with_name(".exits.promote.tmp")
+        tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, EXITS)
+        self.log(f"walk-forward ACTIVE {sum(len(v) for x in active.values() for v in x.values())} combos on "
+                 f"{len(active)} stocks; exits.json updated for {len(learned)} stocks")
 
     def long_check(self, stocks: list[str], insample: Path) -> None:
         base = load(LONG_CFG).reports_dir / "forward" / "long-1d"
