@@ -135,7 +135,11 @@ def oldest_existing(sym: str, shoonya_root: Path, nse_out: Path) -> str | None:
     return min(days) if days else None
 
 
-def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: Path) -> dict[str, str]:
+HISTORY_FROM = "2010-01-01"  # owner 2026-11-21: use daily history from 2010, not earlier
+
+
+def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: Path,
+          start: str = HISTORY_FROM) -> dict[str, str]:
     report: dict[str, str] = {}
     for s in stocks:
         files = sorted((raw / s).glob("*.json"))
@@ -148,6 +152,7 @@ def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: 
         rows, rej = parse(json.loads(files[-1].read_text(encoding="utf-8")))
         before = oldest_existing(s, shoonya_root, nse_out)
         keep, note = link(rows, nh.shoonya_closes(shoonya_root / f"{s}-EQ"), before or "")
+        keep = [x for x in keep if x[0] >= start]
         rtxt = f"; rejected {rej}" if rej else ""
         report[s] = (f"{note}; {len(keep)} older days ({keep[0][0]}..{keep[-1][0]}){rtxt}" if keep
                      else f"{note}{rtxt}")
@@ -176,6 +181,7 @@ def main() -> int:
     ap.add_argument("--refresh", action="store_true", help="fetch again even if a raw reply exists")
     ap.add_argument("--research", action="store_true", help="run 1d,1w research-matrix afterwards")
     ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--from", dest="start", default=HISTORY_FROM, help="build: keep dates from this day on")
     a = ap.parse_args()
     src = a.stocks[1:] if a.stocks.startswith("@") else None
     stocks = [x.strip().split(",")[0].upper().removesuffix("-EQ")
@@ -189,7 +195,7 @@ def main() -> int:
     if a.step in ("fetch", "all"):
         fetch(stocks, raw, a.pause, a.refresh)
     if a.step in ("build", "all"):
-        build(stocks, raw, out, shoonya, nse_out)
+        build(stocks, raw, out, shoonya, nse_out, a.start)
     if a.step in ("config", "all"):
         out.mkdir(parents=True, exist_ok=True)
         conf = nh.write_config(nse_out)

@@ -9,7 +9,7 @@ daily   (Mon-Fri evening) 1. new daily candles from the official NSE MCP for eve
         3. re-scored: stock x TF and sector x TF Confidence / RR / Edge / ACTIVE (recent trades weigh more).
 weekly  (Saturday) as daily, plus exits re-learned on the same 12 months into a staged copy of exits.json,
         promoted (old one kept in history) only when the run finished.
-monthly (first Sunday) as weekly, plus the long-history daily check: 2000..latest with exits re-learned into
+monthly (first Sunday) as weekly, plus the long-history daily check: 2010..latest with exits re-learned into
         state-long/.../exits-long.json and COMPARE.md against this month's 12-month run (not promoted: owner).
 Outputs: <state>/learning/current/ (active.json = what live alerts use, sector_active.json, CURRENT_LEARNINGS.csv,
 BEST_STRATEGY_PER_STOCK.csv, stock_tf.csv, sector_tf.csv, SECTOR_TF.md, GROUPS.md, CHANGES.md, RUN.md) and a copy
@@ -199,7 +199,7 @@ class Cycle:
         exl.parent.mkdir(parents=True, exist_ok=True)
         if not exl.is_file():
             shutil.copy2(EXITS, exl)
-        d = self.batch("long-full", stocks, "2000-01-01", "1d", True, cfg=LONG_CFG, env={"GPLM_EXITS_FILE": str(exl)})
+        d = self.batch("long-full", stocks, "2010-01-01", "1d", True, cfg=LONG_CFG, env={"GPLM_EXITS_FILE": str(exl)})
         from .long_compare import build
         oos = base / "oos-frozen2026"
         txt = build(insample, oos, d) if (oos / "all_trades.csv").is_file() else "no out-of-sample run yet\n"

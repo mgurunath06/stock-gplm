@@ -182,7 +182,7 @@ def overlap(a: pd.DataFrame, b: pd.DataFrame) -> tuple[dict[str, Any], pd.DataFr
     return out, worst
 
 
-def audit_stock(sym: str, cal_list: list[str], cache: str) -> dict[str, Any]:
+def audit_stock(sym: str, cal_list: list[str], cache: str, start: str = "2010-01-01") -> dict[str, Any]:
     cf = Path(cache) / f"{sym}.json"
     if cf.is_file():
         return json.loads(cf.read_text(encoding="utf-8"))
@@ -190,11 +190,12 @@ def audit_stock(sym: str, cal_list: list[str], cache: str) -> dict[str, Any]:
     frames: dict[str, pd.DataFrame] = {}
     res: dict[str, Any] = {"stock": sym, "sources": [], "overlaps": [], "mismatches": [], "junctions": []}
     for k, root in SRC.items():
-        frames[k], dup = read_shoonya_format(root / f"{sym}-EQ")
+        f, dup = read_shoonya_format(root / f"{sym}-EQ")
+        frames[k] = f[f.index >= start]
         if not frames[k].empty:
             res["sources"].append({"stock": sym, "source": k, "duplicates": dup, **completeness(frames[k], cal)})
-    frames["YR"] = read_yahoo_raw(sym)
-    frames["NR"] = read_nse_raw(sym)
+    frames["YR"] = (y := read_yahoo_raw(sym))[y.index >= start]
+    frames["NR"] = (n := read_nse_raw(sym))[n.index >= start]
     for k in ("YR", "NR"):
         if not frames[k].empty:
             res["sources"].append({"stock": sym, "source": k, "duplicates": 0, **completeness(frames[k], cal)})
@@ -271,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--stocks", help="comma list or @file; default: every stock found in any source")
     ap.add_argument("--workers", type=int, default=16)
+    ap.add_argument("--from", dest="start", default="2010-01-01", help="audit dates from this day on (owner: 2010)")
     ap.add_argument("--out", type=Path, default=ROOT / "state" / "reports" / "data-audit" / date.today().isoformat())
     a = ap.parse_args(argv)
     if a.stocks:
@@ -282,13 +284,14 @@ def main(argv: list[str] | None = None) -> int:
             if root.is_dir():
                 names |= {p.name.removesuffix("-EQ") for p in root.iterdir() if p.is_dir() and not p.name.startswith("_")}
         stocks = sorted(n for n in names if n != "minute")
-    cache = a.out / "_per_stock"
+    cache = a.out / f"_per_stock_from_{a.start}"
     cache.mkdir(parents=True, exist_ok=True)
     cal = calendar()
+    cal = cal[cal >= a.start]
     print(f"{len(stocks)} stocks, calendar {len(cal)} days {cal[0]}..{cal[-1]} -> {a.out}", flush=True)
     results = []
     with ProcessPoolExecutor(a.workers) as ex:
-        futs = {ex.submit(audit_stock, s, list(cal), str(cache)): s for s in stocks}
+        futs = {ex.submit(audit_stock, s, list(cal), str(cache), a.start): s for s in stocks}
         for i, f in enumerate(as_completed(futs), 1):
             try:
                 results.append(f.result())
