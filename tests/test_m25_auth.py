@@ -10,12 +10,13 @@ from pathlib import Path
 import pytest
 
 from stock_gplm.m25.browser import (
-    PAGE_READY_TIMEOUT_SECONDS, capture_authorization_code, extract_authorization_code,
-    wait_for_login_form,
+    PAGE_READY_TIMEOUT_SECONDS, SeleniumOAuthBrowser, capture_authorization_code,
+    extract_authorization_code, wait_for_login_form,
 )
-from stock_gplm.m25.credentials import FileCredentialProvider, _private_permissions
+from stock_gplm.m25.credentials import Credentials, FileCredentialProvider, _private_permissions
 from stock_gplm.m25.errors import (
-    BrowserPageNotReady, LoginRequired, SecurityBoundaryError, ValidationInconclusive,
+    BrowserPageNotReady, LoginRequired, SecurityBoundaryError, UiContractChanged,
+    ValidationInconclusive,
 )
 from stock_gplm.m25.models import AuthConfigV1, SessionRecordV1
 from stock_gplm.m25.security import AuditLogger, ExclusiveAuthLock, SessionCache
@@ -408,15 +409,25 @@ def _fake_time():
     return sleeper, lambda: now[0]
 
 
-def test_login_form_wait_survives_slow_render_and_transient_driver_stalls():
+def test_login_form_wait_survives_slow_render():
     sleeper, monotonic = _fake_time()
     driver = _FormDriver([
-        [], TimeoutError("driver read timeout"), [_FormElement(displayed=False)],
-        [_FormElement(enabled=False)], [_FormElement()],
+        [], [_FormElement(displayed=False)], [_FormElement(enabled=False)], [_FormElement()],
     ])
     wait_for_login_form(driver, 100, transient=(TimeoutError,), sleeper=sleeper, monotonic=monotonic)
-    assert driver.selectors == [("css selector", "input[type='password']")] * 5
-    assert monotonic() == 4.0
+    assert driver.selectors == [("css selector", "input[type='password']")] * 4
+    assert monotonic() == 3.0
+
+
+def test_login_form_wait_does_not_retry_ambiguous_driver_stall():
+    sleeper, monotonic = _fake_time()
+    driver = _FormDriver([TimeoutError("driver read timeout"), [_FormElement()]])
+    with pytest.raises(BrowserPageNotReady, match="readiness check stalled"):
+        wait_for_login_form(
+            driver, 100, transient=(TimeoutError,), sleeper=sleeper, monotonic=monotonic,
+        )
+    assert driver.selectors == [("css selector", "input[type='password']")]
+    assert monotonic() == 0.0
 
 
 def test_login_form_wait_is_bounded_and_classified():
@@ -435,4 +446,139 @@ def test_login_form_wait_does_not_swallow_unlisted_errors():
 
 
 def test_page_ready_bound_covers_observed_oracle_render_time():
-    assert 90 < PAGE_READY_TIMEOUT_SECONDS < 300
+    assert 145 < PAGE_READY_TIMEOUT_SECONDS < 300
+
+
+class _LoginElement:
+    def __init__(self, kind, *, text="", displayed=True, enabled=True):
+        self.kind = kind
+        self.text = text
+        self.displayed = displayed
+        self.enabled = enabled
+        self.values = []
+        self.clicks = 0
+
+    def get_attribute(self, name):
+        return self.kind if name == "type" else None
+
+    def is_displayed(self):
+        return self.displayed
+
+    def is_enabled(self):
+        return self.enabled
+
+    def clear(self):
+        self.values.clear()
+
+    def send_keys(self, value):
+        self.values.append(value)
+
+    def click(self):
+        self.clicks += 1
+
+
+class _LoginDriver:
+    def __init__(self, url, controls):
+        self.current_url = url
+        self.controls = controls
+
+    def find_elements(self, by, selector):
+        assert by == "css selector"
+        return list(self.controls.get(selector, []))
+
+
+def _selenium_browser(tmp_path):
+    return SeleniumOAuthBrowser(SimpleNamespace(client_id="TEST_U", user_id="TEST"))
+
+
+def test_login_origin_requires_exact_shoonya_url_and_query(tmp_path):
+    browser = _selenium_browser(tmp_path)
+    valid = "https://api.shoonya.com/OAuthlogin/investor-entry-level/login?api_key=TEST_U&route_to=TEST"
+    browser._assert_login_origin(_LoginDriver(valid, {}))
+    for invalid in (
+        valid.replace("api.shoonya.com", "evil.example"),
+        valid.replace("/login?", "/other?"),
+        valid.replace("https://api.shoonya.com/", "https://api.shoonya.com:443/"),
+        valid + "&extra=value",
+    ):
+        with pytest.raises(UiContractChanged):
+            browser._assert_login_origin(_LoginDriver(invalid, {}))
+
+
+def test_credentials_are_filled_and_submitted_exactly_once(tmp_path):
+    browser = _selenium_browser(tmp_path)
+    user = _LoginElement("text")
+    password = _LoginElement("password")
+    otp = _LoginElement("password")
+    submit = _LoginElement("submit", text="LOGIN")
+    url = "https://api.shoonya.com/OAuthlogin/investor-entry-level/login?api_key=TEST_U&route_to=TEST"
+    driver = _LoginDriver(url, {
+        "#lgnusrid": [user], "#lgnpwd": [password], "#lgnotp": [otp],
+        "button[type='submit']": [submit],
+    })
+    credentials = Credentials(
+        password="secret-password", totp_secret="JBSWY3DPEHPK3PXP", api_secret="api-secret",
+    )
+    browser._submit_credentials_once(driver, credentials, "123456")
+    assert user.values == ["TEST"]
+    assert password.values == ["secret-password"]
+    assert otp.values == ["123456"]
+    assert submit.clicks == 1
+
+
+@pytest.mark.parametrize(("selector", "replacement"), (
+    ("#lgnusrid", []),
+    ("#lgnpwd", [_LoginElement("text")]),
+    ("#lgnotp", [_LoginElement("password", enabled=False)]),
+    ("button[type='submit']", [_LoginElement("submit", text="CONTINUE")]),
+))
+def test_login_contract_fails_closed_on_changed_or_disabled_control(tmp_path, selector, replacement):
+    controls = {
+        "#lgnusrid": [_LoginElement("text")],
+        "#lgnpwd": [_LoginElement("password")],
+        "#lgnotp": [_LoginElement("password")],
+        "button[type='submit']": [_LoginElement("submit", text="LOGIN")],
+    }
+    controls[selector] = replacement
+    driver = _LoginDriver(
+        "https://api.shoonya.com/OAuthlogin/investor-entry-level/login?api_key=TEST_U&route_to=TEST",
+        controls,
+    )
+    browser = _selenium_browser(tmp_path)
+    with pytest.raises(UiContractChanged):
+        browser._submit_credentials_once(
+            driver,
+            Credentials(password="secret", totp_secret="JBSWY3DPEHPK3PXP", api_secret="secret"),
+            "123456",
+        )
+
+
+def test_failed_automatic_login_is_not_resubmitted_by_the_timer(tmp_path):
+    """2026-11-21: one failed browser login pauses automatic logins for 6 h; two stop them until a success."""
+    from stock_gplm.m25.errors import LoginBlocked
+    from stock_gplm.m25.session import RETRY_GAP_SECONDS
+
+    class FailingBrowser:
+        calls = 0
+
+        def acquire_code(self, credentials):
+            FailingBrowser.calls += 1
+            raise TimeoutError("page never loaded")
+
+    config = _config(tmp_path)
+    t = [10_000.0]
+    manager = AuthManager(config=config, credentials=_credentials(tmp_path), browser=FailingBrowser(),
+                          api_factory=Factory(), clock=lambda: t[0])
+    with pytest.raises(TimeoutError):
+        manager.ensure_session(allow_oauth_login=True)
+    t[0] += 1800  # next timer run, 30 minutes later
+    with pytest.raises(LoginBlocked):
+        manager.ensure_session(allow_oauth_login=True)
+    assert FailingBrowser.calls == 1
+    t[0] += RETRY_GAP_SECONDS
+    with pytest.raises(TimeoutError):
+        manager.ensure_session(allow_oauth_login=True)
+    t[0] += 10 * RETRY_GAP_SECONDS
+    with pytest.raises(LoginBlocked):
+        manager.ensure_session(allow_oauth_login=True)
+    assert FailingBrowser.calls == 2

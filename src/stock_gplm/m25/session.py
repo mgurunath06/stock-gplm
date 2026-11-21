@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from enum import Enum
@@ -10,7 +12,7 @@ from typing import Any, Callable, Protocol
 
 from .credentials import FileCredentialProvider
 from .errors import (
-    AuthError, LoginRequired, SecurityBoundaryError, TokenExchangeRejected,
+    AuthError, LoginBlocked, LoginRequired, SecurityBoundaryError, TokenExchangeRejected,
     ValidationInconclusive,
 )
 from .models import AuthConfigV1, SessionRecordV1
@@ -65,6 +67,58 @@ class ReadOnlyShoonyaClient:
         return self.__api.get_time_price_series(*args, **kwargs)
 
 
+# 2026-11-21: cross-run guard for unattended browser logins (the 30-minute timer would otherwise resubmit
+# credentials after every failure). One automatic attempt per RETRY_GAP_SECONDS; after MAX_AUTO_FAILURES
+# consecutive failures no automatic attempt is made until a login succeeds (a manual login refreshes the
+# cache, so the guard is never reached) or the attempts file is deleted.
+RETRY_GAP_SECONDS = 6 * 3600
+MAX_AUTO_FAILURES = 2
+
+
+class LoginAttempts:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def save(self, data: dict[str, Any]) -> None:
+        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    def check(self, now: float) -> None:
+        data = self.load()
+        failures = int(data.get("consecutive_failures", 0))
+        if failures >= MAX_AUTO_FAILURES:
+            raise LoginBlocked(f"{failures} automatic logins failed; log in manually or delete {self.path}")
+        last = float(data.get("last_attempt_epoch", 0) or 0)
+        if failures and now - last < RETRY_GAP_SECONDS:
+            raise LoginBlocked("last automatic login failed less than 6 hours ago")
+
+    def started(self, now: float) -> None:
+        data = self.load()
+        data["last_attempt_epoch"] = now
+        self.save(data)
+
+    def failed(self, error_class: str) -> None:
+        data = self.load()
+        data["consecutive_failures"] = int(data.get("consecutive_failures", 0)) + 1
+        data["last_error"] = error_class
+        self.save(data)
+
+    def succeeded(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class AuthManager:
     def __init__(
         self, *, config: AuthConfigV1, credentials: FileCredentialProvider,
@@ -78,6 +132,7 @@ class AuthManager:
         self.clock = clock
         self.cache = SessionCache(Path(config.cache_path))
         self.audit = AuditLogger(Path(config.audit_path), Path(config.status_path))
+        self.attempts = LoginAttempts(Path(config.status_path).with_name("shoonya_auth_attempts.json"))
 
     def _inject_cached(self, record: SessionRecordV1) -> tuple[Any, Validation]:
         if record.uid != self.config.user_id or record.account_id != self.config.expected_account_id:
@@ -91,6 +146,7 @@ class AuthManager:
 
     def ensure_session(self, *, allow_oauth_login: bool) -> ReadOnlyShoonyaClient:
         run_id = new_run_id()
+        login_started = False  # any failure after this point counts against the automatic-login guard
         self.audit.event("AUTH_STARTED", run_id=run_id)
         try:
             with ExclusiveAuthLock(Path(self.config.lock_path), self.config.lock_timeout_seconds):
@@ -113,7 +169,10 @@ class AuthManager:
 
                 if not allow_oauth_login:
                     raise LoginRequired("fresh OAuth login is required but was not explicitly enabled")
+                self.attempts.check(self.clock())
                 credential_values = self.credentials.load()
+                self.attempts.started(self.clock())
+                login_started = True
                 self.audit.event("OAUTH_BROWSER_STARTED", run_id=run_id)
                 authorization_code = self.browser.acquire_code(credential_values)
                 self.audit.event("OAUTH_CODE_CAPTURED", run_id=run_id, captured=True)
@@ -141,11 +200,14 @@ class AuthManager:
                     token=token, uid=uid, account_id=account_id,
                     issued_at_epoch=issued, validated_at_epoch=issued,
                 ))
+                self.attempts.succeeded()
                 self.audit.event("CACHE_COMMITTED", run_id=run_id)
                 self.audit.status("REFRESHED", run_id=run_id)
                 return ReadOnlyShoonyaClient(api)
         except Exception as exc:
             classification = exc.classification if isinstance(exc, AuthError) else type(exc).__name__.upper()
+            if login_started:
+                self.attempts.failed(classification)
             self.audit.event("AUTH_FAILED", run_id=run_id, error_class=classification)
             self.audit.status(classification, run_id=run_id)
             raise

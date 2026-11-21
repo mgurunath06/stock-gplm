@@ -9,6 +9,11 @@ class LoginRequired(AuthError):
     classification = "LOGIN_REQUIRED"
 
 
+class LoginBlocked(AuthError):
+    """Automatic browser login paused after failures (2026-11-21): protects the account from repeated submissions."""
+    classification = "LOGIN_BLOCKED"
+
+
 class ValidationInconclusive(AuthError):
     classification = "VALIDATION_INCONCLUSIVE"
 

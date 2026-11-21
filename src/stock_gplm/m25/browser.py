@@ -19,8 +19,11 @@ APPROVED_HTTPS_REDIRECT_PATHS = frozenset({"/OAuthlogin/authorize/oauth"})
 # The hosted login form is rendered by ~10 MB of JavaScript. On the burstable Oracle
 # VM the hypervisor steals 70-78% of CPU while Chrome loads it, so the form took
 # ~90 s to appear (docs/m25-oracle-browser-timeout-investigation-2026-11-01.md).
-PAGE_READY_TIMEOUT_SECONDS = 150
+PAGE_READY_TIMEOUT_SECONDS = 210
 PASSWORD_CSS = "input[type='password']"
+LOGIN_PATH = "/OAuthlogin/investor-entry-level/login"
+LOGIN_INPUTS = (("lgnusrid", {"text", "email", "tel"}), ("lgnpwd", {"password"}),
+                ("lgnotp", {"text", "tel", "number", "password"}))
 
 
 def _approved_redirect(target: Any, allowed_hosts: set[str]) -> bool:
@@ -85,8 +88,10 @@ def wait_for_login_form(
                 for item in driver.find_elements("css selector", PASSWORD_CSS)
             ):
                 return
-        except transient:
-            pass
+        except transient as exc:
+            # A timed-out synchronous driver command has an unknown outcome; do
+            # not issue another command against that browser session.
+            raise BrowserPageNotReady("Shoonya login form readiness check stalled") from exc
         if monotonic() >= deadline:
             raise BrowserPageNotReady("Shoonya login form did not become usable within the bound")
         sleeper(1.0)
@@ -100,8 +105,7 @@ def _has_challenge(page_source: str) -> bool:
 class SeleniumOAuthBrowser:
     """Drive only the documented login UI; never bypass interactive challenges."""
 
-    INPUTS_CSS = "input:not([type='hidden']):not([type='checkbox']):not([type='radio'])"
-    SUBMIT_XPATH = "//button[normalize-space()='LOGIN']"
+    SUBMIT_CSS = "button[type='submit']"
 
     def __init__(
         self, config: AuthConfigV1, *, sleeper: Callable[[float], None] = time.sleep,
@@ -113,15 +117,36 @@ class SeleniumOAuthBrowser:
         self.monotonic = monotonic
 
     def _inputs(self, driver: Any) -> list[Any]:
-        visible = [item for item in driver.find_elements("css selector", self.INPUTS_CSS) if item.is_displayed()]
-        if len(visible) != 3:
-            raise UiContractChanged("Shoonya login page does not expose exactly three expected inputs")
-        kinds = [(item.get_attribute("type") or "text").lower() for item in visible]
-        if kinds[0] not in {"text", "email", "tel"} or kinds[1] != "password" or kinds[2] not in {
-            "text", "tel", "number", "password",
-        }:
-            raise UiContractChanged("Shoonya login input types changed")
-        return visible
+        controls = []
+        for element_id, allowed_types in LOGIN_INPUTS:
+            found = driver.find_elements("css selector", f"#{element_id}")
+            if len(found) != 1:
+                raise UiContractChanged(f"Shoonya login control {element_id} is missing or duplicated")
+            item = found[0]
+            kind = (item.get_attribute("type") or "text").lower()
+            if not item.is_displayed() or not item.is_enabled() or kind not in allowed_types:
+                raise UiContractChanged(f"Shoonya login control {element_id} is not usable")
+            controls.append(item)
+        return controls
+
+    def _submit(self, driver: Any) -> Any:
+        found = [item for item in driver.find_elements("css selector", self.SUBMIT_CSS)
+                 if item.is_displayed() and item.is_enabled() and item.text.strip() == "LOGIN"]
+        if len(found) != 1:
+            raise UiContractChanged("Shoonya LOGIN submit control is missing, duplicated or disabled")
+        return found[0]
+
+    def _assert_login_origin(self, driver: Any) -> None:
+        target = urlparse(driver.current_url)
+        try:
+            port = target.port
+        except ValueError as exc:
+            raise UiContractChanged("Shoonya login origin has an invalid port") from exc
+        query = parse_qsl(target.query, keep_blank_values=True, strict_parsing=True)
+        expected = [("api_key", self.config.client_id), ("route_to", self.config.user_id)]
+        if (target.scheme, target.hostname, port, target.path, target.fragment, query) != (
+                "https", "api.shoonya.com", None, LOGIN_PATH, "", expected):
+            raise UiContractChanged("Shoonya login origin or query contract changed")
 
     @staticmethod
     def _fill(element: Any, value: str) -> None:
@@ -129,12 +154,21 @@ class SeleniumOAuthBrowser:
         element.clear()
         element.send_keys(value)
 
+    def _submit_credentials_once(self, driver: Any, credentials: Credentials, otp: str) -> None:
+        """Submit exactly once; an ambiguous outcome is never resubmitted."""
+        self._assert_login_origin(driver)
+        inputs = self._inputs(driver)
+        submit = self._submit(driver)
+        self._fill(inputs[0], self.config.user_id)
+        self._fill(inputs[1], credentials.password)
+        self._fill(inputs[2], otp)
+        submit.click()
+
     def acquire_code(self, credentials: Credentials) -> str:
         try:
             from selenium import webdriver
             from selenium.webdriver.chrome.service import Service
             from selenium.common.exceptions import WebDriverException
-            from selenium.webdriver.common.by import By
             from urllib3.exceptions import HTTPError
         except ImportError as exc:
             raise RuntimeError("Selenium is not installed in the Oracle authentication environment") from exc
@@ -168,33 +202,22 @@ class SeleniumOAuthBrowser:
                     sleeper=self.sleeper, monotonic=self.monotonic,
                 )
                 deadline = self.monotonic() + self.config.browser_timeout_seconds
+                self._assert_login_origin(driver)
                 if _has_challenge(driver.page_source):
                     raise InteractionRequired("Shoonya presented an interactive challenge")
-                previous_totp = None
-                for attempt in range(2):
-                    remaining = seconds_remaining(at_time=self.clock())
-                    if remaining < self.config.totp_min_valid_seconds:
-                        self.sleeper(remaining + 0.25)
-                    inputs = self._inputs(driver)
-                    otp = generate_totp(credentials.totp_secret, at_time=self.clock())
-                    if otp == previous_totp:
-                        self.sleeper(seconds_remaining(at_time=self.clock()) + 0.25)
-                        otp = generate_totp(credentials.totp_secret, at_time=self.clock())
-                    previous_totp = otp
-                    self._fill(inputs[0], self.config.user_id)
-                    self._fill(inputs[1], credentials.password)
-                    self._fill(inputs[2], otp)
-                    driver.find_element(By.XPATH, self.SUBMIT_XPATH).click()
-                    attempt_deadline = min(deadline, self.monotonic() + 35)
-                    while self.monotonic() < attempt_deadline:
-                        code = capture_authorization_code(driver, allowed)
-                        if code is not None:
-                            return code
-                        if _has_challenge(driver.page_source):
-                            raise InteractionRequired("Shoonya presented an interactive challenge")
-                        self.sleeper(0.5)
-                    if attempt == 0 and self.monotonic() < deadline:
-                        continue
+                remaining = seconds_remaining(at_time=self.clock())
+                if remaining < self.config.totp_min_valid_seconds:
+                    self.sleeper(remaining + 0.25)
+                otp = generate_totp(credentials.totp_secret, at_time=self.clock())
+                self._submit_credentials_once(driver, credentials, otp)
+                otp = ""
+                while self.monotonic() < deadline:
+                    code = capture_authorization_code(driver, allowed)
+                    if code is not None:
+                        return code
+                    if _has_challenge(driver.page_source):
+                        raise InteractionRequired("Shoonya presented an interactive challenge")
+                    self.sleeper(0.5)
                 raise UiContractChanged("Shoonya OAuth redirect code was not observed within the bound")
             finally:
                 try:

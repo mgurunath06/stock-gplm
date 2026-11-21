@@ -1,10 +1,12 @@
 [Unit]
-Description=Disabled template for pre-market Shoonya session assurance
+Description=Periodic Shoonya session assurance
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 08:25:00 Asia/Kolkata
-Persistent=false
-RandomizedDelaySec=30
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+RandomizedDelaySec=60
+AccuracySec=30s
 Unit=stock-gplm-auth.service
 
 [Install]

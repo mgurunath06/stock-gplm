@@ -213,7 +213,7 @@ scheduling. See the deployment report for the recorded evidence and blockers.
    sudo journalctl -u stock-gplm-auth-preflight.service --no-pager -n 100
    ```
 
-9. Stop for supervised-live-login approval. Only after approval:
+9. After owner approval for automatic renewal, install and start the service:
 
    ```bash
    sudo install -o root -g root -m 0644 \
@@ -227,8 +227,7 @@ scheduling. See the deployment report for the recorded evidence and blockers.
    Inspect only the redacted status/audit and verify the existing collector reuses
    the new cache without invoking Selenium again.
 
-10. Stop again for scheduling approval. The following commands are examples for
-    that later approval and must not be run now:
+10. After owner scheduling approval, install and enable the periodic assurance timer:
 
     ```bash
     sudo install -o root -g root -m 0644 \
@@ -238,9 +237,11 @@ scheduling. See the deployment report for the recorded evidence and blockers.
     sudo systemctl enable --now stock-gplm-auth.timer
     ```
 
-    Installing `authenticated-collector.sh` or changing the current cron entry is
-    a separate collector-scheduling change and is not part of authentication
-    deployment approval.
+    The timer validates the cached token every 30 minutes. At the configured
+    23-hour maximum age it performs one fail-closed browser/TOTP login. It never
+    resubmits credentials after an ambiguous browser outcome. The live downloader
+    observes the token-cache modification time and creates a new API client in
+    each worker without stopping the process.
 
 ## Monitoring and recovery
 
@@ -258,12 +259,10 @@ entrypoint, and leave the last protected token cache untouched. Do not delete ra
 publications. An explicit Shoonya logout is a separate security action only when
 a token is suspected compromised.
 
-## Remaining approval gates and open inputs
+## Remaining operational inputs
 
 - Approved Chrome/chromedriver source and exact matched versions.
 - Oracle static-IP registration confirmation.
 - Registered redirect-host confirmation.
 - Supervised verification of the current login DOM and selectors.
 - Alert destination and retention policy.
-- Separate approval for one live login.
-- Separate approval for systemd timer or cron changes.
