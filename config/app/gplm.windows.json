@@ -21,7 +21,6 @@
     "closing_phase_start": "15:20",
     "daily_extra_roots": [
       "H:\\Guru\\Learning\\StockGLPM\\data\\derived\\yahoo-adjusted\\NSE",
-      "H:\\Guru\\Learning\\StockGLPM\\data\\derived\\nse-mcp-adjusted\\NSE",
       "H:\\Guru\\Learning\\StockGLPM\\data\\derived\\nse-mcp-recent\\NSE"
     ]
   },
