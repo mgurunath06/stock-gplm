@@ -37,7 +37,7 @@ from .db import utc_now
 
 CONTRACT = "stock-gplm.strategy-def.v1"
 ORIGINS = ("CATALOGUE_ORIGINAL", "CATALOGUE_DERIVED", "ML_DISCOVERED", "AI_GENERATED", "USER_DEFINED")
-TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "1d", "1w")
+TIMEFRAMES = ("1m", "5m", "15m", "30m", "60m", "1d", "1w", "1mo")  # 1mo: owner 2026-11-21 (monthly scans)
 INTRADAY = ("1m", "5m", "15m", "30m", "60m")
 BLOCK_STATUSES = ("BLOCKED_MISSING_DATA", "BLOCKED_IMPLEMENTATION", "BLOCKED_METHOD", "DEFERRED")
 MAX_GRID = 64

@@ -178,7 +178,7 @@ class Cycle:
             shutil.copy2(EXITS, exits)
             env = {"GPLM_EXITS_FILE": str(exits)}
         self.log(f"start: universe {len(stocks)}, intraday-complete {len(intra)}, learn exits={learn}")
-        dirs = [self.batch("daily", stocks, self.start, "1d,1w", learn, env=env)]
+        dirs = [self.batch("daily", stocks, self.start, "1d,1w,1mo", learn, env=env)]
         if intra:
             dirs.append(self.batch("intraday", intra, max(self.start, INTRADAY_FROM), "5m,15m,30m,60m", learn, env=env))
         if learn:

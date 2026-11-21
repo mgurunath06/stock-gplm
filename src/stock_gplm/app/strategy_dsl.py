@@ -429,6 +429,42 @@ def ema(x: np.ndarray, n: int) -> np.ndarray:
     return _seeded(x, n, 2.0 / (n + 1))
 
 
+ALL_MIN_BARS = 20  # *_all smoothers report once this many inputs (or n, if smaller) are defined
+
+
+def _seeded_all(x: np.ndarray, n: int, alpha: float) -> np.ndarray:
+    """Owner 2026-11-21 ("use available history", Chartink-like): smoother seeded at the first defined input and
+    run over everything the stock has, so long periods (monthly EMA 200, RSI 300) work on shorter histories.
+    Reports from the min(n, ALL_MIN_BARS)-th defined input on."""
+    x = np.asarray(x, dtype=float)
+    out = np.full(len(x), np.nan)
+    ok = np.flatnonzero(np.isfinite(x))
+    need = min(n, ALL_MIN_BARS)
+    if len(ok) < need:
+        return out
+    first = int(ok[0])
+    vals = pd.Series(x[first:]).ewm(alpha=alpha, adjust=False, ignore_na=True).mean().to_numpy()
+    vals[np.isnan(x[first:])] = np.nan
+    out[first:] = vals
+    out[: int(ok[need - 1])] = np.nan
+    return out
+
+
+def ema_all(x: np.ndarray, n: int) -> np.ndarray:
+    return _seeded_all(x, n, 2.0 / (n + 1))
+
+
+def rsi_all(x: np.ndarray, n: int) -> np.ndarray:
+    d = np.diff(np.asarray(x, dtype=float), prepend=np.nan)
+    up, dn = np.where(d > 0, d, 0.0), np.where(d < 0, -d, 0.0)
+    up[np.isnan(d)], dn[np.isnan(d)] = np.nan, np.nan
+    ru, rd = _seeded_all(up, n, 1.0 / n), _seeded_all(dn, n, 1.0 / n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(rd == 0, np.where(ru == 0, 50.0, 100.0), 100 - 100 / (1 + ru / rd))
+    out[np.isnan(ru) | np.isnan(rd)] = np.nan
+    return out
+
+
 def rma(x: np.ndarray, n: int) -> np.ndarray:
     return _seeded(x, n, 1.0 / n)
 
@@ -1005,6 +1041,10 @@ def _valuewhen(c: Context, k: Any, x: Any) -> np.ndarray:
 
 # classic indicators
 fn("rsi", 2, 2, "Wilder RSI rsi(x, n)")(lambda c, x, n: _rsi_safe(_arr(c, x), _n(n)))
+fn("rsi_all", 2, 2, "Wilder RSI over all available history (long periods on short histories, Chartink-like)")(
+    lambda c, x, n: rsi_all(_arr(c, x), _n(n)))
+fn("ema_all", 2, 2, "EMA over all available history (long periods on short histories, Chartink-like)")(
+    lambda c, x, n: ema_all(_arr(c, x), _n(n)))
 fn("tr", 0, 0, "true range")(lambda c: true_range(c.high, c.low, c.close))
 fn("atr", 1, 1, "Wilder average true range atr(n)")(lambda c, n: rma(true_range(c.high, c.low, c.close), _n(n)))
 fn("adx", 1, 1, "Wilder ADX adx(n)")(lambda c, n: _dmi(c, _n(n))[0])

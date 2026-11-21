@@ -135,7 +135,19 @@ def oldest_existing(sym: str, shoonya_root: Path, nse_out: Path) -> str | None:
     return min(days) if days else None
 
 
-HISTORY_FROM = "2010-01-01"  # owner 2026-11-21: use daily history from 2010, not earlier
+# owner 2026-11-21: trades and judgement from 2010; older candles are kept only to warm up long indicators
+# (monthly EMA 200 / RSI 300). Rows before a stock's listing (a > 90-day gap at the start) are dropped.
+HISTORY_FROM = "2000-01-01"
+LISTING_GAP_DAYS = 90
+
+
+def drop_prelisting(rows: list[tuple]) -> list[tuple]:
+    """Keep rows after the last gap of more than LISTING_GAP_DAYS calendar days (junk before listing, e.g. TCS 2002-03)."""
+    cut = 0
+    for i in range(1, len(rows)):
+        if (date.fromisoformat(rows[i][0]) - date.fromisoformat(rows[i - 1][0])).days > LISTING_GAP_DAYS:
+            cut = i
+    return rows[cut:]
 
 
 def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: Path,
@@ -152,7 +164,7 @@ def build(stocks: list[str], raw: Path, out: Path, shoonya_root: Path, nse_out: 
         rows, rej = parse(json.loads(files[-1].read_text(encoding="utf-8")))
         before = oldest_existing(s, shoonya_root, nse_out)
         keep, note = link(rows, nh.shoonya_closes(shoonya_root / f"{s}-EQ"), before or "")
-        keep = [x for x in keep if x[0] >= start]
+        keep = drop_prelisting([x for x in keep if x[0] >= start])
         rtxt = f"; rejected {rej}" if rej else ""
         report[s] = (f"{note}; {len(keep)} older days ({keep[0][0]}..{keep[-1][0]}){rtxt}" if keep
                      else f"{note}{rtxt}")
