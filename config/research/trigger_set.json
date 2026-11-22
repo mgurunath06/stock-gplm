@@ -1,0 +1,40 @@
+{
+  "_doc": "Owner 2026-11-22: find, per stock x TF, which triggers catch the moves (move_triggers.py). Triggers are EVENTS (first candle the condition becomes true). Generated from the sections below + 'extra' + the strategy library. Exits are structure exits (stop below the last swing low, target an EMA level or N x risk), held until stop/target (overnight on intraday). Labels (recency-weighted, owner's most important rule): HC = high confidence, HCLT = high confidence but low trades, MC = medium, LC = low/avoid.",
+  "ema_periods": [5, 9, 13, 20, 44, 50, 100, 200],
+  "generate": {
+    "ema_cross": true,
+    "price_cross_ema": true,
+    "macd": true,
+    "rsi": {"periods": [3, 14], "levels": [30, 50, 60]},
+    "stoch": {"levels": [20, 50]},
+    "breakout": [10, 20, 55],
+    "volume_spike": [1.5, 2, 3],
+    "flips": true,
+    "candles": true,
+    "vwap": true
+  },
+  "extra": {},
+  "include_library": true,
+  "exits": {
+    "MinorSwing-EMA50": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2}, "target_ema": 50, "min_rr": 1.0, "overnight": true},
+    "MinorSwing-EMA100": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2}, "target_ema": 100, "min_rr": 1.0, "overnight": true},
+    "MinorSwing-EMA200": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2}, "target_ema": 200, "min_rr": 1.0, "overnight": true},
+    "MinorSwing-2R": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2, "rr": 2.0}, "overnight": true},
+    "MinorSwing-3R": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2, "rr": 3.0}, "overnight": true},
+    "MajorSwing-EMA50": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 150, "strength": 5}, "target_ema": 50, "min_rr": 1.0, "overnight": true},
+    "MajorSwing-EMA100": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 150, "strength": 5}, "target_ema": 100, "min_rr": 1.0, "overnight": true},
+    "MajorSwing-EMA200": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 150, "strength": 5}, "target_ema": 200, "min_rr": 1.0, "overnight": true},
+    "MajorSwing-2R": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 150, "strength": 5, "rr": 2.0}, "overnight": true},
+    "MajorSwing-3R": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 150, "strength": 5, "rr": 3.0}, "overnight": true}
+  },
+  "labels": {
+    "_doc": "All need recency-weighted average > 0 and total > 0. HC: >= min_trades and weighted win >= min_win_w. HCLT: min..max trades with at most max_losses losses (0 below small_below trades). MC: weighted win >= min_win_w. Else LC.",
+    "HC": {"min_trades": 12, "min_win_w": 0.6},
+    "HCLT": {"min_trades": 3, "max_trades": 11, "small_below": 5, "max_losses": 1},
+    "MC": {"min_win_w": 0.4}
+  },
+  "recency": {"decay_sessions": 100, "power": 2},
+  "catch_window": 10,
+  "filter": {"_doc": "per trigger x exit: the one condition (indicator level or change) that best separates its winners from losers on closed trades; kept only if it improves the label/score", "min_keep": 3, "top_combos": 250},
+  "replay": {"_doc": "causal, no split date: every refit_sessions of the last months, stand at that moment (closed trades only, recency-weighted), take signals of the top HC/HCLT strategies until the next refit, one position at a time", "months": 3, "refit_sessions": 10, "top": 5}
+}

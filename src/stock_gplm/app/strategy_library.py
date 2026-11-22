@@ -237,10 +237,18 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
             raise StrategyConfigError(f"exit.{k} must be null or in (0, 0.5]")
     if not isinstance(ex.get("overnight", False), bool):
         raise StrategyConfigError("exit.overnight must be true or false")
+    tema = ex.get("target_ema")
+    if tema is not None and not (isinstance(tema, int) and 2 <= tema <= 500):
+        raise StrategyConfigError("exit.target_ema must be null or an integer 2..500")
+    mrr = ex.get("min_rr")
+    if mrr is not None and not (isinstance(mrr, (int, float)) and 0 <= mrr <= 20):
+        raise StrategyConfigError("exit.min_rr must be null or 0..20")
     sw = ex.get("swing_stop")
     if sw is not None:
-        if not isinstance(sw, dict) or set(sw) - {"buffer", "rr", "lookback", "max_swing_pct"}:
-            raise StrategyConfigError("exit.swing_stop must be {buffer, rr, lookback, max_swing_pct}")
+        if not isinstance(sw, dict) or set(sw) - {"buffer", "rr", "lookback", "max_swing_pct", "strength"}:
+            raise StrategyConfigError("exit.swing_stop must be {buffer, rr, lookback, max_swing_pct, strength}")
+        if not 1 <= int(sw.get("strength", 2)) <= 20:
+            raise StrategyConfigError("exit.swing_stop.strength must be 1..20")
         if not 0 <= float(sw.get("buffer", 0.002)) <= 0.05 or not 0.2 <= float(sw.get("rr", 2.0)) <= 10 \
                 or not 3 <= int(sw.get("lookback", 20)) <= 200:
             raise StrategyConfigError("exit.swing_stop: buffer 0..0.05, rr 0.2..10, lookback 3..200")

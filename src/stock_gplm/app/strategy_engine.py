@@ -65,16 +65,24 @@ class Exit:
     stop_pct: float | None = None
     target_pct: float | None = None
     overnight: bool = False
+    # owner 2026-11-22 structure exits: swing pivot strength (2 = minor, the default rule; 5 = major swing),
+    # target at EMA(n) of the signal candle (no trade when price is already beyond it), minimum reward/risk.
+    swing_strength: int = 2
+    target_ema: int | None = None
+    min_rr: float | None = None
 
     @staticmethod
     def of(d: Mapping[str, Any]) -> "Exit":
         sw = d.get("swing_stop") or {}
         mx = sw.get("max_swing_pct") if sw else None
         sp, tp = d.get("stop_pct"), d.get("target_pct")
+        te_, mr = d.get("target_ema"), d.get("min_rr")
         return Exit(int(d["max_hold_bars"]), d.get("stop_atr"), d.get("target_atr"), d.get("trail_atr"),
                     float(sw.get("buffer", 0.002)) if sw else None, float(sw.get("rr", 2.0)),
                     int(sw.get("lookback", 20)), float(mx) if mx is not None else None,
-                    float(sp) if sp else None, float(tp) if tp else None, bool(d.get("overnight", False)))
+                    float(sp) if sp else None, float(tp) if tp else None, bool(d.get("overnight", False)),
+                    int(sw.get("strength", 2)) if sw else 2, int(te_) if te_ else None,
+                    float(mr) if mr is not None else None)
 
     def key(self) -> str:
         k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
@@ -86,6 +94,12 @@ class Exit:
             k += f"|pct:{self.stop_pct or 0:g}:{self.target_pct or 0:g}"
         if self.overnight:
             k += "|overnight"
+        if self.swing_strength != 2:
+            k += f"|strength{self.swing_strength}"
+        if self.target_ema:
+            k += f"|tema{self.target_ema}"
+        if self.min_rr is not None:
+            k += f"|minrr{self.min_rr:g}"
         return k
 
     def text(self, when: str | None, short: bool) -> str:
@@ -110,6 +124,12 @@ class Exit:
             parts.append(f"target {self.target_pct:.1%} {other} entry")
         if self.overnight:
             parts.append("held overnight (no 15:15 square-off)")
+        if self.swing_buffer is not None and self.swing_strength != 2:
+            parts.append(f"swing = lowest of {self.swing_strength} candles each side (major swing)")
+        if self.target_ema:
+            parts.append(f"target = EMA {self.target_ema} at the signal candle")
+        if self.min_rr is not None:
+            parts.append(f"no trade when reward/risk < {self.min_rr:g}")
         if when:
             parts.append(f"exit at next open when: {when}")
         return "; ".join(parts)
@@ -183,6 +203,38 @@ def swing_level(low: np.ndarray, high: np.ndarray, t: int, entry: float, short: 
     return v if (v > entry if short else v < entry) else None
 
 
+def swing_level_k(low: np.ndarray, high: np.ndarray, t: int, entry: float, short: bool, lookback: int, k: int
+                  ) -> float | None:
+    """Last swing low (long) / high (short) with `k` candles on each side, confirmed by candle t, within
+    `lookback` candles, on the protective side of entry. No fallback (a major swing must exist)."""
+    for i in range(t - k, max(k, t - lookback) - 1, -1):
+        if not short:
+            v = low[i]
+            if v < entry and v <= low[i - k:i + k + 1].min():
+                return float(v)
+        else:
+            v = high[i]
+            if v > entry and v >= high[i - k:i + k + 1].max():
+                return float(v)
+    return None
+
+
+_EMA_CACHE: dict[tuple[int, int], tuple[Any, np.ndarray]] = {}
+
+
+def _ema_of(m: LaneMarket, n: int) -> np.ndarray:
+    """EMA(n) of close - the same function the strategy DSL uses - cached per market lane."""
+    hit = _EMA_CACHE.get((id(m), n))
+    if hit is not None and hit[0] is m:
+        return hit[1]
+    from .strategy_dsl import ema
+    arr = np.asarray(ema(np.asarray(m.close, dtype=float), int(n)), dtype=float)
+    if len(_EMA_CACHE) > 64:
+        _EMA_CACHE.clear()
+    _EMA_CACHE[(id(m), n)] = (m, arr)
+    return arr
+
+
 def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndarray | None
           ) -> tuple[int, float, str] | None:
     entry = m.open[t + 1]
@@ -193,7 +245,8 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     stop = entry - sgn * p.stop_atr * atr if p.stop_atr else (math.inf if short else -math.inf)
     target = entry + sgn * p.target_atr * atr if p.target_atr else (-math.inf if short else math.inf)
     if p.swing_buffer is not None:
-        lvl = swing_level(m.low, m.high, t, entry, short, p.swing_lookback)
+        lvl = (swing_level(m.low, m.high, t, entry, short, p.swing_lookback) if p.swing_strength == 2 else
+               swing_level_k(m.low, m.high, t, entry, short, p.swing_lookback, p.swing_strength))
         if lvl is not None and p.swing_max is not None and abs(entry - lvl) / entry > p.swing_max:
             c = float(m.high[t]) if short else float(m.low[t])  # signal candle low / high
             lvl = c if (c > entry if short else c < entry) else None
@@ -205,6 +258,14 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         stop = entry * (1 + p.stop_pct) if short else entry * (1 - p.stop_pct)
     if p.target_pct:
         target = entry * (1 - p.target_pct) if short else entry * (1 + p.target_pct)
+    if p.target_ema:
+        lv = float(_ema_of(m, p.target_ema)[t])
+        if not math.isfinite(lv) or (lv >= entry if short else lv <= entry):
+            return None  # price already beyond the EMA target: no room, no trade
+        target = lv
+    if p.min_rr is not None and math.isfinite(stop) and math.isfinite(target) and stop != entry:
+        if abs(target - entry) / abs(entry - stop) < p.min_rr:
+            return None
     sess = m.intraday and not p.overnight  # session square-off applies
     time_bar = t + 1 + p.max_hold
     if sess:
@@ -232,7 +293,7 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     if not hold_open and m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
         return None
     simple = not (p.stop_atr or p.target_atr or p.trail_atr or p.swing_buffer is not None or p.stop_pct
-                  or p.target_pct) and xmask is None
+                  or p.target_pct or p.target_ema) and xmask is None
     if not simple:
         water = entry
         o_, h_, l_ = m.open, m.high, m.low
