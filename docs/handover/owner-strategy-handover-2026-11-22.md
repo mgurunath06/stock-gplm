@@ -132,3 +132,21 @@ API phase paused; NSE filings download (resumable); session-7 TO DO (fundamental
 152a700 recency + replay); d0ebfeb pattern_check + engine pct/overnight; 6a3558f stock_tf + RELIANCE library entry;
 51b06a9 trigger_check; 270f02b move_triggers + engine structure exits; c49fefc short filters / same-move / guard;
 634f1d9 guard off; 58fd504 + f595499 HCLT = any trend (filters allowed); this handover + owner_trades.csv.
+
+## 8. Session 10 (2026-11-22 evening) - owner strategy encoded, chart marking, ML judgement
+
+* `app/owner_strategy.py` + `config/research/owner_strategy.json`: owner strategy with 16 exit versions; engine exits
+  `pullback_stop` (lowest / last_swing k), `ema_regime` (live/fixed EMA200 target, margin, breach close/next_open/touch,
+  on_target trail, swing_trail, breakeven_r, stop_close, after_target prev_close[_far]_or_touch), simulate(fills=) for
+  limit entries. Report compares the owner's WHOLE trade list per version (recent column).
+* `app/owner_chart.py`: chart.html - owner clicks candle -> Buy/Short/Skip, SL candle, square off + reason chips,
+  comments autosave, undo/redo, navigation (prev/next cross). Export -> config/research/owner_trades-<SYM>-<tf>.csv
+  (git-ignored, on disk only; RELIANCE-15m has 66 marks Jan-Nov 2026). Chart marks replace old rows of the same day.
+* Owner rules given: don't enter a cross FAR from EMA13 (wait for EMA13 touch); after EMA200 hit exit on close below
+  prev close (far from EMA13) or EMA20 touch. Examples far: 21 Aug 15:15, 20 Aug 12:45, 17 Aug 13:00; fine: 23 Sep 11:00
+  -> 1.11 ATR. BUT 33 of the owner's 77 entries are beyond that -> fixed rules match only 23/77 vs V2 49/77.
+  Owner: "I want this judgement in ML".
+* RELIANCE all TFs (2026; 1d 2010+): 5m/15m lose; 60m shorts 71% win (21 trades); 1d longs win with trailing (V7 +55%).
+* NEXT: `app/owner_ml.py` built (commit dd33097), NOT yet run: YOU model (would owner take this cross), WIN model,
+  walk-forward by month, exit model per candle, explanations. Command:
+  `& $py -m stock_gplm.app.owner_ml --symbol RELIANCE` -> owner-strategy-15m-RELIANCE/ML_REPORT.md
