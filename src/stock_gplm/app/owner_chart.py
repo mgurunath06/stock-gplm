@@ -40,6 +40,9 @@ def build(o: OwnerStrategy) -> dict:
     for p in (13, 20, 200):
         e = _ema_of(m, p)
         emas[str(p)] = [[T[i], r2(e[i])] for i in range(a, n) if np.isfinite(e[i])]
+    from .owner_ml import _rsi  # owner 2026-11-22: show RSI(3) (own panel; follows replay like the EMAs)
+    rsi = _rsi(np.asarray(m.close, dtype=float), 3)
+    emas["rsi3"] = [[T[i], round(float(rsi[i]), 1)] for i in range(max(a, 3), n) if np.isfinite(rsi[i])]
     signals = []  # EMA crosses only - the program's trades are not shown (owner marks without seeing them)
     for side, arr in o.sig.items():
         signals += [[T[int(t)], side, o.kind[side].get(int(t), "")] for t in arr]
@@ -107,7 +110,7 @@ PAGE = r"""<!doctype html>
  <span class="leg"><span><span class="dot" style="background:#f5c542"></span>EMA13 x EMA20 / EMA200 cross</span>
  <span><span class="dot" style="background:var(--me)"></span>your trades</span>
  <span><span class="dot" style="background:var(--file)"></span>your trades file</span>
- <span>EMA 13 / 20 / 200 = blue / orange / white</span></span>
+ <span>EMA 13 / 20 / 200 = blue / orange / white &middot; RSI(3) purple, bottom panel (30 / 70)</span></span>
  <label class="muted"><input type="checkbox" id="showSig" checked onchange="draw()"> show crosses</label>
 </header>
 <nav id="nav">
@@ -184,10 +187,22 @@ const chart = LightweightCharts.createChart(chartEl, {
 const cs = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
   wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
 cs.setData(D.candles.map(c => ({ time: c[0], open: c[1], high: c[2], low: c[3], close: c[4] })));
-const EC = { '13': '#2962ff', '20': '#ff9800', '200': '#e0e0e0' };
+const EC = { '13': '#2962ff', '20': '#ff9800', '200': '#e0e0e0', 'rsi3': '#ce93d8' };
 const ES = {};
-for (const p in D.emas) { ES[p] = chart.addLineSeries({ color: EC[p], lineWidth: p === '200' ? 2 : 1, priceLineVisible: false,
-  lastValueVisible: false, crosshairMarkerVisible: false }); ES[p].setData(D.emas[p].map(x => ({ time: x[0], value: x[1] }))); }
+// price in the top 75%, RSI(3) in its own panel at the bottom (own scale 0..100, 30 / 70 lines)
+cs.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.27 } });
+for (const p in D.emas) {
+  const R = p === 'rsi3';
+  ES[p] = chart.addLineSeries({ color: EC[p], lineWidth: p === '200' ? 2 : 1, priceLineVisible: false,
+    lastValueVisible: R, crosshairMarkerVisible: R, priceScaleId: R ? 'rsi' : 'right', title: R ? 'RSI(3)' : '',
+    autoscaleInfoProvider: R ? () => ({ priceRange: { minValue: 0, maxValue: 100 } }) : undefined });
+  ES[p].setData(D.emas[p].map(x => ({ time: x[0], value: x[1] })));
+  if (R) {
+    chart.priceScale('rsi').applyOptions({ scaleMargins: { top: 0.77, bottom: 0.02 } });
+    ES[p].createPriceLine({ price: 70, color: '#787b86', lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: '' });
+    ES[p].createPriceLine({ price: 30, color: '#787b86', lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: '' });
+  }
+}
 const emaAt = {}; for (const p in D.emas) { emaAt[p] = {}; D.emas[p].forEach(x => emaAt[p][x[0]] = x[1]); }
 const byTime = {}, idx = {}; D.candles.forEach((c, i) => { byTime[c[0]] = c; idx[c[0]] = i; });
 const e200 = {}, e20 = {}; D.emas['200'].forEach(x => e200[x[0]] = x[1]); D.emas['20'].forEach(x => e20[x[0]] = x[1]);
