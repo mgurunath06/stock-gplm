@@ -70,7 +70,10 @@ PAGE = r"""<!doctype html>
  header b { font-size:15px; }
  .leg span { margin-right:12px; white-space:nowrap; color:var(--muted); }
  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:middle; }
- #wrap { display:flex; height:calc(100vh - 46px); }
+ body { display:flex; flex-direction:column; height:100vh; }
+ #nav { display:flex; gap:4px; align-items:center; flex-wrap:wrap; padding:4px 10px; border-bottom:1px solid var(--line); }
+ #nav input[type=date] { background:#131722; color:var(--text); border:1px solid #3a3f4b; border-radius:6px; padding:5px; font:inherit; color-scheme:dark; }
+ #wrap { display:flex; flex:1; min-height:0; }
  #chart { flex:1; min-width:0; position:relative; }
  aside { width:360px; background:var(--panel); border-left:1px solid var(--line); padding:12px; overflow:auto; }
  button { background:#2a2e39; color:var(--text); border:1px solid #3a3f4b; border-radius:6px; padding:7px 11px;
@@ -99,7 +102,7 @@ PAGE = r"""<!doctype html>
  .lnk { color:#90caf9; cursor:pointer; text-decoration:underline; }
  #toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#363a45; padding:8px 14px;
           border-radius:6px; display:none; z-index:20; }
- @media (max-width: 800px) { #wrap { flex-direction:column; height:auto; } #chart { height:70vh; } aside { width:auto; } }
+ @media (max-width: 800px) { body { height:auto; } #wrap { flex-direction:column; height:auto; } #chart { height:70vh; } aside { width:auto; } }
 </style></head><body>
 <header><b>__TITLE__</b>
  <span class="leg"><span><span class="dot" style="background:#f5c542"></span>EMA13 x EMA20 / EMA200 cross</span>
@@ -108,6 +111,19 @@ PAGE = r"""<!doctype html>
  <span>EMA 13 / 20 / 200 = blue / orange / white</span></span>
  <label class="muted"><input type="checkbox" id="showSig" checked onchange="draw()"> show crosses</label>
 </header>
+<nav id="nav">
+ <button onclick="moveTo(0)" title="Home">&#9198; Start</button>
+ <button class="navB" data-d="&#9664;&#9664; " data-e="" onclick="step(-BIG)" title="PageUp"></button>
+ <button class="navS" data-d="&#9664; " data-e="" onclick="step(-SMALL)" title="Shift + Left"></button>
+ <button class="bm" onclick="cross(-1)" title="Left arrow">&#9664; Prev cross</button>
+ <input type="date" onchange="goDate(this.value)" title="go to date">
+ <b id="where" style="min-width:130px;text-align:center"></b>
+ <button class="bm" onclick="cross(1)" title="Right arrow">Next cross &#9654;</button>
+ <button class="navS" data-d="" data-e=" &#9654;" onclick="step(SMALL)" title="Shift + Right"></button>
+ <button class="navB" data-d="" data-e=" &#9654;&#9654;" onclick="step(BIG)" title="PageDown"></button>
+ <button onclick="moveTo(N - 1)" title="End">Latest &#9197;</button>
+ <span class="muted" style="font-size:12px">Keys: &larr; &rarr; cross &middot; Shift+&larr;&rarr; day &middot; PgUp/PgDn week &middot; Home/End</span>
+</nav>
 <div id="wrap"><div id="chart"><div id="pop"></div></div>
 <aside>
  <div style="font-size:15px"><b>Click any candle</b> - a menu opens there.</div>
@@ -302,9 +318,54 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
   else if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
   else if (k === 'escape') closePop();
+  if (e.target.tagName === 'INPUT') return;  // arrows move the cursor while you type
+  const nav = { arrowleft: () => cross(-1), arrowright: () => cross(1), pageup: () => step(-BIG), pagedown: () => step(BIG),
+    home: () => moveTo(0), end: () => moveTo(D.candles.length - 1) };
+  if (e.shiftKey && k === 'arrowleft') { e.preventDefault(); step(-SMALL); }
+  else if (e.shiftKey && k === 'arrowright') { e.preventDefault(); step(SMALL); }
+  else if (nav[k]) { e.preventDefault(); nav[k](); }
 });
+
+// ---------------------------------------------------------------- navigation
+const N = D.candles.length, ts = chart.timeScale();
+const dayStart = [];  // index of each session's first candle
+D.candles.forEach((c, i) => { if (!i || fmt(c[0]).slice(0, 10) !== fmt(D.candles[i - 1][0]).slice(0, 10)) dayStart.push(i); });
+const DAILY = D.tf === '1d';
+const SMALL = DAILY ? 21 : 1, BIG = DAILY ? 250 : 5;  // intraday: 1 day / 1 week (sessions); daily: 1 month / 1 year (candles)
+document.querySelectorAll('.navS').forEach(b => b.textContent = b.dataset.d + (DAILY ? 'Month' : 'Day') + b.dataset.e);
+document.querySelectorAll('.navB').forEach(b => b.textContent = b.dataset.d + (DAILY ? 'Year' : 'Week') + b.dataset.e);
+const crossIdx = [...new Set(D.signals.map(s => idx[s[0]]))].filter(i => i != null).sort((a, b) => a - b);
+function centre() { const r = ts.getVisibleLogicalRange(); return r ? Math.round((r.from + r.to) / 2) : N - 1; }
+function width() { const r = ts.getVisibleLogicalRange(); return r ? Math.max(40, r.to - r.from) : 200; }
+function moveTo(i, mark) {
+  i = Math.max(0, Math.min(N - 1, i)); const w = width();
+  ts.setVisibleLogicalRange({ from: i - w / 2, to: i + w / 2 });
+  document.getElementById('where').textContent = fmt(D.candles[i][0]);
+  if (mark) { try { chart.setCrosshairPosition(D.candles[i][4], D.candles[i][0], cs); } catch (e) {} }
+}
+function step(n) {  // n sessions (intraday) or n candles (daily)
+  const c = centre();
+  if (DAILY) return moveTo(c + n);
+  let d = 0; while (d + 1 < dayStart.length && dayStart[d + 1] <= c) d++;
+  const off = c - dayStart[d], d2 = Math.max(0, Math.min(dayStart.length - 1, d + n));
+  const end = d2 + 1 < dayStart.length ? dayStart[d2 + 1] - 1 : N - 1;
+  moveTo(Math.min(dayStart[d2] + off, end));  // same time of day, n sessions away
+}
+function cross(dir) {
+  const c = centre();
+  const i = dir > 0 ? crossIdx.find(x => x > c + 1) : [...crossIdx].reverse().find(x => x < c - 1);
+  if (i == null) return toast(dir > 0 ? 'No later cross' : 'No earlier cross');
+  moveTo(i, true);
+}
+function goDate(v) {
+  if (!v) return;
+  const t = Date.parse(v + 'T00:00:00Z') / 1000;
+  const i = D.candles.findIndex(c => c[0] >= t);
+  moveTo(i < 0 ? N - 1 : i, true);
+}
+ts.subscribeVisibleLogicalRangeChange(() => { const c = centre(); if (D.candles[c]) document.getElementById('where').textContent = fmt(D.candles[c][0]); });
 draw();
-const n = D.candles.length; chart.timeScale().setVisibleLogicalRange({ from: n - 300, to: n + 5 });
+ts.setVisibleLogicalRange({ from: N - (DAILY ? 250 : 150), to: N + 5 });
 </script></body></html>
 """
 
