@@ -83,7 +83,7 @@ class Discoverer(Tuner):
         self.log(f"facts: {len(probes)} probe sets (every liquid bar, hold {self.d['probes'][self.tf]} bars, {dirs})")
         res = self.evaluate(probes)
         names = te.feature_names(self.intraday)
-        exprs = {**te.FEATURES, **(te.INTRADAY_FEATURES if self.intraday else {})}
+        exprs = te.feature_exprs(self.intraday)
         L = [f"MARKET FACTS {self.tf} - {len(self.stocks)} liquid NSE stocks, tuning window {self.t['tune_start']} .. "
              f"{self.t['confirm_start']} (recent trades weigh more). 'Probe' = enter at EVERY liquid bar, exit after "
              "H bars; returns are NET of costs. Features are measured at the signal bar; use their DSL text as-is.",
@@ -99,6 +99,7 @@ class Discoverer(Tuner):
             net, feat = raw["net"][m].astype(float), raw["feat"][m].astype(float)
             w = te.weights(day[m], self.confirm_day - 1, float(self.t["decay"]))
             L += self._probe_facts(v.vid.split("~")[1], net, feat, w, names)
+        L = self.used_dsl_line(L, names, exprs)
         txt = "\n".join(L)
         self.state["facts"] = txt
         self.save()
@@ -200,11 +201,19 @@ class Discoverer(Tuner):
         hi = "max" if q == len(qs) else _q(qs[q])
         return f"[{lo}..{hi}]"
 
+    @staticmethod
+    def used_dsl_line(L: list[str], names: list[str], exprs: Mapping[str, str]) -> list[str]:
+        """Replace the 'Feature DSL:' line by the formulas of features the facts actually mention."""
+        body = "\n".join(x for x in L if not x.startswith("Feature DSL:"))
+        used = [k for k in names if re.search(rf"\b{k}\b", body)]
+        return [("Feature DSL: " + "; ".join(f"{k} = {exprs[k]}" for k in used)) if x.startswith("Feature DSL:")
+                else x for x in L]
+
     def expand(self, text: str) -> str:
         """The LLM often writes fact-sheet names (atr_pct, dist_ema50) instead of DSL: substitute the expression
         (only names that are not already DSL series / functions, e.g. gap and minute_of_session stay)."""
         from .strategy_dsl import FUNCTIONS, SERIES
-        exprs = {**te.FEATURES, **(te.INTRADAY_FEATURES if self.intraday else {})}
+        exprs = te.feature_exprs(self.intraday)
         for name in sorted(exprs, key=len, reverse=True):
             if name in SERIES or name in FUNCTIONS:
                 continue

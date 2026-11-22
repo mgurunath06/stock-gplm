@@ -146,7 +146,7 @@ class Tuner:
         w = te.weights(day[m], self.confirm_day - 1, float(self.t["decay"]))
         win = net > 0
         names = te.feature_names(self.tf != "1d")
-        exprs = {**te.FEATURES, **te.INTRADAY_FEATURES}
+        exprs = {**te.FEATURES, **te.INTRADAY_FEATURES, **te.DAILY_FEATURES}
         rows, singles = [], []
         for j, name in enumerate(names):
             x = feat[:, j].astype(float)

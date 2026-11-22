@@ -64,13 +64,42 @@ INTRADAY_FEATURES: dict[str, str] = {
     "day_rsi14": 'htf(rsi(close, 14), "1d")',
     "session_move": "close / session_open - 1",
 }
+
+
+DAILY_FEATURES: dict[str, str] = {}  # 1d and above only (e.g. RSI(300)); from the config file
+
+
+def _load_features() -> tuple[dict[str, str], dict[str, str], dict[str, str]] | None:
+    """config/research/move_features.json (owner 2026-11-22: configurable feature list); built-ins above if absent."""
+    import json
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[3] / "config" / "research" / "move_features.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    off = set(d.get("disabled") or [])
+
+    def flat(sec: Mapping[str, Any] | None) -> dict[str, str]:
+        return {k: v for grp in (sec or {}).values() for k, v in grp.items() if k not in off}
+    return flat(d.get("common")), flat(d.get("intraday")), flat(d.get("daily"))
+
+
+_CFG_FEATURES = _load_features()
+if _CFG_FEATURES and _CFG_FEATURES[0]:
+    FEATURES, INTRADAY_FEATURES, DAILY_FEATURES = _CFG_FEATURES
+
+
+def feature_exprs(intraday: bool) -> dict[str, str]:
+    """All feature expressions for a timeframe: common + intraday-only or daily-and-above-only."""
+    return {**FEATURES, **(INTRADAY_FEATURES if intraday else DAILY_FEATURES)}
 EXIT_CODES = {"STOP": 0, "STOP_GAP": 0, "TRAIL": 0, "TARGET": 1, "TARGET_GAP": 1, "TIME": 2, "SESSION_CLOSE": 3,
               "SIGNAL_EXIT": 4, "OPEN_END": 5}
 EXIT_NAMES = {0: "stop", 1: "target", 2: "time", 3: "15:15 square-off", 4: "exit rule", 5: "still open", 9: "other"}
 
 
 def feature_names(intraday: bool) -> list[str]:
-    return list(FEATURES) + (list(INTRADAY_FEATURES) if intraday else [])
+    return list(feature_exprs(intraday))
 
 
 @dataclass
@@ -237,7 +266,7 @@ def _evaluate_stock(si: int, lanes: Mapping[str, Any], variants: Sequence[Mappin
             if v.get("features"):
                 if feats is None:
                     feats = {}
-                    exprs = {**FEATURES, **(INTRADAY_FEATURES if m.intraday else {})}
+                    exprs = feature_exprs(m.intraday)
                     for name, ex in exprs.items():
                         try:
                             feats[name] = np.asarray(dsl.evaluate(dsl.parse(ex), ctx), dtype=float)

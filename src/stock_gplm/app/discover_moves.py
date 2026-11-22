@@ -66,7 +66,7 @@ class MoveDiscoverer(Discoverer):
         self.log(f"moves: labelling every liquid bar for {len(probes)} move definitions {self.moves} {dirs}")
         res = self.evaluate(probes)
         names = te.feature_names(self.intraday)
-        exprs = {**te.FEATURES, **(te.INTRADAY_FEATURES if self.intraday else {})}
+        exprs = te.feature_exprs(self.intraday)
         L = [f"MOVE FACTS {self.tf} - {len(self.stocks)} liquid NSE stocks, tuning window {self.t['tune_start']} .. "
              f"{self.t['confirm_start']} (recent bars weigh more). A MOVE = price reaches +T x ATR(14) before -S x "
              "ATR(14) within H bars (short: mirrored). Every liquid bar is labelled hit / miss; 'hit rate' = how often a "
@@ -105,6 +105,7 @@ class MoveDiscoverer(Discoverer):
         (self.root / "stock_rules.json").write_text(json.dumps(rules_json, indent=1), encoding="utf-8")
         (self.root / "PER_STOCK_RULES.md").write_text("\n".join(per_stock_md) + "\n", encoding="utf-8")
         self.log(f"per-stock rules: {self.root / 'STOCK_RULES.md'}")
+        L = self.used_dsl_line(L, names, exprs)
         txt = "\n".join(L)
         self.state["facts"] = txt
         self.save()

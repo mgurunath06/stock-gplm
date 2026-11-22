@@ -1,0 +1,104 @@
+{
+  "contract": "stock-gplm.move-features.v1",
+  "note": "Entry-time features for move fingerprints, discovery facts and tuning loser analysis (owner 2026-11-22). name -> DSL expression evaluated at the signal bar. Values must be scale-free (divide price units by close). Events return 1/0 (shown as yes/no). List names in \"disabled\" to drop them. Every feature is tested in pairs with all others, so keep the list focused (~60-80). Not included (no data or too slow): delivery %, F&O OI / option chain, pre-open imbalance, market breadth, Nifty relative strength before 2024, chart-pattern geometry, Hurst / ADF / HMM / kNN. Sections: common = every timeframe; intraday = 5m/15m/60m only; daily = 1d and above only (owner 2026-11-22: RSI(14) all, RSI(3) intraday / short term, RSI(300) weekly and above).",
+  "common": {
+    "trend_ema": {
+      "dist_ema9": "close / ema(close, 9) - 1",
+      "dist_ema20": "close / ema(close, 20) - 1",
+      "dist_ema44": "close / ema(close, 44) - 1",
+      "dist_ema50": "close / ema(close, 50) - 1",
+      "dist_ema200": "close / ema(close, 200) - 1",
+      "ema20_touch": "low <= ema(close, 20) and close > ema(close, 20)",
+      "ema50_touch": "low <= ema(close, 50) and close > ema(close, 50)",
+      "ema200_touch": "low <= ema(close, 200) and close > ema(close, 200)",
+      "ema_stack_up": "ema(close, 20) > ema(close, 50) and ema(close, 50) > ema(close, 200)",
+      "golden_cross10": "any_of(cross_above(ema(close, 50), ema(close, 200)), 10)",
+      "hma_slope": "slope(hma(close, 20), 5) / close"
+    },
+    "trend_systems": {
+      "adx14": "adx(14)",
+      "di_spread": "plus_di(14) - minus_di(14)",
+      "above_supertrend": "close > supertrend(10, 3)",
+      "psar_above": "close > psar()",
+      "above_cloud": "close > max(senkou_a(), senkou_b())",
+      "aroon_osc": "aroon_up(25) - aroon_down(25)",
+      "linreg_slope": "slope(close, 20) / close",
+      "r2_20": "r2(close, 20)",
+      "er10": "er(10)"
+    },
+    "momentum": {
+      "rsi14": "rsi(close, 14)",
+      "rsi3": "rsi(close, 3)",
+      "rsi_cross_up30": "any_of(cross_above(rsi(close, 14), 30), 3)",
+      "rsi_cross_dn70": "any_of(cross_below(rsi(close, 14), 70), 3)",
+      "macd_cross_up3": "any_of(cross_above(macd(close), macd_signal(close)), 3)",
+      "macd_cross_dn3": "any_of(cross_below(macd(close), macd_signal(close)), 3)",
+      "macd_hist_pct": "macd_hist(close) / close",
+      "stoch_k14": "stoch_k(14)",
+      "cci20": "cci(20)",
+      "mfi14": "mfi(14)",
+      "zscore20": "zscore(close, 20)",
+      "ret1": "close / close[1] - 1",
+      "ret5": "close / close[5] - 1",
+      "ret20": "close / close[20] - 1",
+      "up_bars5": "count(close > close[1], 5)"
+    },
+    "volatility_range": {
+      "atr_pct": "atr(14) / close",
+      "atr_ratio": "atr(5) / atr(50)",
+      "hv_ratio": "hv(10) / hv(60)",
+      "bb_width20": "bb_width(close, 20, 2)",
+      "ttm_squeeze": "bb_upper(close, 20, 2) < kc_upper(20, 1.5) and bb_lower(close, 20, 2) > kc_lower(20, 1.5)",
+      "chop14": "chop(14)",
+      "nr7": "(high - low) <= lowest(high - low, 7)",
+      "inside_bar": "high < high[1] and low > low[1]",
+      "range_pos20": "(close - lowest(low, 20)) / (highest(high, 20) - lowest(low, 20))",
+      "breakout20": "close > highest(high, 20)[1]",
+      "breakdown20": "close < lowest(low, 20)[1]",
+      "breakout55": "close > highest(high, 55)[1]",
+      "dist_high250": "close / highest(high, 250) - 1",
+      "bars_since_high20": "barssince(high >= highest(high, 20))"
+    },
+    "candle_structure": {
+      "gap": "open / close[1] - 1",
+      "body_pct": "(close - open) / open",
+      "upper_wick_pct": "upper_wick / close",
+      "lower_wick_pct": "lower_wick / close",
+      "clv": "(2 * close - high - low) / max(high - low, 0.0001 * close)",
+      "higher_low": "swing_low(5) > swing_low(5, 2)",
+      "higher_high": "swing_high(5) > swing_high(5, 2)",
+      "fvg_dir": "open_fvg_direction"
+    },
+    "volume_flow": {
+      "vol_ratio20": "volume / median(volume, 20)",
+      "vol_trend": "sma(volume, 5) / sma(volume, 50)",
+      "cmf20": "cmf(20)",
+      "obv_slope": "slope(obv, 20) / sma(volume, 20)",
+      "updown_vol20": "(sum(iff(close > open, volume, 0), 20) + 1) / (sum(iff(close < open, volume, 0), 20) + 1)"
+    },
+    "calendar": {
+      "day_of_week": "day_of_week",
+      "session_of_month": "session_of_month"
+    }
+  },
+  "intraday": {
+    "session": {
+      "minute_of_session": "minute_of_session",
+      "day_trend_ema20": "htf(close / ema(close, 20) - 1, \"1d\")",
+      "day_rsi14": "htf(rsi(close, 14), \"1d\")",
+      "session_move": "close / session_open - 1",
+      "dist_vwap": "close / vwap - 1",
+      "vwap_z": "(close - vwap) / max(vwap_std, 0.0001 * close)",
+      "slot_rvol20": "slot_rvol(20)",
+      "above_pdh": "close > prev_day_high()",
+      "below_pdl": "close < prev_day_low()",
+      "or30_break": "close > or_high(30)"
+    }
+  },
+  "disabled": [],
+  "daily": {
+    "long_term": {
+      "rsi300": "rsi(close, 300)"
+    }
+  }
+}
