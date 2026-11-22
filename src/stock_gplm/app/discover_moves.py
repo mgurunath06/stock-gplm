@@ -54,11 +54,43 @@ def _init_worker(shared: Mapping[str, Any]) -> None:
     _G.update(shared)
 
 
+def _free_ram() -> int:
+    """Available physical RAM in bytes (0 if unknown)."""
+    try:
+        import psutil  # type: ignore
+        return int(psutil.virtual_memory().available)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        ms = _MS()
+        ms.dwLength = ctypes.sizeof(_MS)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):  # type: ignore[attr-defined]
+            return int(ms.ullAvailPhys)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
 def _run_parallel(fn: Any, shared: Mapping[str, Any], tasks: list) -> list:
     """fn(task) for every task in a process pool; the big arrays in `shared` go to each worker once. Falls back to
     one core if the pool fails, so a run never dies because of the parallel step."""
     from concurrent.futures import ProcessPoolExecutor
     nw = max(1, min(20, (os.cpu_count() or 4) - 4, len(tasks)))
+    # memory cap (owner 2026-11-22: 5m ran out of RAM with 20 copies): each worker holds a copy of the arrays plus
+    # temporaries (~4x); use at most 60% of the RAM free right now
+    size = sum(getattr(v, "nbytes", 0) for v in shared.values())
+    free = _free_ram()
+    if free and size:
+        nw = max(1, min(nw, int(free * 0.6 // (4 * size + 300e6))))
+        print(f"  parallel: {nw} processes (arrays {size / 1e6:,.0f} MB each, free RAM {free / 1e9:,.1f} GB)", flush=True)
     if nw > 1:
         try:
             with ProcessPoolExecutor(nw, initializer=_init_worker, initargs=(shared,)) as ex:

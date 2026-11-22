@@ -98,10 +98,14 @@
       "or30_break": "close > or_high(30)"
     }
   },
-  "disabled": [],
+  "disabled": [
+    "day_of_week",
+    "session_of_month"
+  ],
   "daily": {
     "long_term": {
       "rsi300": "rsi(close, 300)"
     }
-  }
+  },
+  "disabled_note": "2026-11-22: calendar features disabled - with a 7-month tune window they fit specific dates (moves-5m 'MidMonth' ideas: tune 65% win, confirm 45%). Remove from 'disabled' to test them again."
 }
