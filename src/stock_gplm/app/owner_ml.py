@@ -1,6 +1,8 @@
 """Learn the owner's judgement with ML (owner 2026-11-22): which EMA crosses to take and when to square off.
 
     $env:PYTHONPATH="src"; python -m stock_gplm.app.owner_ml --symbol RELIANCE        (--tf 15m)
+    ... --symbol RELIANCE --pool 200   (WIN model trained on the first 200 universe stocks; --workers 20; resumable,
+                                        --fresh redoes all) -> <reports>/tuning/owner-ml-pool-<tf>/POOL_REPORT.md
 
 Uses config/research/owner_strategy.json (signals, base exit version "ml.base_version") and the owner's marks
 (owner_trades.csv + the chart exports owner_trades-<SYM>-<tf>.csv).
@@ -28,6 +30,7 @@ import argparse
 import csv
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -422,13 +425,272 @@ class OwnerML:
         return 0
 
 
+# ====================================================================== pooled WIN model over many stocks
+def extract(sym: str, tf: str | None, spec: str, config: str, out: str) -> str:
+    """One stock (worker process): every cross with its chart inputs and its base-exit result -> <out>/<SYM>.npz."""
+    a = argparse.Namespace(symbol=sym, tf=tf, spec=spec, config=config, no_check=True)
+    o = OwnerStrategy(sym, a)
+    try:
+        if not o.load():
+            np.savez_compressed(out, empty=np.array(1))
+            return f"{sym}: no data"
+        o.calibrate()
+        ch = Chart(o)
+        ml = OwnerML.__new__(OwnerML)
+        ml.o = o
+        bv = ml.base_variant()
+        X, side, ts, closed, net, win, sess, t_idx, c_idx, kind = [], [], [], [], [], [], [], [], [], []
+        for sd, arr in o.sig.items():
+            S = sd == "short"
+            prev = -10 ** 9
+            for t in arr.tolist():
+                tr = o.sim(sd, np.array([t]), bv)
+                x = tr[0] if tr else None
+                X.append(ch.row(t, S) + [1.0 if S else 0.0, 1.0 if "200" in o.kind[sd].get(t, "") else 0.0,
+                                         float(min(t - prev, 500))])
+                prev = t
+                side.append(1 if S else 0)
+                ts.append(int(o.end_ns[t]))
+                t_idx.append(t)
+                sess.append(int(o.sid[t]))
+                kind.append(o.kind[sd].get(t, ""))
+                if x is None:
+                    closed.append(-1), net.append(np.nan), win.append(-1), c_idx.append(-1)
+                else:
+                    e = int(x["exit_index"])
+                    done = x["exit_reason"] != "OPEN_END"
+                    closed.append(int(o.end_ns[e]) if done else -1)
+                    net.append(float(x["net_return"]))
+                    win.append(int(x["net_return"] > 0) if done else -1)
+                    c_idx.append(e)
+        np.savez_compressed(out, X=np.array(X, np.float32), side=np.array(side, np.int8), ts=np.array(ts, np.int64),
+                            closed=np.array(closed, np.int64), net=np.array(net, np.float32),
+                            win=np.array(win, np.int8), t=np.array(t_idx, np.int64), c=np.array(c_idx, np.int64),
+                            kind=np.array(kind), times=np.array([o.tv(i) for i in t_idx]))
+        return f"{sym}: {len(X)} crosses"
+    finally:
+        o.du.close()
+
+
+class Pool:
+    """WIN model trained on all stocks' crosses, walk-forward by month; each stock judged on its own trades."""
+
+    def __init__(self, a: argparse.Namespace):
+        from .discover import Discoverer
+        from .walk_forward import read_stocks
+        import json as _json
+        self.a = a
+        cfg = _json.loads(Path(a.config).read_text(encoding="utf-8"))
+        self.tf = a.tf or _json.loads(Path(a.spec).read_text(encoding="utf-8")).get("timeframe", "15m")
+        uni = read_stocks(a.pool if a.pool.startswith("@") else "@" + str(REPO / "deploy" / "oracle" / "live" /
+                                                                          "universe.txt"))
+        self.stocks = uni if a.pool.startswith("@") else uni[:int(a.pool)]
+        if a.symbol.upper() not in self.stocks:
+            self.stocks.insert(0, a.symbol.upper())
+        tmp = Path(__import__("tempfile").gettempdir()) / "owner_ml_pool.txt"
+        tmp.write_text(self.stocks[0] + "\n", encoding="utf-8")
+        self.du = Discoverer(self.tf, f"owner-ml-pool-{self.tf}", cfg, "@" + str(tmp), 1)
+        self.log, self.root = self.du.log, self.du.root
+        self.ev_dir = self.root / "events"
+        self.ev_dir.mkdir(parents=True, exist_ok=True)
+        self.spec = _json.loads(Path(a.spec).read_text(encoding="utf-8"))
+
+    def collect(self) -> None:
+        """Checkpointed: a stock whose events file exists is not recomputed (--fresh redoes all)."""
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        todo = [s for s in self.stocks if self.a.fresh or not (self.ev_dir / f"{s}.npz").is_file()]
+        self.log(f"{len(self.stocks)} stocks, {len(self.stocks) - len(todo)} already done, {len(todo)} to extract "
+                 f"with {self.a.workers} workers")
+        if not todo:
+            return
+        t0 = time.monotonic()
+        with ProcessPoolExecutor(max_workers=self.a.workers) as ex:
+            fut = {ex.submit(extract, s, self.tf, self.a.spec, self.a.config, str(self.ev_dir / f"{s}.npz")): s
+                   for s in todo}
+            for k, f in enumerate(as_completed(fut), 1):
+                s = fut[f]
+                try:
+                    msg = f.result()
+                except Exception as exc:  # noqa: BLE001 - one bad stock must not stop the run
+                    msg = f"{s}: FAILED {type(exc).__name__}: {exc}"
+                el = time.monotonic() - t0
+                self.log(f"[{k}/{len(todo)}] {msg} ({el:.0f}s, ~{el / k * (len(todo) - k):.0f}s left)")
+
+    def load(self) -> dict[str, np.ndarray]:
+        parts: dict[str, list] = {}
+        for s in self.stocks:
+            p = self.ev_dir / f"{s}.npz"
+            if not p.is_file():
+                continue
+            z = np.load(p, allow_pickle=False)
+            if "X" not in z or not len(z["X"]):
+                continue
+            n = len(z["X"])
+            for k in ("X", "side", "ts", "closed", "net", "win", "t", "c", "kind", "times"):
+                parts.setdefault(k, []).append(z[k])
+            parts.setdefault("stock", []).append(np.array([s] * n))
+        return {k: np.concatenate(v) for k, v in parts.items()}
+
+    def run(self) -> int:
+        t0 = time.monotonic()
+        self.collect()
+        D = self.load()
+        n = len(D["ts"])
+        if not n:
+            self.log("no events")
+            return 1
+        months = np.array([x[:7] for x in D["times"]])
+        um = sorted(set(months.tolist()))
+        p = np.full(n, np.nan)
+        day = (D["ts"] // 86_400_000_000_000).astype(np.int64)
+        rc = self.spec.get("recency") or {}
+        for mo in um[2:]:
+            sel = months == mo
+            start = D["ts"][sel].min()
+            tr = (D["ts"] < start) & (D["closed"] >= 0) & (D["closed"] < start) & (D["win"] >= 0)
+            if tr.sum() < 200 or len(set(D["win"][tr].tolist())) < 2:
+                continue
+            age = (day[sel].min() - day[tr]) * 250 / 365  # calendar -> trading days
+            w = (1 + np.maximum(age, 0) / float(rc.get("decay_sessions", 100))) ** -float(rc.get("power", 2))
+            mdl = _model().fit(D["X"][tr], D["win"][tr], sample_weight=w)
+            p[sel] = mdl.predict_proba(D["X"][sel])[:, 1]
+            self.log(f"walk-forward {mo}: trained on {int(tr.sum()):,} closed trades of earlier months, predicted "
+                     f"{int(sel.sum()):,} crosses")
+        names = Chart.DIRECTIONAL + Chart.NEUTRAL + ["is_short", "is_ema200_cross", "candles_since_prev_cross"]
+        md = [f"# Pooled ML - does the owner strategy's cross win? ({self.tf}, {len(set(D['stock'].tolist()))} stocks)", "",
+              f"{n:,} crosses. Base exit: **{(self.spec.get('ml') or {}).get('base_version', 'V2')}**. Walk-forward by month: "
+              "each month predicted by a model trained only on trades of ALL stocks that had closed before it (recent "
+              "weigh more). Each stock is then judged on its own trades.", ""]
+        ok = ~np.isnan(p) & (D["win"] >= 0)
+        auc = _auc(D["win"][ok], p[ok]) if ok.any() else None
+        md.append(f"Out-of-sample ranking quality (AUC, 0.5 = coin): **{auc:.3f}** on {int(ok.sum()):,} crosses."
+                  if auc is not None else "Not enough months.")
+        if auc is not None:
+            self.log(f"pooled AUC {auc:.3f} on {int(ok.sum()):,} crosses")
+
+        def replay(mask: np.ndarray) -> dict[str, dict[str, Any]]:
+            """Per stock and side, one position at a time, in time order; only predicted months."""
+            out: dict[str, dict[str, Any]] = {}
+            for s in np.unique(D["stock"]):
+                for sd in (0, 1):
+                    idx = np.flatnonzero((D["stock"] == s) & (D["side"] == sd) & mask & ~np.isnan(p))
+                    idx = idx[np.argsort(D["t"][idx])]
+                    free = -1
+                    for i in idx:
+                        if D["t"][i] < free or D["win"][i] < 0:
+                            continue
+                        r = out.setdefault(s, {"net": [], "day": []})
+                        r["net"].append(float(D["net"][i]))
+                        r["day"].append(int(day[i]))
+                        free = int(D["c"][i])
+            return out
+
+        md += ["", "## 1. Replay over the predicted months (all stocks, after costs)", "",
+               "| Taken when | Trades | Won | Avg | Total (sum of %) |", "|---|---|---|---|---|"]
+        base_all = replay(np.ones(n, bool))
+        res: dict[str, Any] = {}
+        for nm, thr in (("every cross", None), ("P(win) >= 0.50", 0.50), ("P(win) >= 0.55", 0.55),
+                        ("P(win) >= 0.60", 0.60)):
+            rp = base_all if thr is None else replay(p >= thr)
+            res[nm] = rp
+            net = np.array([x for r in rp.values() for x in r["net"]])
+            if len(net):
+                md.append(f"| {nm} | {len(net):,} | {(net > 0).mean():.0%} | {100 * net.mean():+.3f}% | {100 * net.sum():+.0f}% |")
+                self.log(f"replay {nm}: {len(net):,} trades, {(net > 0).mean():.0%} won, avg {100 * net.mean():+.3f}%")
+        # per stock verdict (own trades, recent weigh more)
+        L = self.spec["labels"]
+        now = int(day.max())
+
+        def label(r: dict[str, Any] | None) -> tuple[str, str]:
+            if not r or not r["net"]:
+                return "LC", "no trades"
+            net = np.array(r["net"])
+            age = (now - np.array(r["day"])) * 250 / 365
+            w = (1 + age / float(rc.get("decay_sessions", 100))) ** -float(rc.get("power", 2))
+            win_w, avg_w = float(w[net > 0].sum() / w.sum()), float((w * net).sum() / w.sum())
+            k, losses = len(net), int((net <= 0).sum())
+            lab = "LC"
+            if avg_w > 0 and net.sum() > 0:
+                if k >= L["HC"]["min_trades"] and win_w >= L["HC"]["min_win_w"]:
+                    lab = "HC"
+                elif L["HCLT"]["min_trades"] <= k <= L["HCLT"]["max_trades"] and losses <= (
+                        0 if k < L["HCLT"].get("small_below", 5) else L["HCLT"].get("max_losses", 1)):
+                    lab = "HCLT"
+                elif win_w >= L["MC"]["min_win_w"]:
+                    lab = "MC"
+            return lab, f"{k} trades, {(net > 0).mean():.0%} won, total {100 * net.sum():+.1f}%"
+
+        filt = res["P(win) >= 0.55"]
+        rows = []
+        for s in sorted(set(D["stock"].tolist())):
+            lb, tb = label(base_all.get(s))
+            lf, tf_ = label(filt.get(s))
+            rows.append((s, lb, tb, lf, tf_, sum(filt.get(s, {}).get("net", [])) if s in filt else 0.0))
+        cnt = {k: sum(1 for r in rows if r[3] == k) for k in ("HC", "HCLT", "MC", "LC")}
+        md += ["", "## 2. Each stock on its own (predicted months; filter = P(win) >= 0.55)", "",
+               f"With the ML filter: HC {cnt['HC']}, HCLT {cnt['HCLT']}, MC {cnt['MC']}, LC {cnt['LC']} stocks.", "",
+               "| Stock | Every cross | Label | With ML filter | Label |", "|---|---|---|---|---|"]
+        for r in sorted(rows, key=lambda r: ({"HC": 0, "HCLT": 1, "MC": 2, "LC": 3}[r[3]], -r[5])):
+            md.append(f"| {'**' + r[0] + '**' if r[0] == self.a.symbol.upper() else r[0]} | {r[2]} | {r[1]} | {r[4]} | "
+                      f"**{r[3]}** |")
+        # final model: what drives it, today
+        from sklearn.inspection import permutation_importance
+        tr = (D["win"] >= 0)
+        age = (now - day[tr]) * 250 / 365
+        w = (1 + age / float(rc.get("decay_sessions", 100))) ** -float(rc.get("power", 2))
+        self.log(f"final model on {int(tr.sum()):,} closed trades")
+        mdl = _model().fit(D["X"][tr], D["win"][tr], sample_weight=w)
+        sub = np.flatnonzero(tr)
+        sub = sub[np.random.default_rng(0).permutation(len(sub))[:20000]]
+        pi = permutation_importance(mdl, D["X"][sub], D["win"][sub], n_repeats=5, random_state=0)
+        imp = sorted(zip(names, pi.importances_mean.tolist()), key=lambda kv: -kv[1])
+        md += ["", "## 3. What makes a cross win (all stocks)", "",
+               "Top inputs: " + ", ".join(f"{k} ({v:+.4f})" for k, v in imp[:10]), "",
+               "| Distance from EMA 13 at the cross (ATR) | Crosses | Won |", "|---|---|---|"]
+        d13 = names.index("dist13_atr")
+        for lo_, hi_ in ((-9, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 3.0), (3.0, 99)):
+            m_ = tr & (D["X"][:, d13] >= lo_) & (D["X"][:, d13] < hi_)
+            if m_.any():
+                md.append(f"| {'< 0.5' if lo_ < 0 else (f'{lo_:g} - {hi_:g}' if hi_ < 99 else f'> {lo_:g}')} | "
+                          f"{int(m_.sum()):,} | {D['win'][m_].mean():.0%} |")
+        last_day = int(day.max())
+        recent = np.flatnonzero(day >= last_day - 3)
+        pr = mdl.predict_proba(D["X"][recent])[:, 1] if len(recent) else np.array([])
+        order = recent[np.argsort(-pr)] if len(recent) else recent
+        md += ["", "## 4. Latest crosses (last 3 days), highest P(win) first", "",
+               "| Stock | Cross | Side | Trigger | P(win) |", "|---|---|---|---|---|"]
+        pmap = dict(zip(recent.tolist(), pr.tolist()))
+        for i in order[:40]:
+            md.append(f"| {D['stock'][i]} | {D['times'][i]} | {'short' if D['side'][i] else 'long'} | {D['kind'][i]} | "
+                      f"{pmap[int(i)]:.0%} |")
+        with (self.root / "pool_events.csv").open("w", newline="", encoding="utf-8") as fh:
+            wr = csv.writer(fh)
+            wr.writerow(["stock", "time", "side", "kind", "win", "net_pct", "p_win_oos"])
+            for i in range(n):
+                wr.writerow([D["stock"][i], D["times"][i], "short" if D["side"][i] else "long", D["kind"][i],
+                             int(D["win"][i]), round(100 * float(D["net"][i]), 3) if np.isfinite(D["net"][i]) else "",
+                             "" if np.isnan(p[i]) else round(float(p[i]), 3)])
+        (self.root / "POOL_REPORT.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+        self.log(f"done ({time.monotonic() - t0:.0f}s): {self.root / 'POOL_REPORT.md'}")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--tf", default=None)
     ap.add_argument("--spec", default=str(SPEC))
     ap.add_argument("--config", default=str(CONFIG))
+    ap.add_argument("--pool", default=None, help="WIN model on many stocks: N = first N of universe.txt, or @file")
+    ap.add_argument("--workers", type=int, default=20)
+    ap.add_argument("--fresh", action="store_true", help="re-extract every stock (else resume)")
     a = ap.parse_args(argv)
+    if a.pool:
+        pl = Pool(a)
+        try:
+            return pl.run()
+        finally:
+            pl.du.close()
     ml = OwnerML(a)
     try:
         return ml.run()
