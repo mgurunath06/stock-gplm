@@ -35,7 +35,7 @@ def build(o: OwnerStrategy) -> dict:
     a = max(0, o.a0 - 250)  # some history before the first signal for context
     T = [_epoch(o.tv(i)) for i in range(n)]
     r2 = lambda x: round(float(x), 2)  # noqa: E731
-    candles = [[T[i], r2(m.open[i]), r2(m.high[i]), r2(m.low[i]), r2(m.close[i])] for i in range(a, n)]
+    candles = [[T[i], r2(m.open[i]), r2(m.high[i]), r2(m.low[i]), r2(m.close[i]), int(m.volume[i])] for i in range(a, n)]
     emas = {}
     for p in (13, 20, 200):
         e = _ema_of(m, p)
@@ -110,7 +110,7 @@ PAGE = r"""<!doctype html>
  <span class="leg"><span><span class="dot" style="background:#f5c542"></span>EMA13 x EMA20 / EMA200 cross</span>
  <span><span class="dot" style="background:var(--me)"></span>your trades</span>
  <span><span class="dot" style="background:var(--file)"></span>your trades file</span>
- <span>EMA 13 / 20 / 200 = blue / orange / white &middot; RSI(3) purple, bottom panel (30 / 70)</span></span>
+ <span>EMA 13 / 20 / 200 = blue / orange / white &middot; volume in the middle &middot; RSI(3) purple, bottom panel (30 / 70)</span></span>
  <label class="muted"><input type="checkbox" id="showSig" checked onchange="draw()"> show crosses</label>
 </header>
 <nav id="nav">
@@ -190,7 +190,13 @@ cs.setData(D.candles.map(c => ({ time: c[0], open: c[1], high: c[2], low: c[3], 
 const EC = { '13': '#2962ff', '20': '#ff9800', '200': '#e0e0e0', 'rsi3': '#ce93d8' };
 const ES = {};
 // price in the top 75%, RSI(3) in its own panel at the bottom (own scale 0..100, 30 / 70 lines)
-cs.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.27 } });
+cs.priceScale().applyOptions({ scaleMargins: { top: 0.04, bottom: 0.40 } });
+// volume bars in the middle band (own scale), coloured with the candle; follows replay
+const vbar = c => ({ time: c[0], value: c[5], color: c[4] >= c[1] ? 'rgba(38,166,154,0.55)' : 'rgba(239,83,80,0.55)' });
+const VS = chart.addHistogramSeries({ priceScaleId: 'vol', priceFormat: { type: 'volume' }, lastValueVisible: false,
+  priceLineVisible: false });
+chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.62, bottom: 0.22 } });
+VS.setData(D.candles.map(vbar));
 for (const p in D.emas) {
   const R = p === 'rsi3';
   ES[p] = chart.addLineSeries({ color: EC[p], lineWidth: p === '200' ? 2 : 1, priceLineVisible: false,
@@ -198,7 +204,7 @@ for (const p in D.emas) {
     autoscaleInfoProvider: R ? () => ({ priceRange: { minValue: 0, maxValue: 100 } }) : undefined });
   ES[p].setData(D.emas[p].map(x => ({ time: x[0], value: x[1] })));
   if (R) {
-    chart.priceScale('rsi').applyOptions({ scaleMargins: { top: 0.77, bottom: 0.02 } });
+    chart.priceScale('rsi').applyOptions({ scaleMargins: { top: 0.80, bottom: 0.02 } });
     ES[p].createPriceLine({ price: 70, color: '#787b86', lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: '' });
     ES[p].createPriceLine({ price: 30, color: '#787b86', lineStyle: 2, lineWidth: 1, axisLabelVisible: true, title: '' });
   }
@@ -414,6 +420,7 @@ const bar = c => ({ time: c[0], open: c[1], high: c[2], low: c[3], close: c[4] }
 function showUpTo(i) {
   const t = D.candles[i][0];
   cs.setData(D.candles.slice(0, i + 1).map(bar));
+  VS.setData(D.candles.slice(0, i + 1).map(vbar));
   for (const p in ES) ES[p].setData(D.emas[p].filter(x => x[0] <= t).map(x => ({ time: x[0], value: x[1] })));
 }
 function rShow() {
@@ -430,6 +437,7 @@ function startReplay(at) {
 function stopReplay() {
   RP = null; try { localStorage.removeItem(RKEY); } catch (e) {}
   cs.setData(D.candles.map(bar));
+  VS.setData(D.candles.map(vbar));
   for (const p in ES) ES[p].setData(D.emas[p].map(x => ({ time: x[0], value: x[1] })));
   document.getElementById('rStart').style.display = ''; document.getElementById('rOn').style.display = 'none';
   closePop(); draw();
@@ -439,7 +447,7 @@ function rStep(k) {
   if (k < 0) { RP = Math.max(250, RP + k); showUpTo(RP); return rShow(); }
   for (let j = 0; j < k && RP < N - 1; j++) {
     RP++; const c = D.candles[RP];
-    cs.update(bar(c));
+    cs.update(bar(c)); VS.update(vbar(c));
     for (const p in ES) if (emaAt[p][c[0]] != null) ES[p].update({ time: c[0], value: emaAt[p][c[0]] });
   }
   closePop(); rShow();
