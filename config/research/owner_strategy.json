@@ -17,15 +17,15 @@
    "_doc": "Longs may be held overnight (owner: 21 Sep -> 23 Sep).",
    "max_hold_bars": 2000,
    "overnight": true,
-   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "lowest", "strength": 1},
-   "ema_regime": {"anchor": 200, "trail": 20, "target": "fixed", "breach_fill": "close"}
+   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "last_swing", "strength": 3},
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close"}
   },
   "short": {
    "_doc": "Cash shorts are same-day: no entry after 14:45, square-off 15:15 (owner 2026-11-22; multi-day option shorts deferred).",
    "max_hold_bars": 2000,
    "overnight": false,
-   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "lowest", "strength": 1},
-   "ema_regime": {"anchor": 200, "trail": 20, "target": "fixed", "breach_fill": "close"}
+   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "last_swing", "strength": 3},
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close"}
   }
  },
  "check": {
