@@ -134,7 +134,8 @@ def _pick(r: dict[str, Any], *names: str) -> str:
 
 def _xbrl(r: dict[str, Any]) -> str:
     for k, v in r.items():
-        if isinstance(v, str) and ("xbrl" in k.lower() or v.lower().endswith(".xml")) and v.startswith("http"):
+        if (isinstance(v, str) and ("xbrl" in k.lower() or v.lower().endswith(".xml")) and v.startswith("http")
+                and not v.rstrip().endswith("/-")):  # old filings carry ".../xbrl/-" (no XBRL file)
             return v
     return ""
 
@@ -168,6 +169,10 @@ def flatten(sym: str, kind: str, payload: Any) -> list[dict[str, Any]]:
                                   "sort_date", "dissemination")),
             "submitted_at": iso(_pick(r, "filingDate", "submissionDate", "submission_date")),
             "xbrl_url": _xbrl(r),
+            "html_url": _pick(r, "resultDetailedDataLink"),
+            "promoter_pct": _pick(r, "pr_and_prgrp"),
+            "public_pct": _pick(r, "public_val"),
+            "seq": _pick(r, "seqNumber", "recordId"),
             "keys": "|".join(sorted(r))[:400],
         })
     return out
@@ -243,7 +248,7 @@ def build_csv(stocks: list[str] | None = None) -> Path:
     DERIVED.mkdir(parents=True, exist_ok=True)
     out = DERIVED / "filings.csv"
     cols = ["symbol", "kind", "period", "from", "to", "consolidated", "audited", "filed_at", "submitted_at",
-            "xbrl_url", "keys"]
+            "xbrl_url", "html_url", "promoter_pct", "public_pct", "seq", "keys"]
     with out.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
