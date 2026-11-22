@@ -364,7 +364,7 @@ class Tuner:
                             continue
                         seen.add(key)
                         v = self.variant(sid, f"{phase[0].upper()}X{bi + 1}-{rr:g}-{mx or 'none'}", b["entry"], ex)
-                        v.meta = {"label": f"{b['label']} | exit rr {rr:g}, swing {mx or 'none'}"[:80],
+                        v.meta = {"label": f"{b['label']} + exit rr {rr:g}, swing {mx or 'none'}"[:80],
                                   "change": (f"{b['change']}; " if b["change"] != "none" else "")
                                   + f"exit rr {rr:g}, max swing {mx or 'none'}", "source": "exit-sweep"}
                         vs.append(v)
@@ -446,7 +446,8 @@ class Tuner:
             b = g["variant"]
             bt, bc, pt, pc = b["tune"], b["confirm"], s["base"]["tune"], s["base"]["confirm"]
             verdict = f"ACCEPTED (rank {g['rank']})" if g["accepted"] else f"no: {g['why']}"
-            L.append(f"| {s['name']} | {pt['win_w']:.0%} / {min(pt['pf_w'], 99):.2f} | {b['label']} | {b['change']} | "
+            lab, chg = str(b["label"]).replace("|", "/"), str(b["change"]).replace("|", "/")
+            L.append(f"| {s['name']} | {pt['win_w']:.0%} / {min(pt['pf_w'], 99):.2f} | {lab} | {chg} | "
                      f"{bt['win_w']:.0%} / {min(bt['pf_w'], 99):.2f} / {bt['trades']} | "
                      f"{pc['win_w']:.0%} / {min(pc['pf_w'], 99):.2f} | "
                      f"{bc['win_w']:.0%} / {min(bc['pf_w'], 99):.2f} / {bc['trades']} | {s['trials']} | {verdict} |")
