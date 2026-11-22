@@ -17,26 +17,41 @@
    "_doc": "Longs may be held overnight (owner: 21 Sep -> 23 Sep).",
    "max_hold_bars": 2000,
    "overnight": true,
-   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400},
-   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "breach_fill": "close"}
+   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "lowest", "strength": 1},
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "fixed", "breach_fill": "close"}
   },
   "short": {
    "_doc": "Cash shorts are same-day: no entry after 14:45, square-off 15:15 (owner 2026-11-22; multi-day option shorts deferred).",
    "max_hold_bars": 2000,
    "overnight": false,
-   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400},
-   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "breach_fill": "close"}
+   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "lowest", "strength": 1},
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "fixed", "breach_fill": "close"}
   }
  },
  "check": {
   "_doc": "--check compares owner_trades.csv row by row. Both readings of the exit are tried; match window in candles.",
   "owner_trades": "config/research/owner_trades.csv",
   "match_candles": 2,
+  "_variants_doc": "Each version overrides parts of exit.<side>.pullback_stop / ema_regime. margin 0.001 = EMA200 counts as reached within 0.1%. touch = exit when price touches EMA20. A = on reaching EMA200 keep holding, exit on EMA20 touch. B = trailing stop under each new swing low (2 candles each side), no EMA20 exit. C = A + stop to entry at +1R. close-stop = stop fires only on a close beyond it.",
   "variants": [
-   {"name": "live-EMA200 / exit at breach close", "target": "live", "breach_fill": "close"},
-   {"name": "live-EMA200 / exit next open", "target": "live", "breach_fill": "next_open"},
-   {"name": "fixed-EMA200 / exit at breach close", "target": "fixed", "breach_fill": "close"},
-   {"name": "fixed-EMA200 / exit next open", "target": "fixed", "breach_fill": "next_open"}
+   {"name": "V1 lowest-low stop, EMA200 fixed, EMA20 close",
+    "pullback_stop": {"mode": "lowest"}, "ema_regime": {"target": "fixed", "breach_fill": "close"}},
+   {"name": "V2 last-swing stop, EMA200 fixed, EMA20 close",
+    "pullback_stop": {"mode": "last_swing"}, "ema_regime": {"target": "fixed", "breach_fill": "close"}},
+   {"name": "V3 last-swing, EMA200 within 0.1%, EMA20 touch",
+    "pullback_stop": {"mode": "last_swing"}, "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch"}},
+   {"name": "V4 = A: V3 + keep holding past EMA200",
+    "pullback_stop": {"mode": "last_swing"},
+    "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch", "on_target": "trail"}},
+   {"name": "V5 = B: last-swing, trail under swing lows",
+    "pullback_stop": {"mode": "last_swing"},
+    "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "none", "on_target": "trail", "swing_trail": 2}},
+   {"name": "V6 = C: A + stop to entry at +1R",
+    "pullback_stop": {"mode": "last_swing"},
+    "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch", "on_target": "trail", "breakeven_r": 1.0}},
+   {"name": "V7 = A with close-stop",
+    "pullback_stop": {"mode": "last_swing"},
+    "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch", "on_target": "trail", "stop_close": true}}
   ]
  },
  "labels": {"HC": {"min_trades": 12, "min_win_w": 0.6},

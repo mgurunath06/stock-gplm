@@ -98,8 +98,9 @@ class OwnerStrategy:
     def exit_doc(self, side: str, variant: dict[str, Any] | None = None) -> dict[str, Any]:
         d = json.loads(json.dumps(self.spec["exit"][side]))
         d.pop("_doc", None)
-        if variant:
-            d["ema_regime"] = {**d["ema_regime"], "target": variant["target"], "breach_fill": variant["breach_fill"]}
+        for k, v in (variant or {}).items():  # a version overrides parts of pullback_stop / ema_regime
+            if isinstance(v, dict) and isinstance(d.get(k), dict):
+                d[k] = {**d[k], **v}
         return d
 
     def sim(self, side: str, fired: np.ndarray, variant: dict[str, Any] | None = None, independent: bool = True
@@ -109,11 +110,13 @@ class OwnerStrategy:
         return simulate(self.m, np.zeros(len(self.m), bool), (self.a0, len(self.m)), Exit.of(self.exit_doc(side, variant)),
                         L["buy"], L["sell"], side == "short", independent=independent, fired=np.asarray(fired, np.int64))
 
-    def stop_of(self, side: str, t: int) -> tuple[float, int] | None:
+    def stop_of(self, side: str, t: int, mode: str | None = None) -> tuple[float, int] | None:
         from .strategy_engine import _ema_of, pullback_level
         pb = self.spec["exit"][side]["pullback_stop"]
+        entry = float(self.m.open[t + 1]) if t + 1 < len(self.m) else None
         return pullback_level(self.m.low, self.m.high, _ema_of(self.m, int(pb.get("fast", 13))),
-                              _ema_of(self.m, int(pb.get("slow", 20))), t, side == "short", int(pb.get("lookback", 400)))
+                              _ema_of(self.m, int(pb.get("slow", 20))), t, side == "short", int(pb.get("lookback", 400)),
+                              mode or pb.get("mode", "lowest"), int(pb.get("strength", 1)), entry)
 
     def wt(self, idx: np.ndarray) -> np.ndarray:
         rc = self.spec.get("recency") or {}
@@ -190,6 +193,7 @@ class OwnerStrategy:
         W = int(ck.get("match_candles", 2))
         variants = ck["variants"]
         score = {v["name"]: [0, 0] for v in variants}  # exit candle exact, within 1 candle
+        stop_hits = {"lowest": 0, "last_swing": 0}
         out_rows: list[dict[str, Any]] = []
         md = ["", "## 1. Check against your trades (owner_trades.csv)", "",
               f"Our signal = nearest {'/'.join(self.spec['entries'])} signal of the same side within {W} candles of "
@@ -212,12 +216,21 @@ class OwnerStrategy:
             if near:
                 listed.add((side, t))
             ours = f"{self.tv(t)} {self.kind[side].get(t, '')} ({t - i:+d})" if near else "**none**"
-            st = self.stop_of(side, t)
             js = self.find(r["stop"])
             your_stop = (f"{r['stop']} ({self.m.high[js] if side == 'short' else self.m.low[js]:.2f})"
                          if js is not None else (r["stop"] or "-"))
-            our_stop = (f"{self.tv(st[1])} ({st[0]:.2f})" + (f" {'✓' if st[1] == js else f'{st[1] - js:+d}'}"
-                                                              if js is not None else "")) if st else "none"
+            stops = []
+            for mode, lab in (("lowest", "lowest"), ("last_swing", "last swing")):
+                sx = self.stop_of(side, t, mode)
+                if sx is None:
+                    stops.append(f"{lab}: none")
+                    continue
+                if js is not None:
+                    stop_hits[mode] += sx[1] == js
+                stops.append(f"{lab}: {self.tv(sx[1])[5:]} ({sx[0]:.2f})"
+                             + (f" {'✓' if sx[1] == js else f'{sx[1] - js:+d}'}" if js is not None else ""))
+            st = self.stop_of(side, t)
+            our_stop = "<br>".join(stops)
             from .strategy_engine import _ema_of
             rg = self.spec["exit"][side]["ema_regime"]
             na, nt = int(rg.get("anchor", 200)), int(rg.get("trail", 20))
@@ -257,6 +270,9 @@ class OwnerStrategy:
                + "; ".join(f"**{k}**: {a} same candle, {b} within 1" for k, (a, b) in score.items()), ""]
         best = max(score.items(), key=lambda kv: (kv[1][0], kv[1][1]))[0]
         md.append(f"Closest to your exits: **{best}**.")
+        n_stop = sum(1 for r in rows if self.find(r["stop"]) is not None)
+        md.append(f"Stop candle same as yours ({n_stop} rows with a stop): lowest low of the pullback "
+                  f"{stop_hits['lowest']}, last swing low {stop_hits['last_swing']}.")
         # our signals in your period that you did not list
         ts = [self.find(r["signal"]) for r in rows]
         ts = [x for x in ts if x is not None]
@@ -277,6 +293,18 @@ class OwnerStrategy:
             w.writeheader()
             w.writerows(out_rows)
         self.log("check: " + "; ".join(f"{k}: {a} same / {b} within 1 of {taken}" for k, (a, b) in score.items()))
+        self.log(f"stop candle same as yours: lowest {stop_hits['lowest']}, last swing {stop_hits['last_swing']} "
+                 f"of {n_stop}")
+        # every version over all 2026 signals
+        md += ["", "## 1b. Each exit version over every 2026 signal (one position per side at a time)", "",
+               "| Version | Exit candles like yours (same / within 1) | Long | Short |", "|---|---|---|---|"]
+        for v in variants:
+            cells = []
+            for side, arr in self.sig.items():
+                s = self.stats(self.sim(side, arr, v))
+                cells.append(f"{s['label']}: {s['text']}")
+            a, b = score[v["name"]]
+            md.append(f"| {v['name']} | {a} / {b} of {taken} | " + " | ".join(cells) + " |")
         return md
 
     # ------------------------------------------------------------------ run

@@ -254,20 +254,29 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
             raise StrategyConfigError("exit.swing_stop: buffer 0..0.05, rr 0.2..10, lookback 3..200")
     pb = ex.get("pullback_stop")  # owner 2026-11-22: stop beyond the lowest low of the pullback
     if pb is not None:
-        if not isinstance(pb, dict) or set(pb) - {"fast", "slow", "buffer", "lookback"}:
-            raise StrategyConfigError("exit.pullback_stop must be {fast, slow, buffer, lookback}")
+        if not isinstance(pb, dict) or set(pb) - {"fast", "slow", "buffer", "lookback", "mode", "strength"}:
+            raise StrategyConfigError("exit.pullback_stop must be {fast, slow, buffer, lookback, mode, strength}")
+        if pb.get("mode", "lowest") not in ("lowest", "last_swing") or not 1 <= int(pb.get("strength", 1)) <= 10:
+            raise StrategyConfigError("exit.pullback_stop: mode lowest|last_swing, strength 1..10")
         if not 2 <= int(pb.get("fast", 13)) < int(pb.get("slow", 20)) <= 500 \
                 or not 0 <= float(pb.get("buffer", 0.0)) <= 0.05 or not 5 <= int(pb.get("lookback", 400)) <= 5000:
             raise StrategyConfigError("exit.pullback_stop: 2 <= fast < slow <= 500, buffer 0..0.05, lookback 5..5000")
     rg = ex.get("ema_regime")  # owner 2026-11-22: below EMA anchor -> target it; above -> exit on EMA trail breach
     if rg is not None:
-        if not isinstance(rg, dict) or set(rg) - {"anchor", "trail", "target", "breach_fill"}:
-            raise StrategyConfigError("exit.ema_regime must be {anchor, trail, target, breach_fill}")
+        keys = {"anchor", "trail", "target", "breach_fill", "margin", "on_target", "swing_trail", "breakeven_r",
+                "stop_close"}
+        if not isinstance(rg, dict) or set(rg) - keys:
+            raise StrategyConfigError(f"exit.ema_regime keys: {sorted(keys)}")
+        be = rg.get("breakeven_r")
         if not 2 <= int(rg.get("trail", 20)) < int(rg.get("anchor", 200)) <= 500 \
                 or rg.get("target", "live") not in ("live", "fixed") \
-                or rg.get("breach_fill", "close") not in ("close", "next_open"):
-            raise StrategyConfigError("exit.ema_regime: 2 <= trail < anchor <= 500, target live|fixed, "
-                                      "breach_fill close|next_open")
+                or rg.get("breach_fill", "close") not in ("close", "next_open", "touch", "none") \
+                or not 0 <= float(rg.get("margin", 0.0)) <= 0.02 or rg.get("on_target", "exit") not in ("exit", "trail") \
+                or not 0 <= int(rg.get("swing_trail", 0)) <= 10 or (be is not None and not 0 < float(be) <= 10) \
+                or not isinstance(rg.get("stop_close", False), bool):
+            raise StrategyConfigError("exit.ema_regime: 2 <= trail < anchor <= 500, target live|fixed, breach_fill "
+                                      "close|next_open|touch|none, margin 0..0.02, on_target exit|trail, swing_trail "
+                                      "0..10, breakeven_r null or (0, 10], stop_close true|false")
     needs = dsl.requirements(enode)
     if xnode is not None:
         for k, v in dsl.requirements(xnode).items():
