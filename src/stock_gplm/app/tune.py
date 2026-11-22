@@ -375,23 +375,30 @@ class Tuner:
             for bi, b in enumerate(tops):
                 for rr in es["rr"]:
                     for mx in es["max_swing_pct"]:
-                        ex = json.loads(json.dumps(b["exit"]))
-                        sw = dict(ex.get("swing_stop") or {"buffer": 0.002, "lookback": 20})
-                        sw["rr"] = rr
-                        if mx is None:
-                            sw.pop("max_swing_pct", None)
-                        else:
-                            sw["max_swing_pct"] = mx
-                        ex["swing_stop"] = sw
-                        key = b["entry"] + json.dumps(ex, sort_keys=True)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        v = self.variant(sid, f"{phase[0].upper()}X{bi + 1}-{rr:g}-{mx or 'none'}", b["entry"], ex)
-                        v.meta = {"label": f"{b['label']} + exit rr {rr:g}, swing {mx or 'none'}"[:80],
-                                  "change": (f"{b['change']}; " if b["change"] != "none" else "")
-                                  + f"exit rr {rr:g}, max swing {mx or 'none'}", "source": "exit-sweep"}
-                        vs.append(v)
+                        for tr in es.get("trail_atr", [None]):
+                            ex = json.loads(json.dumps(b["exit"]))
+                            sw = dict(ex.get("swing_stop") or {"buffer": 0.002, "lookback": 20})
+                            sw["rr"] = rr
+                            if mx is None:
+                                sw.pop("max_swing_pct", None)
+                            else:
+                                sw["max_swing_pct"] = mx
+                            ex["swing_stop"] = sw
+                            if tr is None:
+                                ex.pop("trail_atr", None)
+                            else:
+                                ex["trail_atr"] = tr
+                            key = b["entry"] + json.dumps(ex, sort_keys=True)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            tt = f", trail {tr:g} ATR" if tr else ""
+                            v = self.variant(sid, f"{phase[0].upper()}X{bi + 1}-{rr:g}-{mx or 'none'}-{tr or 'none'}",
+                                             b["entry"], ex)
+                            v.meta = {"label": f"{b['label']} + exit rr {rr:g}, swing {mx or 'none'}{tt}"[:90],
+                                      "change": (f"{b['change']}; " if b["change"] != "none" else "")
+                                      + f"exit rr {rr:g}, max swing {mx or 'none'}{tt}", "source": "exit-sweep"}
+                            vs.append(v)
         if vs:
             self.log(f"exit sweep ({phase}): {len(vs)} variants for {len(todo)} strategies")
             self.record(vs, self.evaluate(vs))

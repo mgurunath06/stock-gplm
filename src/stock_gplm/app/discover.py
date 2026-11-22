@@ -49,7 +49,7 @@ SCHEMA = ('{"strategies": [{"name": "2-4 words, readable", "idea": "one sentence
           '"from": "<id of a tried strategy it improves>" or null, "direction": "long" or "short", '
           '"entry": "<DSL condition WITHOUT the liquidity floor>", '
           '"exit": {"rr": number, "max_swing_pct": number|null, "lookback": int, "max_hold_bars": int, '
-          '"when": "<optional DSL exit condition>" or null}}]}')
+          '"trail_atr": number|null, "when": "<optional DSL exit condition>" or null}}]}')
 
 
 def _camel(name: str) -> str:
@@ -242,7 +242,8 @@ Aim: average net per trade clearly above the probe average and above zero, profi
 best combinations, avoid the worst ones. You may use the fact-sheet feature names directly (e.g. atr_pct > 0.006);
 they are replaced by their DSL formulas. Price-unit values must be divided by close (atr(14) / close < 0.03).
 Exit = stop 0.2% beyond the last swing, target rr x risk{', square-off 15:15, no entries after 14:45' if self.intraday else ''};
-ranges rr 0.3-4, max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120; optional "when" exit rule.
+ranges rr 0.3-4, max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120; optional "when" exit rule;
+optional trail_atr 1-6 = trailing stop that many ATR(14) below the highest price since entry (keeps part of big moves).
 Do NOT include the liquidity floor (added automatically). No ref_symbol(), feature(){', no bench() (daily only)' if self.intraday else '; bench(x) = x on Nifty 50 (data from 2024 only)'}.
 Output JSON exactly like: {SCHEMA}
 
@@ -346,6 +347,12 @@ Output JSON exactly like: {SCHEMA}
         except (TypeError, ValueError):
             hold = 25
         ex: dict[str, Any] = {"max_hold_bars": hold, "swing_stop": sw}
+        if e.get("trail_atr") not in (None, "", "null"):
+            lo, hi = tl.EXIT_RANGES["trail_atr"]
+            try:
+                ex["trail_atr"] = round(min(max(float(e["trail_atr"]), lo), hi), 2)
+            except (TypeError, ValueError):
+                pass
         when = self.expand(tl.repair_dsl(str(e.get("when") or "").strip()))
         if when and when.lower() not in ("null", "none"):
             try:
@@ -396,21 +403,27 @@ Output JSON exactly like: {SCHEMA}
         for i in tops.values():
             for rr in es["rr"]:
                 for mx in es["max_swing_pct"]:
-                    ex = json.loads(json.dumps(i["exit"]))
-                    ex["swing_stop"]["rr"] = rr
-                    ex["swing_stop"].pop("max_swing_pct", None)
-                    if mx is not None:
-                        ex["swing_stop"]["max_swing_pct"] = mx
-                    key = i["entry"] + json.dumps(ex, sort_keys=True)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    sid = f"{i['id']}-X{rr:g}-{mx or 'none'}"
-                    v = te.Variant(f"{sid}~X", self.tf, i["entry"], ex, i["direction"])
-                    v.meta = {"id": sid, "name": f"{i['name']} (exit rr {rr:g}, swing {mx or 'none'})",
-                              "idea": i.get("idea", ""), "core": i["core"], "from": i["id"], "round": "sweep",
-                              "source": "exit-sweep"}
-                    vs.append(v)
+                    for tr in es.get("trail_atr", [None]):
+                        ex = json.loads(json.dumps(i["exit"]))
+                        ex["swing_stop"]["rr"] = rr
+                        ex["swing_stop"].pop("max_swing_pct", None)
+                        if mx is not None:
+                            ex["swing_stop"]["max_swing_pct"] = mx
+                        if tr is None:
+                            ex.pop("trail_atr", None)
+                        else:
+                            ex["trail_atr"] = tr
+                        key = i["entry"] + json.dumps(ex, sort_keys=True)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        sid = f"{i['id']}-X{rr:g}-{mx or 'none'}" + (f"-T{tr:g}" if tr else "")
+                        v = te.Variant(f"{sid}~X", self.tf, i["entry"], ex, i["direction"])
+                        v.meta = {"id": sid, "name": f"{i['name']} (exit rr {rr:g}, swing {mx or 'none'}"
+                                                     + (f", trail {tr:g} ATR)" if tr else ")"),
+                                  "idea": i.get("idea", ""), "core": i["core"], "from": i["id"], "round": "sweep",
+                                  "source": "exit-sweep"}
+                        vs.append(v)
         if vs:
             self.log(f"exit sweep: {len(vs)} variants of {len(tops)} best ideas")
             self.record_ideas(vs, self.evaluate(vs))

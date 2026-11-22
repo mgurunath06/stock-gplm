@@ -27,7 +27,8 @@ MIN_SIMILARITY = 0.75
 MAX_FILTER_NODES = 30
 DENY_FUNCS = {"ref_symbol", "feature", "meta_prob", "knn_analogue", "hmm_bull_prob", "dtw_distance",
               "adf_stat", "hurst"}  # unavailable data or too slow for pooled tuning
-EXIT_RANGES = {"rr": (0.3, 4.0), "max_swing_pct": (0.005, 0.08), "lookback": (3, 60), "max_hold_bars": (2, 120)}
+EXIT_RANGES = {"rr": (0.3, 4.0), "max_swing_pct": (0.005, 0.08), "lookback": (3, 60), "max_hold_bars": (2, 120),
+               "trail_atr": (1.0, 6.0)}
 
 
 # ------------------------------------------------------------------ providers
@@ -107,7 +108,8 @@ OUTPUT_SCHEMA = (
     '{"variants": [{"label": "<= 6 words, readable", "aim": "win" or "profit", "rationale": "one sentence", '
     '"add_filter": "<DSL boolean condition, ANDed onto the entry>" or null, '
     '"entry": "<full lightly edited entry>" or null, '
-    '"exit": {"rr": number, "max_swing_pct": number|null, "lookback": int, "max_hold_bars": int} or null}]}')
+    '"exit": {"rr": number, "max_swing_pct": number|null, "lookback": int, "max_hold_bars": int, '
+    '"trail_atr": number|null} or null}]}')
 
 
 def _fmt_stats(s: Mapping[str, Any]) -> str:
@@ -148,7 +150,8 @@ all stocks, e.g. atr(14) / close < 0.03 ; stdev(close, 20) / close < 0.02.
 Rules: keep the liquidity floor clause exactly; use only the DSL below; no ref_symbol(), feature(); bench(x) = x on the
 official Nifty 50 (daily only, data from 2024 - avoid on intraday);
 filters must be causal expressions on this timeframe (x[1] = previous bar); exit ranges rr 0.3-4,
-max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120.
+max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120, trail_atr 1-6 or null (trailing stop that
+many ATR(14) below the highest price since entry - use it when losers were often up 1-2% before losing).
 Output JSON exactly like: {OUTPUT_SCHEMA}
 
 {dsl_help}
@@ -275,6 +278,17 @@ def validate_variant(parent: Mapping[str, Any], v: Mapping[str, Any], tf: str) -
                 val = min(max(float(e[key]), lo), hi)
                 sw[key] = int(round(val)) if key == "lookback" else round(val, 4)
                 parts.append(f"{key} {sw[key]}")
+        if "trail_atr" in e and e["trail_atr"] != ex.get("trail_atr"):
+            if e["trail_atr"] in (None, "", "null"):
+                if ex.pop("trail_atr", None) is not None:
+                    parts.append("no trailing stop")
+            else:
+                lo, hi = EXIT_RANGES["trail_atr"]
+                try:
+                    ex["trail_atr"] = round(min(max(float(e["trail_atr"]), lo), hi), 2)
+                    parts.append(f"trail {ex['trail_atr']:g} ATR")
+                except (TypeError, ValueError):
+                    pass
         if e.get("max_hold_bars") and int(e["max_hold_bars"]) != ex.get("max_hold_bars"):
             lo, hi = EXIT_RANGES["max_hold_bars"]
             ex["max_hold_bars"] = int(min(max(int(e["max_hold_bars"]), lo), hi))
