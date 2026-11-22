@@ -251,7 +251,7 @@ def _evaluate_stock(si: int, lanes: Mapping[str, Any], variants: Sequence[Mappin
                 if lab is None:
                     continue
                 t = lab.pop("t")
-                rec = {"stock": np.full(len(t), si, np.int32), "day": L["days"][t], **lab}
+                rec = {"stock": np.full(len(t), si, np.int32), "day": L["days"][t], "bar": t.astype(np.int32), **lab}
             else:
                 if not trades:
                     continue
