@@ -59,11 +59,14 @@
     "n_eff": 8,
     "beat_parent": true,
     "check_top": 3,
+    "win_lb": 0.6,
+    "months_pos_frac": 0.6,
     "profitable": {
       "pf_w": 1.3,
-      "n_eff": 8
+      "n_eff": 8,
+      "months_pos_frac": 0.6
     },
-    "note": "Bucket A high win = win_w/pf_w/n_eff above; bucket B profitable = 'profitable' rule at any win rate; both must beat the original's CONFIRM avg. B (original) = untouched strategy passes B."
+    "note": "Bucket A high win = win_w/pf_w/n_eff above; bucket B profitable = 'profitable' rule at any win rate; both must beat the original's CONFIRM avg. B (original) = untouched strategy passes B. Small samples (owner 2026-11-22): win_lb = cautious win rate (Beta 20% lower estimate on n_eff) for A; months_pos_frac = share of CONFIRM months with positive net (A and B)."
   },
   "local": {
     "provider": "ollama",

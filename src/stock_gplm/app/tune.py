@@ -116,6 +116,7 @@ class Tuner:
             out[key] = {k: (_r(v) if isinstance(v, float) else v)
                         for k, v in te.stats(r["net"][mask], w, per[mask]).items()}
             out[key]["stocks"] = int(len(np.unique(r["stock"][mask])))
+            out[key]["months"], out[key]["months_pos"] = te.month_consistency(r["net"][mask].astype(float), day[mask])
         return out
 
     def score(self, s: Mapping[str, Any], parent_trades: int, objective: str = "win") -> float:
@@ -423,7 +424,23 @@ class Tuner:
             why.append("avg <= 0")
         if beat and pc.get("trades") and c["avg_w"] <= pc["avg_w"]:
             why.append("not better than original")
+        if rule.get("win_lb") and c["trades"]:
+            lb = te.win_low(c["win_w"], c["n_eff"])
+            if lb < rule["win_lb"]:
+                why.append(f"cautious win {lb:.0%} < {rule['win_lb']:.0%} (too few trades for the win rate)")
+        if rule.get("months_pos_frac"):
+            m, mp = self.months(c)
+            if m and mp < rule["months_pos_frac"] * m:
+                why.append(f"profitable in only {mp} of {m} months")
         return why
+
+    def months(self, c: Mapping[str, Any]) -> tuple[int, int]:
+        """Monthly consistency on a window; older states (before 2026-11-22) only have it when period = month."""
+        if "months" in c:
+            return int(c["months"]), int(c["months_pos"])
+        if self.t["period"] == "month":
+            return int(c.get("periods", 0)), int(c.get("periods_pos", 0))
+        return 0, 0
 
     def gate(self, sid: str) -> dict[str, Any]:
         """Buckets on the CONFIRM window (owner 2026-11-22): A high win, B profitable at any win rate,
@@ -477,7 +494,10 @@ class Tuner:
              f"{self.cfg['gate']['win_w']:.0%}, PF >= {self.cfg['gate']['pf_w']}, effective trades >= "
              f"{self.cfg['gate']['n_eff']}, better than the original = bucket A; PF >= {self.cfg['gate']['profitable']['pf_w']}, "
              "avg > 0, better than the original at any win rate = bucket B; B (original) = untouched strategy already "
-             f"qualifies. API spend so far ${self.state['usd']:.2f}.", "",
+             f"qualifies. Small-sample guards: A needs cautious win (lower estimate) >= "
+             f"{self.cfg['gate'].get('win_lb') or 0:.0%}; both need profitable months >= "
+             f"{self.cfg['gate'].get('months_pos_frac') or 0:.0%} of confirm months. "
+             f"API spend so far ${self.state['usd']:.2f}.", "",
              "| Strategy | Original tune win / PF | Variant | Change | Tune win / PF / avg / trades | "
              "Confirm orig win / PF / avg | Confirm variant win / PF / avg / trades | Trials | Bucket |",
              "|---|---|---|---|---|---|---|---|---|"]

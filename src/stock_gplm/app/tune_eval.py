@@ -285,6 +285,23 @@ def stats(net: np.ndarray, w: np.ndarray, period: np.ndarray | None = None) -> d
     return out
 
 
+def win_low(win_w: float, n_eff: float, q: float = 0.2) -> float:
+    """Cautious win rate (owner 2026-11-22): Beta lower quantile of the recency-weighted win rate on n_eff trades.
+    70% on 8 effective trades -> ~55%; 70% on 60 -> ~65%. Few trades can count, at an honest level."""
+    from scipy.stats import beta
+    n = max(float(n_eff), 0.0)
+    return float(beta.ppf(q, win_w * n + 1.0, (1.0 - win_w) * n + 1.0))
+
+
+def month_consistency(net: np.ndarray, days: np.ndarray) -> tuple[int, int]:
+    """(months with trades, months with positive total net)."""
+    if not len(net):
+        return 0, 0
+    m = period_of(days, "month")
+    pos = [net[m == k].sum() > 0 for k in np.unique(m)]
+    return len(pos), int(sum(pos))
+
+
 def period_of(days: np.ndarray, step: str) -> np.ndarray:
     d = days.astype("datetime64[D]")
     return d.astype("datetime64[Y]").astype(int) if step == "year" else d.astype("datetime64[M]").astype(int)

@@ -6,8 +6,15 @@ Same definitions as the up-move learner:
                rate (all strategies together) by ``prior`` pseudo-trades - a handful of lucky trades cannot look sure.
   RR         = average win / average loss (same weighting, same pull toward the stock x TF averages).
   Edge       = Confidence x RR - (1 - Confidence): expected gain per unit of risk.
-ACTIVE when trades >= min_trades, Confidence >= min_confidence and Edge >= min_edge. Thresholds live in
-config/strategies/confidence.json (default < stocks.SYM."*" < stocks.SYM.<tf>), so they can be set per stock x TF.
+Pooled (owner 2026-11-22, small recent samples): the same strategy on ALL stocks of a TF x side gives
+               pool_conf / pool_rr / pool_edge (many recent trades -> real confidence). With
+               prior_source = "strategy" a stock's few trades are pulled toward that pooled strategy rate instead of
+               the stock's all-strategy rate, and conf_low = cautious lower estimate (Beta quantile lb_quantile) - few
+               trades can count, at an honest level.
+ACTIVE when trades >= min_trades, Confidence >= min_confidence, conf_low >= min_conf_low, Edge >= min_edge and the
+pooled strategy passes min_pool_edge / min_pool_trades. Thresholds live in config/strategies/confidence.json
+(default < stocks.SYM."*" < stocks.SYM.<tf>), so they can be set per stock x TF. Check settings causally with
+``python -m stock_gplm.app.rolling_check <run>``.
 """
 from __future__ import annotations
 
@@ -20,7 +27,9 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[3]
 CONF_FILE = REPO / "config" / "strategies" / "confidence.json"
-DEFAULTS = {"min_confidence": 0.45, "min_edge": 0.0, "min_trades": 10, "prior": 5.0, "decay_sessions": 100.0}
+DEFAULTS: dict[str, Any] = {"min_confidence": 0.45, "min_edge": 0.0, "min_trades": 10, "prior": 5.0, "decay_sessions": 100.0,
+            "prior_source": "stock", "lb_quantile": 0.2, "min_conf_low": 0.0, "pool_prior": 20.0,
+            "min_pool_edge": -1e9, "min_pool_trades": 0}
 
 
 def load(path: Path | None = None) -> dict[str, Any]:
@@ -37,46 +46,90 @@ def thresholds(doc: dict[str, Any], stock: str, tf: str) -> dict[str, float]:
     return out
 
 
-def score(trades: pd.DataFrame, doc: dict[str, Any] | None = None) -> pd.DataFrame:
-    """trades: columns stock, timeframe, strategy_id, name, side, signal, net_pct. One row per stock x TF x strategy."""
+def _ratio(num: pd.Series, den: pd.Series, default: float) -> pd.Series:
+    return (num / den.where(den > 0)).fillna(default)
+
+
+def score(trades: pd.DataFrame, doc: dict[str, Any] | None = None, explain: bool = True) -> pd.DataFrame:
+    """trades: columns stock, timeframe, strategy_id, name, side, signal, net_pct. One row per stock x TF x strategy.
+    explain=False skips the per-row 'why' text (fast path for rolling_check)."""
+    from scipy.stats import beta
     doc = load() if doc is None else doc
-    t = trades.copy()
+    cols = ["stock", "timeframe", "strategy_id", "name", "side"]
+    t = trades[cols + ["signal", "net_pct"]].copy()
+    if t.empty:
+        return pd.DataFrame()
     t["day"] = t["signal"].astype(str).str[:10]
-    t["win"] = t["net_pct"] > 0
-    rows = []
-    for (stock, tf), g in t.groupby(["stock", "timeframe"]):
-        th = thresholds(doc, stock, tf)
-        days = np.sort(g["day"].unique())
-        idx = {d: i for i, d in enumerate(days)}
-        age = len(days) - 1 - g["day"].map(idx).to_numpy()
-        g = g.assign(w=(1.0 + age / th["decay_sessions"]) ** -2)
-        for side, gs in g.groupby("side"):
-            sw = gs["w"].sum()
-            base = float((gs["w"] * gs["win"]).sum() / sw) if sw else 0.0
-            wins, losses = gs[gs["win"]], gs[~gs["win"]]
-            base_aw = float((wins["w"] * wins["net_pct"]).sum() / wins["w"].sum()) if len(wins) else 0.0
-            base_al = float((losses["w"] * -losses["net_pct"]).sum() / losses["w"].sum()) if len(losses) else 1.0
-            pr = th["prior"]
-            for (sid, name), x in gs.groupby(["strategy_id", "name"]):
-                w = x["w"]
-                conf = float(((w * x["win"]).sum() + pr * base) / (w.sum() + pr))
-                xw, xl = x[x["win"]], x[~x["win"]]
-                aw = float(((xw["w"] * xw["net_pct"]).sum() + pr * base_aw) / (xw["w"].sum() + pr))
-                al = float(((xl["w"] * -xl["net_pct"]).sum() + pr * base_al) / (xl["w"].sum() + pr))
-                rr = aw / al if al > 1e-9 else float("inf")
-                edge = conf * rr - (1 - conf)
-                n = len(x)
-                active = n >= th["min_trades"] and conf >= th["min_confidence"] and edge >= th["min_edge"]
-                why = [] if active else [r for r, bad in (
-                    (f"trades {n} < {th['min_trades']:g}", n < th["min_trades"]),
-                    (f"confidence {conf:.0%} < {th['min_confidence']:.0%}", conf < th["min_confidence"]),
-                    (f"edge {edge:+.2f} < {th['min_edge']:+.2f}", edge < th["min_edge"])) if bad]
-                rows.append({"stock": stock, "timeframe": tf, "strategy_id": sid, "name": name, "side": side,
-                             "trades": n, "win_rate": float(x["win"].mean()), "avg_net_pct": float(x["net_pct"].mean()),
-                             "total_net_pct": float(x["net_pct"].sum()), "confidence": conf, "rr": rr, "edge": edge,
-                             "last_trade": str(x["day"].max()), "status": "ACTIVE" if active else "INACTIVE",
-                             "why": "; ".join(why), "min_confidence": th["min_confidence"]})
-    return pd.DataFrame(rows)
+    t["win"] = (t["net_pct"] > 0).astype(float)
+    pairs = t[["stock", "timeframe"]].drop_duplicates()
+    th = pd.DataFrame([{"stock": r.stock, "timeframe": r.timeframe, **thresholds(doc, r.stock, r.timeframe)}
+                       for r in pairs.itertuples()])
+    t = t.merge(th[["stock", "timeframe", "decay_sessions"]], on=["stock", "timeframe"], how="left")
+    rank = t.groupby(["stock", "timeframe"])["day"].rank(method="dense")
+    age = rank.groupby([t["stock"], t["timeframe"]]).transform("max") - rank
+    t["w"] = (1.0 + age / t["decay_sessions"].astype(float)) ** -2
+    t["ww"] = t["w"] * t["win"]                      # weighted wins
+    t["wl"] = t["w"] - t["ww"]                       # weighted losses
+    t["wgain"] = t["ww"] * t["net_pct"]              # weighted win size
+    t["wloss"] = -t["wl"] * t["net_pct"]             # weighted loss size (positive)
+    sums = ["w", "ww", "wl", "wgain", "wloss"]
+
+    def bases(g: pd.DataFrame, pre: str) -> pd.DataFrame:
+        return pd.DataFrame({f"{pre}conf": _ratio(g["ww"], g["w"], 0.0), f"{pre}aw": _ratio(g["wgain"], g["ww"], 0.0),
+                             f"{pre}al": _ratio(g["wloss"], g["wl"], 1.0)})
+
+    stock_base = bases(t.groupby(["stock", "timeframe", "side"])[sums].sum(), "sb_").reset_index()
+    tf_base = bases(t.groupby(["timeframe", "side"])[sums].sum(), "tb_").reset_index()
+    pool = t.groupby(["timeframe", "side", "strategy_id"]).agg(
+        **{k: (k, "sum") for k in sums}, pool_trades=("win", "size"), pool_stocks=("stock", "nunique")).reset_index()
+    pool = pool.merge(tf_base, on=["timeframe", "side"], how="left")
+    gdef = thresholds(doc, "", "")
+    pp = float(gdef["pool_prior"])
+    pool["pool_conf"] = (pool["ww"] + pp * pool["tb_conf"]) / (pool["w"] + pp)
+    pool["pool_aw"] = (pool["wgain"] + pp * pool["tb_aw"]) / (pool["ww"] + pp)
+    pool["pool_al"] = (pool["wloss"] + pp * pool["tb_al"]) / (pool["wl"] + pp)
+    pool["pool_rr"] = pool["pool_aw"] / pool["pool_al"].where(pool["pool_al"] > 1e-9)
+    pool["pool_edge"] = pool["pool_conf"] * pool["pool_rr"] - (1 - pool["pool_conf"])
+    pool = pool[["timeframe", "side", "strategy_id", "pool_trades", "pool_stocks", "pool_conf", "pool_aw",
+                 "pool_al", "pool_rr", "pool_edge"]]
+
+    g = t.groupby(cols).agg(**{k: (k, "sum") for k in sums}, trades=("win", "size"), win_rate=("win", "mean"),
+                            avg_net_pct=("net_pct", "mean"), total_net_pct=("net_pct", "sum"),
+                            last_trade=("day", "max")).reset_index()
+    g = g.merge(stock_base, on=["stock", "timeframe", "side"], how="left")          .merge(pool, on=["timeframe", "side", "strategy_id"], how="left")          .merge(th, on=["stock", "timeframe"], how="left")
+    use_pool = (g["prior_source"] == "strategy") & (g["pool_stocks"] > 1)   # one stock only: no pooling possible
+    b_conf = g["pool_conf"].where(use_pool, g["sb_conf"])
+    b_aw = g["pool_aw"].where(use_pool, g["sb_aw"])
+    b_al = g["pool_al"].where(use_pool, g["sb_al"])
+    pr = g["prior"].astype(float)
+    g["confidence"] = (g["ww"] + pr * b_conf) / (g["w"] + pr)
+    aw = (g["wgain"] + pr * b_aw) / (g["ww"] + pr)
+    al = (g["wloss"] + pr * b_al) / (g["wl"] + pr)
+    g["rr"] = (aw / al.where(al > 1e-9)).fillna(float("inf"))
+    g["edge"] = g["confidence"] * g["rr"] - (1 - g["confidence"])
+    a_ = (g["ww"] + pr * b_conf).clip(lower=1e-6)
+    b_ = (g["wl"] + pr * (1 - b_conf)).clip(lower=1e-6)
+    g["conf_low"] = beta.ppf(g["lb_quantile"].astype(float), a_, b_)
+    checks = [("trades", g["trades"] < g["min_trades"], lambda r: f"trades {r.trades} < {r.min_trades:g}"),
+              ("conf", g["confidence"] < g["min_confidence"],
+               lambda r: f"confidence {r.confidence:.0%} < {r.min_confidence:.0%}"),
+              ("low", g["conf_low"] < g["min_conf_low"], lambda r: f"cautious confidence {r.conf_low:.0%} < "
+                                                                   f"{r.min_conf_low:.0%}"),
+              ("edge", g["edge"] < g["min_edge"], lambda r: f"edge {r.edge:+.2f} < {r.min_edge:+.2f}"),
+              ("pedge", g["pool_edge"].fillna(-9) < g["min_pool_edge"],
+               lambda r: f"strategy edge on all stocks {r.pool_edge:+.2f} < {r.min_pool_edge:+.2f}"),
+              ("ptr", g["pool_trades"] < g["min_pool_trades"],
+               lambda r: f"strategy trades on all stocks {r.pool_trades} < {r.min_pool_trades:g}")]
+    bad = pd.concat([c[1].rename(c[0]) for c in checks], axis=1)
+    g["status"] = np.where(bad.any(axis=1), "INACTIVE", "ACTIVE")
+    why = [""] * len(g)
+    for i in (np.flatnonzero(bad.any(axis=1).to_numpy()) if explain else ()):
+        r = g.iloc[i]
+        why[i] = "; ".join(fmt(r) for (name, _, fmt) in checks if bad.iloc[i][name])
+    g["why"] = why
+    return g[cols + ["trades", "win_rate", "avg_net_pct", "total_net_pct", "confidence", "conf_low", "rr", "edge",
+                     "pool_trades", "pool_stocks", "pool_conf", "pool_rr", "pool_edge", "last_trade", "status", "why",
+                     "min_confidence"]].reset_index(drop=True)
 
 
 def active_map(scored: pd.DataFrame) -> dict[str, dict[str, list[str]]]:
