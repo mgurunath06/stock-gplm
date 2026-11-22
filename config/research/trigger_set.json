@@ -31,7 +31,7 @@
   "labels": {
     "_doc": "All need recency-weighted average > 0 and total > 0. HC: >= min_trades and weighted win >= min_win_w. HCLT: min..max trades with at most max_losses losses (0 below small_below trades). MC: weighted win >= min_win_w. Else LC.",
     "HC": {"min_trades": 12, "min_win_w": 0.6},
-    "HCLT": {"min_trades": 3, "max_trades": 11, "small_below": 5, "max_losses": 1},
+    "HCLT": {"_doc": "owner 2026-11-22: judged on the trigger alone, in any phase/trend - never with a filter", "min_trades": 3, "max_trades": 11, "small_below": 5, "max_losses": 1},
     "MC": {"min_win_w": 0.4}
   },
   "recency": {"decay_sessions": 100, "power": 2},

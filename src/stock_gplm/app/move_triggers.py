@@ -287,6 +287,8 @@ class MoveTriggers:
         mask2 = c["mask"] & self.filters[cond][1]
         key = (c["name"], cond)
         s2 = self.stats(self.closed(self.trades(key, mask2, c["exit"]), cut))
+        if s2["label"] == "HCLT":
+            return None  # owner 2026-11-22: HCLT is the trigger alone - no bullish / trend filter on top
         if (s2["rank"], s2["score"]) <= (c["stats"]["rank"], c["stats"]["score"]):
             return None
         return {"name": c["name"], "exit": c["exit"], "cond": cond, "key": key, "mask": mask2, "stats": s2,
