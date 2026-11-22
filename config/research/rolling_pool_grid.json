@@ -1,0 +1,10 @@
+{
+  "pool-e00": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.0, "min_pool_trades": 30},
+  "pool-e05": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.05, "min_pool_trades": 30},
+  "pool-e10": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.10, "min_pool_trades": 30},
+  "pool-e15": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.15, "min_pool_trades": 30},
+  "pool-e20": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.20, "min_pool_trades": 30},
+  "pool-e05-t100": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.05, "min_pool_trades": 100},
+  "pool-e10-t100": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.10, "min_pool_trades": 100},
+  "pool-e05-pp50": {"min_trades": 0, "min_confidence": 0.0, "min_conf_low": 0.0, "min_edge": -1e9, "min_pool_edge": 0.05, "min_pool_trades": 30, "pool_prior": 50}
+}
