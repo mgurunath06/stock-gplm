@@ -110,13 +110,14 @@ class OwnerStrategy:
         return simulate(self.m, np.zeros(len(self.m), bool), (self.a0, len(self.m)), Exit.of(self.exit_doc(side, variant)),
                         L["buy"], L["sell"], side == "short", independent=independent, fired=np.asarray(fired, np.int64))
 
-    def stop_of(self, side: str, t: int, mode: str | None = None) -> tuple[float, int] | None:
+    def stop_of(self, side: str, t: int, mode: str | None = None, strength: int | None = None
+                ) -> tuple[float, int] | None:
         from .strategy_engine import _ema_of, pullback_level
         pb = self.spec["exit"][side]["pullback_stop"]
         entry = float(self.m.open[t + 1]) if t + 1 < len(self.m) else None
         return pullback_level(self.m.low, self.m.high, _ema_of(self.m, int(pb.get("fast", 13))),
                               _ema_of(self.m, int(pb.get("slow", 20))), t, side == "short", int(pb.get("lookback", 400)),
-                              mode or pb.get("mode", "lowest"), int(pb.get("strength", 1)), entry)
+                              mode or pb.get("mode", "lowest"), int(strength or pb.get("strength", 1)), entry)
 
     def wt(self, idx: np.ndarray) -> np.ndarray:
         rc = self.spec.get("recency") or {}
@@ -193,7 +194,9 @@ class OwnerStrategy:
         W = int(ck.get("match_candles", 2))
         variants = ck["variants"]
         score = {v["name"]: [0, 0] for v in variants}  # exit candle exact, within 1 candle
-        stop_hits = {"lowest": 0, "last_swing": 0}
+        readings = (("lowest", 1, "lowest"), ("last_swing", 1, "swing-1"), ("last_swing", 2, "swing-2"),
+                    ("last_swing", 3, "swing-3"))
+        stop_hits = {lab: 0 for _, _, lab in readings}
         out_rows: list[dict[str, Any]] = []
         md = ["", "## 1. Check against your trades (owner_trades.csv)", "",
               f"Our signal = nearest {'/'.join(self.spec['entries'])} signal of the same side within {W} candles of "
@@ -220,13 +223,13 @@ class OwnerStrategy:
             your_stop = (f"{r['stop']} ({self.m.high[js] if side == 'short' else self.m.low[js]:.2f})"
                          if js is not None else (r["stop"] or "-"))
             stops = []
-            for mode, lab in (("lowest", "lowest"), ("last_swing", "last swing")):
-                sx = self.stop_of(side, t, mode)
+            for mode, k, lab in readings:
+                sx = self.stop_of(side, t, mode, k)
                 if sx is None:
                     stops.append(f"{lab}: none")
                     continue
                 if js is not None:
-                    stop_hits[mode] += sx[1] == js
+                    stop_hits[lab] += sx[1] == js
                 stops.append(f"{lab}: {self.tv(sx[1])[5:]} ({sx[0]:.2f})"
                              + (f" {'✓' if sx[1] == js else f'{sx[1] - js:+d}'}" if js is not None else ""))
             st = self.stop_of(side, t)
@@ -271,8 +274,8 @@ class OwnerStrategy:
         best = max(score.items(), key=lambda kv: (kv[1][0], kv[1][1]))[0]
         md.append(f"Closest to your exits: **{best}**.")
         n_stop = sum(1 for r in rows if self.find(r["stop"]) is not None)
-        md.append(f"Stop candle same as yours ({n_stop} rows with a stop): lowest low of the pullback "
-                  f"{stop_hits['lowest']}, last swing low {stop_hits['last_swing']}.")
+        md.append(f"Stop candle same as yours ({n_stop} rows with a stop; swing-k = last swing low with k candles "
+                  "each side): " + ", ".join(f"{k} {v}" for k, v in stop_hits.items()) + ".")
         # our signals in your period that you did not list
         ts = [self.find(r["signal"]) for r in rows]
         ts = [x for x in ts if x is not None]
@@ -293,8 +296,7 @@ class OwnerStrategy:
             w.writeheader()
             w.writerows(out_rows)
         self.log("check: " + "; ".join(f"{k}: {a} same / {b} within 1 of {taken}" for k, (a, b) in score.items()))
-        self.log(f"stop candle same as yours: lowest {stop_hits['lowest']}, last swing {stop_hits['last_swing']} "
-                 f"of {n_stop}")
+        self.log("stop candle same as yours: " + ", ".join(f"{k} {v}" for k, v in stop_hits.items()) + f" of {n_stop}")
         # every version over all 2026 signals
         md += ["", "## 1b. Each exit version over every 2026 signal (one position per side at a time)", "",
                "| Version | Exit candles like yours (same / within 1) | Long | Short |", "|---|---|---|---|"]

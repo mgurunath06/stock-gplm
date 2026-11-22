@@ -51,7 +51,15 @@
     "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch", "on_target": "trail", "breakeven_r": 1.0}},
    {"name": "V7 = A with close-stop",
     "pullback_stop": {"mode": "last_swing"},
-    "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch", "on_target": "trail", "stop_close": true}}
+    "ema_regime": {"target": "fixed", "margin": 0.001, "breach_fill": "touch", "on_target": "trail", "stop_close": true}},
+   {"name": "V8 lowest-low stop, live EMA200 within 0.1%, EMA20 close",
+    "pullback_stop": {"mode": "lowest"}, "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}},
+   {"name": "V9 = V8 with 2-candle swing stop",
+    "pullback_stop": {"mode": "last_swing", "strength": 2},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}},
+   {"name": "V10 = V8 with 3-candle swing stop",
+    "pullback_stop": {"mode": "last_swing", "strength": 3},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}}
   ]
  },
  "labels": {"HC": {"min_trades": 12, "min_win_w": 0.6},
