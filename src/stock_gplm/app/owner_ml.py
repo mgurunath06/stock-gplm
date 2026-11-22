@@ -128,6 +128,13 @@ class Chart:
         return self.DIRECTIONAL + self.NEUTRAL
 
 
+def _reg():
+    """Expected profit per trade (owner 2026-11-22: 'win' picked small wins with full-stop losses)."""
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    return HistGradientBoostingRegressor(max_depth=3, learning_rate=0.05, max_iter=300, min_samples_leaf=40,
+                                         l2_regularization=1.0, random_state=0)
+
+
 def _model():
     from sklearn.ensemble import HistGradientBoostingClassifier
     return HistGradientBoostingClassifier(max_depth=3, learning_rate=0.05, max_iter=200, min_samples_leaf=8,
@@ -541,32 +548,42 @@ class Pool:
             return 1
         months = np.array([x[:7] for x in D["times"]])
         um = sorted(set(months.tolist()))
-        p = np.full(n, np.nan)
+        p = np.full(n, np.nan)  # expected net result per trade, % of price after costs (out of sample)
+        natr = D["X"][:, (Chart.DIRECTIONAL + Chart.NEUTRAL).index("natr_pct")].astype(float) / 100.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            yR = np.clip(D["net"].astype(float) / natr, -5.0, 10.0)  # profit in ATR units: comparable across stocks
+        good = np.isfinite(yR)
         day = (D["ts"] // 86_400_000_000_000).astype(np.int64)
         rc = self.spec.get("recency") or {}
         for mo in um[2:]:
             sel = months == mo
             start = D["ts"][sel].min()
-            tr = (D["ts"] < start) & (D["closed"] >= 0) & (D["closed"] < start) & (D["win"] >= 0)
+            tr = (D["ts"] < start) & (D["closed"] >= 0) & (D["closed"] < start) & (D["win"] >= 0) & good
             if tr.sum() < 200 or len(set(D["win"][tr].tolist())) < 2:
                 continue
             age = (day[sel].min() - day[tr]) * 250 / 365  # calendar -> trading days
             w = (1 + np.maximum(age, 0) / float(rc.get("decay_sessions", 100))) ** -float(rc.get("power", 2))
-            mdl = _model().fit(D["X"][tr], D["win"][tr], sample_weight=w)
-            p[sel] = mdl.predict_proba(D["X"][sel])[:, 1]
+            mdl = _reg().fit(D["X"][tr], yR[tr], sample_weight=w)
+            p[sel] = mdl.predict(D["X"][sel]) * natr[sel]
             self.log(f"walk-forward {mo}: trained on {int(tr.sum()):,} closed trades of earlier months, predicted "
                      f"{int(sel.sum()):,} crosses")
         names = Chart.DIRECTIONAL + Chart.NEUTRAL + ["is_short", "is_ema200_cross", "candles_since_prev_cross"]
-        md = [f"# Pooled ML - does the owner strategy's cross win? ({self.tf}, {len(set(D['stock'].tolist()))} stocks)", "",
+        md = [f"# Pooled ML - expected profit of the owner strategy's crosses ({self.tf}, {len(set(D['stock'].tolist()))} "
+              "stocks)", "",
               f"{n:,} crosses. Base exit: **{(self.spec.get('ml') or {}).get('base_version', 'V2')}**. Walk-forward by month: "
               "each month predicted by a model trained only on trades of ALL stocks that had closed before it (recent "
               "weigh more). Each stock is then judged on its own trades.", ""]
-        ok = ~np.isnan(p) & (D["win"] >= 0)
+        ok = ~np.isnan(p) & (D["win"] >= 0) & np.isfinite(D["net"])
         auc = _auc(D["win"][ok], p[ok]) if ok.any() else None
-        md.append(f"Out-of-sample ranking quality (AUC, 0.5 = coin): **{auc:.3f}** on {int(ok.sum()):,} crosses."
-                  if auc is not None else "Not enough months.")
-        if auc is not None:
-            self.log(f"pooled AUC {auc:.3f} on {int(ok.sum()):,} crosses")
+        rho = None
+        if ok.sum() > 10:
+            from scipy.stats import spearmanr
+            rho = float(spearmanr(p[ok], D["net"][ok]).correlation)
+        md.append(f"Model = expected profit per trade (after costs). Out of sample: rank correlation with the real result "
+                  f"**{rho:.3f}** (0 = none), win ranking AUC {auc:.3f}, on {int(ok.sum()):,} crosses."
+                  if auc is not None and rho is not None else "Not enough months.")
+        if auc is not None and rho is not None:
+            self.log(f"pooled: rank correlation {rho:.3f}, AUC {auc:.3f} on {int(ok.sum()):,} crosses")
 
         def replay(mask: np.ndarray) -> dict[str, dict[str, Any]]:
             """Per stock and side, one position at a time, in time order; only predicted months."""
@@ -586,17 +603,22 @@ class Pool:
             return out
 
         md += ["", "## 1. Replay over the predicted months (all stocks, after costs)", "",
-               "| Taken when | Trades | Won | Avg | Total (sum of %) |", "|---|---|---|---|---|"]
+               "| Taken when (expected profit per trade) | Trades | Avg per trade | Total (sum of %) | Won |",
+               "|---|---|---|---|---|"]
         base_all = replay(np.ones(n, bool))
         res: dict[str, Any] = {}
-        for nm, thr in (("every cross", None), ("P(win) >= 0.50", 0.50), ("P(win) >= 0.55", 0.55),
-                        ("P(win) >= 0.60", 0.60)):
-            rp = base_all if thr is None else replay(p >= thr)
+        q90 = float(np.nanquantile(p, 0.9)) if np.isfinite(p).any() else 0.0
+        for nm, thr in (("every cross", None), ("expected > 0", 0.0), ("expected > +0.10%", 0.001),
+                        ("expected > +0.20%", 0.002), ("expected > +0.30%", 0.003),
+                        (f"top 10% (> {100 * q90:+.2f}%)", q90)):
+            rp = base_all if thr is None else replay(np.nan_to_num(p, nan=-9) > thr)
             res[nm] = rp
             net = np.array([x for r in rp.values() for x in r["net"]])
             if len(net):
-                md.append(f"| {nm} | {len(net):,} | {(net > 0).mean():.0%} | {100 * net.mean():+.3f}% | {100 * net.sum():+.0f}% |")
-                self.log(f"replay {nm}: {len(net):,} trades, {(net > 0).mean():.0%} won, avg {100 * net.mean():+.3f}%")
+                md.append(f"| {nm} | {len(net):,} | **{100 * net.mean():+.3f}%** | {100 * net.sum():+.0f}% | "
+                          f"{(net > 0).mean():.0%} |")
+                self.log(f"replay {nm}: {len(net):,} trades, avg {100 * net.mean():+.3f}%, total {100 * net.sum():+.0f}%, "
+                         f"{(net > 0).mean():.0%} won")
         # per stock verdict (own trades, recent weigh more)
         L = self.spec["labels"]
         now = int(day.max())
@@ -620,14 +642,15 @@ class Pool:
                     lab = "MC"
             return lab, f"{k} trades, {(net > 0).mean():.0%} won, total {100 * net.sum():+.1f}%"
 
-        filt = res["P(win) >= 0.55"]
+        fkey = "expected > +0.10%"
+        filt = res[fkey]
         rows = []
         for s in sorted(set(D["stock"].tolist())):
             lb, tb = label(base_all.get(s))
             lf, tf_ = label(filt.get(s))
             rows.append((s, lb, tb, lf, tf_, sum(filt.get(s, {}).get("net", [])) if s in filt else 0.0))
         cnt = {k: sum(1 for r in rows if r[3] == k) for k in ("HC", "HCLT", "MC", "LC")}
-        md += ["", "## 2. Each stock on its own (predicted months; filter = P(win) >= 0.55)", "",
+        md += ["", f"## 2. Each stock on its own (predicted months; filter = {fkey})", "",
                f"With the ML filter: HC {cnt['HC']}, HCLT {cnt['HCLT']}, MC {cnt['MC']}, LC {cnt['LC']} stocks.", "",
                "| Stock | Every cross | Label | With ML filter | Label |", "|---|---|---|---|---|"]
         for r in sorted(rows, key=lambda r: ({"HC": 0, "HCLT": 1, "MC": 2, "LC": 3}[r[3]], -r[5])):
@@ -639,37 +662,38 @@ class Pool:
         age = (now - day[tr]) * 250 / 365
         w = (1 + age / float(rc.get("decay_sessions", 100))) ** -float(rc.get("power", 2))
         self.log(f"final model on {int(tr.sum()):,} closed trades")
-        mdl = _model().fit(D["X"][tr], D["win"][tr], sample_weight=w)
+        tr = tr & good
+        mdl = _reg().fit(D["X"][tr], yR[tr], sample_weight=w[good[D["win"] >= 0]])
         sub = np.flatnonzero(tr)
         sub = sub[np.random.default_rng(0).permutation(len(sub))[:20000]]
-        pi = permutation_importance(mdl, D["X"][sub], D["win"][sub], n_repeats=5, random_state=0)
+        pi = permutation_importance(mdl, D["X"][sub], yR[sub], n_repeats=5, random_state=0)
         imp = sorted(zip(names, pi.importances_mean.tolist()), key=lambda kv: -kv[1])
         md += ["", "## 3. What makes a cross win (all stocks)", "",
                "Top inputs: " + ", ".join(f"{k} ({v:+.4f})" for k, v in imp[:10]), "",
-               "| Distance from EMA 13 at the cross (ATR) | Crosses | Won |", "|---|---|---|"]
+               "| Distance from EMA 13 at the cross (ATR) | Crosses | Won | Avg per trade |", "|---|---|---|---|"]
         d13 = names.index("dist13_atr")
         for lo_, hi_ in ((-9, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 2.0), (2.0, 3.0), (3.0, 99)):
             m_ = tr & (D["X"][:, d13] >= lo_) & (D["X"][:, d13] < hi_)
             if m_.any():
                 md.append(f"| {'< 0.5' if lo_ < 0 else (f'{lo_:g} - {hi_:g}' if hi_ < 99 else f'> {lo_:g}')} | "
-                          f"{int(m_.sum()):,} | {D['win'][m_].mean():.0%} |")
+                          f"{int(m_.sum()):,} | {D['win'][m_].mean():.0%} | {100 * np.nanmean(D['net'][m_]):+.3f}% |")
         last_day = int(day.max())
         recent = np.flatnonzero(day >= last_day - 3)
-        pr = mdl.predict_proba(D["X"][recent])[:, 1] if len(recent) else np.array([])
+        pr = mdl.predict(D["X"][recent]) * natr[recent] if len(recent) else np.array([])
         order = recent[np.argsort(-pr)] if len(recent) else recent
-        md += ["", "## 4. Latest crosses (last 3 days), highest P(win) first", "",
-               "| Stock | Cross | Side | Trigger | P(win) |", "|---|---|---|---|---|"]
+        md += ["", "## 4. Latest crosses (last 3 days), highest expected profit first", "",
+               "| Stock | Cross | Side | Trigger | Expected per trade |", "|---|---|---|---|---|"]
         pmap = dict(zip(recent.tolist(), pr.tolist()))
         for i in order[:40]:
             md.append(f"| {D['stock'][i]} | {D['times'][i]} | {'short' if D['side'][i] else 'long'} | {D['kind'][i]} | "
-                      f"{pmap[int(i)]:.0%} |")
+                      f"{100 * pmap[int(i)]:+.2f}% |")
         with (self.root / "pool_events.csv").open("w", newline="", encoding="utf-8") as fh:
             wr = csv.writer(fh)
-            wr.writerow(["stock", "time", "side", "kind", "win", "net_pct", "p_win_oos"])
+            wr.writerow(["stock", "time", "side", "kind", "win", "net_pct", "expected_pct_oos"])
             for i in range(n):
                 wr.writerow([D["stock"][i], D["times"][i], "short" if D["side"][i] else "long", D["kind"][i],
                              int(D["win"][i]), round(100 * float(D["net"][i]), 3) if np.isfinite(D["net"][i]) else "",
-                             "" if np.isnan(p[i]) else round(float(p[i]), 3)])
+                             "" if np.isnan(p[i]) else round(100 * float(p[i]), 3)])
         (self.root / "POOL_REPORT.md").write_text("\n".join(md) + "\n", encoding="utf-8")
         self.log(f"done ({time.monotonic() - t0:.0f}s): {self.root / 'POOL_REPORT.md'}")
         return 0
