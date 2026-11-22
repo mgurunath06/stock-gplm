@@ -121,7 +121,8 @@ class Discoverer(Tuner):
             ok = np.isfinite(x)
             if ok.sum() < 1000:
                 continue
-            qs = np.unique(np.quantile(x[ok], [0.2, 0.4, 0.6, 0.8]))
+            binary = bool(np.isin(np.unique(x[ok]), (0.0, 1.0)).all())
+            qs = np.array([0.5]) if binary else np.unique(np.quantile(x[ok], [0.2, 0.4, 0.6, 0.8]))
             edges[j] = qs
             b = np.searchsorted(qs, x[ok], side="right").astype(np.int8)
             bins[ok, j] = b
@@ -136,7 +137,7 @@ class Discoverer(Tuner):
                 cells.append(f"{self._rng(qs, q)} {100 * a:+.2f}%/{w[s & (net > 0)].sum() / w[s].sum():.0%}")
             spreads.append((max(avgs) - min(avgs) if avgs else 0, f"- {name}: " + " | ".join(cells)))
         spreads.sort(key=lambda r: -r[0])
-        out.append("Quintiles (value range: avg net / win), largest spread first:")
+        out.append("Quintiles (value range: avg net / win; events: =yes / =no), largest spread first:")
         out += [s[1] for s in spreads[:8]]  # prompt must fit num_ctx 16k with the reply
         # best and worst 2-condition cells
         min_n = max(int(self.d["min_cell_trades"]), int(self.d["min_cell_share"] * N))
@@ -166,6 +167,8 @@ class Discoverer(Tuner):
 
     @staticmethod
     def _rng(qs: np.ndarray, q: int) -> str:
+        if len(qs) == 1 and qs[0] == 0.5:  # yes/no event feature
+            return "=yes" if q == 1 else "=no"
         lo = "min" if q == 0 else _q(qs[q - 1])
         hi = "max" if q == len(qs) else _q(qs[q])
         return f"[{lo}..{hi}]"

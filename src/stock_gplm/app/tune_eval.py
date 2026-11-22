@@ -41,6 +41,22 @@ FEATURES: dict[str, str] = {
     "upper_wick_pct": "upper_wick / close",
     "bb_width20": "bb_width(close, 20, 2)",
     "day_of_week": "day_of_week",
+    # behaviour / events (owner 2026-11-22: "bounces from the 50 EMA", "jumps when MACD crosses"): 1 = yes, 0 = no
+    "ema20_touch": "low <= ema(close, 20) and close > ema(close, 20)",
+    "ema50_touch": "low <= ema(close, 50) and close > ema(close, 50)",
+    "ema200_touch": "low <= ema(close, 200) and close > ema(close, 200)",
+    "macd_cross_up3": "any_of(cross_above(macd(close), macd_signal(close)), 3)",
+    "macd_cross_dn3": "any_of(cross_below(macd(close), macd_signal(close)), 3)",
+    "rsi_cross_up30": "any_of(cross_above(rsi(close, 14), 30), 3)",
+    "rsi_cross_dn70": "any_of(cross_below(rsi(close, 14), 70), 3)",
+    "breakout20": "close > highest(high, 20)[1]",
+    "breakdown20": "close < lowest(low, 20)[1]",
+    "ema_stack_up": "ema(close, 20) > ema(close, 50) and ema(close, 50) > ema(close, 200)",
+    "golden_cross10": "any_of(cross_above(ema(close, 50), ema(close, 200)), 10)",
+    "above_supertrend": "close > supertrend(10, 3)",
+    "inside_bar": "high < high[1] and low > low[1]",
+    "nr7": "(high - low) <= lowest(high - low, 7)",
+    "bars_since_high20": "barssince(high >= highest(high, 20))",
 }
 INTRADAY_FEATURES: dict[str, str] = {
     "minute_of_session": "minute_of_session",
