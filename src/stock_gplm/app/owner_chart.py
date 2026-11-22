@@ -35,7 +35,8 @@ def build(o: OwnerStrategy) -> dict:
     a = max(0, o.a0 - 250)  # some history before the first signal for context
     T = [_epoch(o.tv(i)) for i in range(n)]
     r2 = lambda x: round(float(x), 2)  # noqa: E731
-    candles = [[T[i], r2(m.open[i]), r2(m.high[i]), r2(m.low[i]), r2(m.close[i]), int(m.volume[i])] for i in range(a, n)]
+    candles = [[T[i], r2(m.open[i]), r2(m.high[i]), r2(m.low[i]), r2(m.close[i]),
+                int(m.volume[i]) if np.isfinite(m.volume[i]) else 0] for i in range(a, n)]  # missing volume -> 0
     emas = {}
     for p in (13, 20, 200):
         e = _ema_of(m, p)
