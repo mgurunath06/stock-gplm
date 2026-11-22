@@ -9,7 +9,7 @@ set LOG=H:\Guru\Learning\StockGLPM\app\reports\llm\tune_phase1.log
 if not exist reports\llm mkdir reports\llm
 
 echo ==== %date% %time% health >> "%LOG%"
-%PY% -m stock_gplm.llm.health >> "%LOG%" 2>&1
+%PY% -m stock_gplm.llm.health --model ollama=qwen3.6:35b-a3b >> "%LOG%" 2>&1
 
 for %%T in (1d 15m 5m 60m) do (
   echo ==== %date% %time% local %%T >> "%LOG%"
