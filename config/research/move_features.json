@@ -3,10 +3,13 @@
   "note": "Entry-time features for move fingerprints, discovery facts and tuning loser analysis (owner 2026-11-22). name -> DSL expression evaluated at the signal bar. Values must be scale-free (divide price units by close). Events return 1/0 (shown as yes/no). List names in \"disabled\" to drop them. Every feature is tested in pairs with all others, so keep the list focused (~60-80). Not included (no data or too slow): delivery %, F&O OI / option chain, pre-open imbalance, market breadth, Nifty relative strength before 2024, chart-pattern geometry, Hurst / ADF / HMM / kNN. Sections: common = every timeframe; intraday = 5m/15m/60m only; daily = 1d and above only (owner 2026-11-22: RSI(14) all, RSI(3) intraday / short term, RSI(300) weekly and above).",
   "common": {
     "trend_ema": {
+      "dist_ema5": "close / ema(close, 5) - 1",
       "dist_ema9": "close / ema(close, 9) - 1",
+      "dist_ema13": "close / ema(close, 13) - 1",
       "dist_ema20": "close / ema(close, 20) - 1",
       "dist_ema44": "close / ema(close, 44) - 1",
       "dist_ema50": "close / ema(close, 50) - 1",
+      "dist_ema100": "close / ema(close, 100) - 1",
       "dist_ema200": "close / ema(close, 200) - 1",
       "ema20_touch": "low <= ema(close, 20) and close > ema(close, 20)",
       "ema50_touch": "low <= ema(close, 50) and close > ema(close, 50)",
