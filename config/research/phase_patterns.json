@@ -7,11 +7,11 @@
   "worked": {
     "_doc": "per TF: target/stop in % after costs (target_pct/stop_pct) or in ATR(14) multiples (target_atr/stop_atr). 1d: -0.5% is inside normal daily noise, so daily uses the same 2:1 shape sized to the stock's range.",
     "1d": {"target_atr": 1.0, "stop_atr": 0.5},
-    "default": {"target_pct": 1.0, "stop_pct": 0.5}
+    "default": {"target_pct": 2.0, "stop_pct": 1.0, "overnight": true, "_owner": "2026-11-22: 15m legs run over days - hold overnight, move = +2% before -1%"}
   },
   "change_lookbacks": [3, 10],
   "profile_offsets": [-10, -5, -3, -1, 0],
-  "after_offsets": [1, 3, 5, 10],
+  "after_offsets": [1, 3, 5, 10, 25],
   "profile_top": 20,
   "recent_wins_needed": 3,
   "base_confidence": "Medium",
@@ -21,10 +21,11 @@
     {"label": "Medium-high", "streak_min": 5}
   ],
   "exits": {
+    "_doc": "max hold in candles: intraday = 1 / 3 / 5 trading days (60m 7 per day, 15m 25, 5m 75)",
     "1d": {"holds": [3, 5, 10]},
-    "60m": {"holds": [3, 5, 10]},
-    "15m": {"holds": [3, 5, 10]},
-    "5m": {"holds": [3, 5, 10]}
+    "60m": {"holds": [7, 21, 35]},
+    "15m": {"holds": [25, 75, 125]},
+    "5m": {"holds": [75, 225, 375]}
   },
   "dedupe_overlap": 0.6,
   "levels": [0.2, 0.4, 0.6, 0.8],

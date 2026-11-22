@@ -57,6 +57,7 @@ class Finder:
         self.R = int(self.pc["recent_wins_needed"])
         wk = self.pc["worked"].get(a.tf) or self.pc["worked"]["default"]
         self.atr_mode = "target_atr" in wk
+        self.overnight = bool(wk.get("overnight", False))
         if self.atr_mode:
             self.gain, self.loss = float(wk["target_atr"]), float(wk["stop_atr"])
             self.wtext = f"+{self.gain:g} ATR before -{self.loss:g} ATR"
@@ -95,6 +96,8 @@ class Finder:
                 names.append(f"{names[j]}_chg{lb}")
                 cols.append(d)
         self.o, self.c = np.asarray(m.open, dtype=float), np.asarray(m.close, dtype=float)
+        self.intraday = bool(m.intraday)
+        self.end_ns = np.asarray(m.end_ns, dtype=np.int64)
         self.names, self.exprs = names, exprs
         self.F = np.stack(cols, axis=1)
         bull = np.asarray(dsl.signal(self.pc["phase"]["bullish"], ctx), bool)
@@ -105,9 +108,10 @@ class Finder:
         self.win = np.zeros((E, n), bool)
         self.net = np.full((E, n), np.nan)
         self.done = np.zeros((E, n), bool)
+        self.peak = np.full((E, n), np.nan)
         for k, h in enumerate(self.exits):
-            t, net, win = self.label(m, n, h, L["buy"], L["sell"])
-            self.net[k, t], self.win[k, t], self.done[k, t] = net, win, True
+            t, net, win, pk = self.label(m, n, h, L["buy"], L["sell"])
+            self.net[k, t], self.win[k, t], self.done[k, t], self.peak[k, t] = net, win, True, pk
         self.log(f"{n:,} bars {_date(self.days[0])} .. {_date(self.days[-1])}; {self.base_n} indicators + their "
                  f"changes over {self.pc.get('change_lookbacks')} candles = {len(names)} values per bar; phase today: "
                  f"{PHASES[int(self.phase[-1])]}")
@@ -118,7 +122,7 @@ class Finder:
         natr = np.asarray(m.natr, dtype=float)
         t = np.arange(n - 1)
         t = t[np.isfinite(natr[t])]
-        if m.intraday:
+        if m.intraday and not self.overnight:
             end = np.minimum(t + h, np.asarray(m.exit_last)[t + 1].astype(np.int64))
             keep = end >= t + 1
         else:
@@ -138,6 +142,7 @@ class Finder:
             tgt, stp = ent * (1 + g) * (1 + buy) / (1 - sell), ent * (1 - lz) * (1 + buy) / (1 - sell)
         never = h + 10
         ft, fs = np.full(len(t), never), np.full(len(t), never)
+        best = ent.copy()  # best price reached before the stop (for the size of the move)
         for k in range(1, h + 1):
             j = t + k
             live = j <= end
@@ -148,10 +153,13 @@ class Finder:
             sh = live & ((hi[jj] >= stp) if self.short else (lo[jj] <= stp))
             ft = np.where(th & (ft == never), k, ft)
             fs = np.where(sh & (fs == never), k, fs)
+            run = live & (fs == never)
+            best = np.where(run, np.minimum(best, lo[jj]) if self.short else np.maximum(best, hi[jj]), best)
         win = ft < fs  # same bar -> stop first (conservative)
         px = np.where(win, tgt, np.where(fs < never, stp, cl[end]))
         net = (ent * (1 - sell) - px * (1 + buy)) / ent if self.short else px * (1 - sell) / (ent * (1 + buy)) - 1
-        return t, net, win
+        pk = (ent / best - 1) if self.short else (best / ent - 1)
+        return t, net, win, pk
 
     def build_conditions(self) -> None:
         conds: list[Cond] = []
@@ -277,6 +285,42 @@ class Finder:
     def rtext(self, rule: tuple[int, ...]) -> str:
         return " AND ".join(self.ctext(self.conds[c]) for c in rule)
 
+    def when(self, i: int) -> str:
+        """Candle time for reports: date (1d) or IST date + candle end time (intraday)."""
+        if not self.intraday:
+            return _date(self.days[i])
+        t = np.datetime64(int(self.end_ns[i]), "ns") + np.timedelta64(330, "m")
+        return str(t.astype("datetime64[m]")).replace("T", " ")
+
+    def legs(self) -> np.ndarray:
+        """Start candle of every move: consecutive candles that all lead into a move (longest hold) form one move;
+        its start is the candle with the best entry (lowest next open for long)."""
+        if getattr(self, "_legs", None) is not None:
+            return self._legs
+        e = len(self.exits) - 1
+        w = np.flatnonzero(self.ok & self.done[e] & self.win[e])
+        out: list[int] = []
+        if len(w):
+            groups = np.split(w, np.flatnonzero(np.diff(w) > 1) + 1)
+            for g in groups:
+                px = self.o[np.minimum(g + 1, self.n - 1)]
+                out.append(int(g[np.argmax(px) if self.short else np.argmin(px)]))
+        self._legs = np.asarray(out, np.int64)
+        return self._legs
+
+    def moves_table(self) -> list[str]:
+        e = len(self.exits) - 1
+        legs = self.legs()
+        out = [f"## Moves found ({len(legs)}: {self.wtext} within {self.exits[e]} candles; newest first) - "
+               "check these against your chart", "",
+               "| Start candle | Phase at start | Entry (next open) | Biggest move before the stop |", "|---|---|---|---|"]
+        for i in legs[::-1][:80]:
+            out.append(f"| {self.when(i)} | {PHASES[int(self.phase[i])]} | {self.o[i + 1]:.2f} | "
+                       f"{100 * self.peak[e, i]:+.1f}% |")
+        if len(legs) > 80:
+            out.append(f"| ... {len(legs) - 80} older | | | |")
+        return out + [""]
+
     def after(self, times: np.ndarray) -> list[float]:
         """Average move from the entry (next open) to the close k candles after the signal, for each after offset."""
         sg = -1.0 if self.short else 1.0
@@ -288,7 +332,7 @@ class Finder:
 
     def row(self, rule: tuple[int, ...], r: dict, P: int) -> str:
         h = self.exits[r["e"]]
-        last = ", ".join(_date(self.days[t]) for t in r["times"][-self.R:][::-1])
+        last = ", ".join(self.when(t) for t in r["times"][-self.R:][::-1])
         n = len(r["times"])
         rate = r["all_won"] / n
         base = self.base[P][r["e"]]
@@ -302,10 +346,16 @@ class Finder:
         import warnings
         e = len(self.exits) - 1
         sel = self.ok & (self.phase == P) & self.done[e]
-        mv, ot = np.flatnonzero(sel & self.win[e]), np.flatnonzero(sel & ~self.win[e])
+        legs = self.legs()
+        mv = legs[sel[legs]]
+        near = np.zeros(self.n, bool)
+        for k in range(-10, 11):
+            near[np.clip(legs + k, 0, self.n - 1)] = True
+        ot = np.flatnonzero(sel & ~self.win[e] & ~near)
         h = self.exits[e]
-        out = [f"### Right moves in this phase: the candles around them ({len(mv):,} right moves = {self.wtext} "
-               f"within {h} candles, vs {len(ot):,} other bars)", ""]
+        out = [f"### Move starts in this phase: the candles around them ({len(mv):,} moves started in this phase "
+               f"({self.wtext} within {h} candles, start = best entry of each move); vs {len(ot):,} ordinary candles)",
+               ""]
         if len(mv) < 20:
             return out + ["Too few right moves to profile.", ""]
         offs = self.pc["profile_offsets"]
@@ -331,7 +381,8 @@ class Finder:
         cols = " / ".join(str(k) for k in offs)
         out += [f"Indicators whose path before the move differs most (median; yes/no indicators: share true). Candles "
                 f"{cols} (0 = signal candle).", "",
-                f"| Indicator | Right moves ({cols}) | Other bars ({cols}) | Difference (spreads) |", "|---|---|---|---|"]
+                f"| Indicator | Move starts ({cols}) | Ordinary candles ({cols}) | Difference (spreads) |",
+                "|---|---|---|---|"]
         for d, j, mm, oo, binary in rows[:int(self.pc.get("profile_top", 20))]:
             f = (lambda v: f"{v:.0%}") if binary else (lambda v: f"{v:.3g}")
             out.append(f"| {self.names[j]} | {' / '.join(f(v) for v in mm)} | {' / '.join(f(v) for v in oo)} | "
@@ -390,15 +441,18 @@ class Finder:
                 f"All times in phase that worked | Avg net, all times | Avg move % after {ks} candles |",
                 "|---|---|---|---|---|---|---|---|"]
         md = [f"# Phase patterns - {self.sym} {self.tf} {self.side}", "",
-              f"Last bar {_date(self.days[now])}: phase **{PHASES[P]}** since {_date(self.days[k])} "
+              f"Last bar {self.when(now)}: phase **{PHASES[P]}** since {self.when(k)} "
               f"({now - k + 1} bars). Phase: bullish = EMA9 > EMA13 > EMA20 > EMA50, bearish = the reverse, "
               "sideways = anything else.",
-              f"Trade: enter next open; worked = {self.wtext}, else stop / time exit (same candle: stop first). "
+              f"Trade: enter next open; worked = {self.wtext}, else stop / time exit (same candle: stop first); "
+              + ("held overnight (max hold " + " / ".join(str(h) for h in self.exits) + " candles). "
+                 if self.intraday and self.overnight else "") +
               f"Patterns use {self.base_n} indicators and how each changed over the last "
               f"{self.pc.get('change_lookbacks')} candles (names ending _chg3 / _chg10). Streak = worked times in a row counted back from the pattern's most recent "
               f"time; >= {self.R} = Medium, longer = higher (" + ", ".join(
                   f"{r['label']} >= {r['streak_min']}" for r in self.pc["confidence_ladder"]) + "). "
               "Near-duplicate patterns (same signals) are shown once.", ""]
+        md += self.moves_table()
         for q in (1, 0, -1):
             lst = res[q]
             n_conf: dict[str, int] = {}
@@ -429,7 +483,7 @@ class Finder:
                     act = q == P and bool(np.logical_and.reduce(self.M[list(r), now]))
                     w.writerow([PHASES[q], self.rtext(r), self.exits[x["e"]], x["conf"], x["streak"],
                                 len(x["times"]), x["all_won"], round(100 * x["avg"], 3),
-                                _date(self.days[x["times"][-1]]), act, x["ck_n"], x["ck_w"]])
+                                self.when(x["times"][-1]), act, x["ck_n"], x["ck_w"]])
         self.log(f"report: {root / 'PATTERNS.md'}")
         return 0
 
