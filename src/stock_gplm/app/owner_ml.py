@@ -182,6 +182,8 @@ class OwnerML:
         for side, arr in o.sig.items():
             S = side == "short"
             tk = np.array([i for i in takes[side] if i is not None], dtype=np.int64)
+            tk_replay = np.array([o.find(r["signal"]) or -1 for r in rows if (r["side"] or "long") == side
+                                  and r["decision"] == "take" and r.get("mode") == "replay"], dtype=np.int64)
             sk = [i for i in skips[side] if i is not None] + ([i for i in far if i is not None] if not S else [])
             prev = -10 ** 9
             for t in arr.tolist():
@@ -190,7 +192,9 @@ class OwnerML:
                 feats = ch.row(t, S)
                 you, w_you = None, 0.0
                 if len(tk) and ((tk >= t - 2) & (tk <= t + 6)).any():
-                    you, w_you = 1, 1.0
+                    # owner 2026-11-22: marks made in replay (no peeking) are honest - full weight; hindsight marks less
+                    rp = len(tk_replay) and ((tk_replay >= t - 2) & (tk_replay <= t + 6)).any()
+                    you, w_you = 1, 1.0 if rp else float((o.spec.get("ml") or {}).get("hindsight_weight", 0.6))
                 elif any(abs(i - t) <= 2 for i in sk):
                     you, w_you = 0, 1.0
                 elif o.tv(t)[:7] in marked_months:

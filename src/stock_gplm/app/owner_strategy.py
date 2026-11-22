@@ -68,7 +68,8 @@ def owner_rows(path: Path, sym: str, tf: str) -> list[dict[str, Any]]:
             dec = (r.get("decision") or "").strip().lower() or ("take" if (r.get("exit_candle") or "").strip() else "?")
             out.append({"row": i, "side": r["side"].strip().lower(), "signal": when(r["signal_candle"]), "decision": dec,
                         "stop": when(r.get("stop_candle", "")), "exit": when(r.get("exit_candle", "")),
-                        "reason": (r.get("exit_reason") or "").strip(), "why": (r.get("why") or "").strip()})
+                        "reason": (r.get("exit_reason") or "").strip(), "why": (r.get("why") or "").strip(),
+                        "mode": (r.get("mode") or "hindsight").strip()})
     return out
 
 

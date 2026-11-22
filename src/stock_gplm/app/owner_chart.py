@@ -16,7 +16,6 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 import numpy as np
 
@@ -124,6 +123,19 @@ PAGE = r"""<!doctype html>
  <button onclick="moveTo(N - 1)" title="End">Latest &#9197;</button>
  <span class="muted" style="font-size:12px">Keys: &larr; &rarr; cross &middot; Shift+&larr;&rarr; day &middot; PgUp/PgDn week &middot; Home/End</span>
 </nav>
+<nav id="rbar" style="border-bottom:1px solid var(--line)">
+ <button class="big bm" id="rStart" onclick="startReplay()" title="hide everything after the candle in the middle of the screen">&#9654; Replay from here (no peeking)</button>
+ <span id="rOn" style="display:none">
+  <b style="color:#ff9800">REPLAY</b> <span class="muted">now:</span> <b id="rNow"></b>
+  <button class="big bm" onclick="rStep(1)" title="Right arrow / Space">Next candle &#9654;</button>
+  <button onclick="rStep(4)" title="Shift + Right">+4 &#9654;&#9654;</button>
+  <button onclick="rNextCross()" title="C">To next cross &#9197;</button>
+  <button onclick="rStep(-1)" title="Left arrow">&#9664; Back</button>
+  <button onclick="stopReplay()">Exit replay</button>
+  <span class="muted" style="font-size:12px">Keys: &rarr; / Space next candle &middot; Shift+&rarr; +4 &middot; C next cross &middot; &larr; back.
+   Enter / square off only on the newest candle; SL on any candle you can see.</span>
+ </span>
+</nav>
 <div id="wrap"><div id="chart"><div id="pop"></div></div>
 <aside>
  <div style="font-size:15px"><b>Click any candle</b> - a menu opens there.</div>
@@ -173,8 +185,10 @@ const cs = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350'
   wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
 cs.setData(D.candles.map(c => ({ time: c[0], open: c[1], high: c[2], low: c[3], close: c[4] })));
 const EC = { '13': '#2962ff', '20': '#ff9800', '200': '#e0e0e0' };
-for (const p in D.emas) chart.addLineSeries({ color: EC[p], lineWidth: p === '200' ? 2 : 1, priceLineVisible: false,
-  lastValueVisible: false, crosshairMarkerVisible: false }).setData(D.emas[p].map(x => ({ time: x[0], value: x[1] })));
+const ES = {};
+for (const p in D.emas) { ES[p] = chart.addLineSeries({ color: EC[p], lineWidth: p === '200' ? 2 : 1, priceLineVisible: false,
+  lastValueVisible: false, crosshairMarkerVisible: false }); ES[p].setData(D.emas[p].map(x => ({ time: x[0], value: x[1] }))); }
+const emaAt = {}; for (const p in D.emas) { emaAt[p] = {}; D.emas[p].forEach(x => emaAt[p][x[0]] = x[1]); }
 const byTime = {}, idx = {}; D.candles.forEach((c, i) => { byTime[c[0]] = c; idx[c[0]] = i; });
 const e200 = {}, e20 = {}; D.emas['200'].forEach(x => e200[x[0]] = x[1]); D.emas['20'].forEach(x => e20[x[0]] = x[1]);
 const sigAt = {}; D.signals.forEach(s => (sigAt[s[0]] = sigAt[s[0]] || []).push(s));
@@ -206,6 +220,7 @@ chart.subscribeClick(p => {
   if (!p.time || !p.point) return closePop();
   popT = p.time;
   const c = byTime[p.time], o = openTrade();
+  const newest = RP == null || p.time === D.candles[RP][0];  // replay: enter / square off only on the newest candle
   const sig = (sigAt[p.time] || []).map(s => `${s[1]} cross ${s[2].replace('-milestone', '')}`).join(', ');
   let h = `<button class="x" onclick="closePop()">&times;</button><div class="t">${fmt(p.time)}</div>` +
     `<div class="muted" style="font-size:12px">O ${c[1]} H ${c[2]} L ${c[3]} C ${c[4]}${sig ? '<br>' + sig : ''}</div>`;
@@ -213,11 +228,17 @@ chart.subscribeClick(p => {
   if (o && !o.sl && p.time !== o.entry) {
     h += `<div style="margin-top:8px">Your open <b>${o.side}</b> from ${fmt(o.entry)}:</div>` +
       `<button class="big bm" onclick="setSL()">SL here (${o.side === 'short' ? 'high ' + c[2] : 'low ' + c[3]})</button>`;
+  } else if (o && o.sl && !o.exit && p.time > o.entry && !newest) {
+    h += `<div style="margin-top:8px;color:#ff9800">Replay: square off only on the newest candle (${fmt(D.candles[RP][0])}). ` +
+      `Press &rarr; to move on.</div>`;
   } else if (o && o.sl && !o.exit && p.time > o.entry) {
     popReason = guessReason(o, p.time);
     h += `<div style="margin-top:8px">Square off your <b>${o.side}</b> from ${fmt(o.entry)} here - why?</div><div id="chips">` +
       REASONS.map(r => `<button class="chip${r === popReason ? ' on' : ''}" onclick="pickReason(this,'${r}')">${r}</button>`).join('') +
       `</div><input type="text" id="pw" placeholder="why you exit (optional)" value="${esc(o.exitWhy)}"><button class="big bm" style="margin-top:6px" onclick="setExit()">Square off here</button>`;
+  } else if (!newest) {
+    h += `<div style="margin-top:8px;color:#ff9800">Replay: enter only on the newest candle (${fmt(D.candles[RP][0])}). ` +
+      `Press &rarr; to move on.</div>`;
   } else {
     h += `<div style="margin-top:8px"><button class="big bl" onclick="newTrade('long')">Buy here</button>` +
       `<button class="big bs" onclick="newTrade('short')">Short here</button><button class="big" onclick="newTrade('skip')">Skip</button></div>` +
@@ -242,12 +263,13 @@ const pw = () => (document.getElementById('pw') || {}).value ? document.getEleme
 function newTrade(side) {
   const o = openTrade();
   if (o && side !== 'skip') { toast('Finish or remove your open trade first'); return; }
-  snap(); T.push({ id: Date.now(), side, entry: popT, sl: null, exit: null, reason: '', why: pw(), exitWhy: '' });
+  snap(); T.push({ id: Date.now(), side, entry: popT, sl: null, exit: null, reason: '', why: pw(), exitWhy: '',
+    mode: RP == null ? 'hindsight' : 'replay' });
   draft = '';
   save(); closePop(); toast(side === 'skip' ? 'Skip saved' : 'Entry saved - now click the SL candle');
 }
 function setSL() { const o = openTrade(); snap(); o.sl = popT; save(); closePop(); toast('SL saved - now click the square-off candle'); }
-function setExit() { const o = openTrade(); snap(); o.exit = popT; o.reason = popReason || 'Other'; o.exitWhy = pw(); save(); closePop();
+function setExit() { const o = openTrade(); snap(); o.exit = popT; if (RP == null) o.mode = 'hindsight'; o.reason = popReason || 'Other'; o.exitWhy = pw(); save(); closePop();
   toast('Trade saved: ' + (result(o) ?? '') + '%'); }
 function removeHere() {
   snap();
@@ -280,8 +302,9 @@ function draw() {
     if (x.exit) { const r = result(x); mk.push({ time: x.exit, position: S ? 'belowBar' : 'aboveBar', color: (r || 0) > 0 ? '#26a69a' : '#ef5350',
       shape: 'square', size: 0.8, text: 'OUT ' + (r != null ? (r > 0 ? '+' : '') + r + '%' : '') }); }
   });
+  const lim = RP == null ? Infinity : D.candles[RP][0];
   mk.sort((a, b) => a.time - b.time);
-  cs.setMarkers(mk);
+  cs.setMarkers(mk.filter(m => m.time <= lim));
   const o = openTrade();
   if (slLine) { cs.removePriceLine(slLine); slLine = null; }
   if (o && o.sl) slLine = cs.createPriceLine({ price: slPx(o), color: '#ef5350', lineStyle: 2, title: 'your SL' });
@@ -293,8 +316,9 @@ function draw() {
     const r = result(x), open = x.side !== 'skip' && (!x.sl || !x.exit);
     const next = !x.sl ? 'click the SL candle' : 'click the square-off candle';
     return `<div class="card${open ? ' open' : ''}"><div class="row"><span><span class="lnk" onclick="go(${x.entry})">${fmt(x.entry)}</span> ` +
-      `<b class="${x.side === 'long' ? 'pos' : x.side === 'short' ? 'neg' : 'muted'}">${x.side === 'long' ? 'BUY' : x.side.toUpperCase()}</b></span>` +
-      `<span>${r != null ? `<b class="${r > 0 ? 'pos' : 'neg'}">${r > 0 ? '+' : ''}${r}%</b>` : ''}` +
+      `<b class="${x.side === 'long' ? 'pos' : x.side === 'short' ? 'neg' : 'muted'}">${x.side === 'long' ? 'BUY' : x.side.toUpperCase()}</b>` +
+      `${x.mode === 'replay' ? ' <span title="marked in replay - no peeking" style="color:#26a69a;font-size:11px">REPLAY</span>' : ''}</span>` +
+      `<span>${r != null && (RP == null || x.exit <= D.candles[RP][0]) ? `<b class="${r > 0 ? 'pos' : 'neg'}">${r > 0 ? '+' : ''}${r}%</b>` : ''}` +
       `<button class="del" title="delete" onclick="delTrade(${x.id})">&times;</button></span></div>` +
       (x.side === 'skip' ? '' : `<div class="muted" style="font-size:12px">SL ${x.sl ? fmt(x.sl).slice(5) + ' @ ' + slPx(x) : '-'} &middot; ` +
         `out ${x.exit ? fmt(x.exit).slice(5) + ' (' + esc(x.reason) + ')' : '-'}${open ? ` &middot; <span style="color:#ff9800">next: ${next}</span>` : ''}</div>`) +
@@ -308,9 +332,9 @@ function exportCsv() {
   const dt = t => { if (!t) return ''; const s = fmt(t); return s.slice(8, 10) + '-' + s.slice(5, 7) + '-' + s.slice(0, 4) + s.slice(10); };
   const rows = T.slice().sort((a, b) => a.entry - b.entry).map(x => [D.symbol, D.tf,
     x.side === 'skip' ? (((sigAt[x.entry] || [])[0] || [0, 'long'])[1]) : x.side, dt(x.entry), x.side === 'skip' ? 'skip' : 'take',
-    dt(x.sl), dt(x.exit), q(x.reason), q([x.why, x.exitWhy].filter(Boolean).join(' | exit: '))].join(','));
+    dt(x.sl), dt(x.exit), q(x.reason), q([x.why, x.exitWhy].filter(Boolean).join(' | exit: ')), x.mode || 'hindsight'].join(','));
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([['symbol,tf,side,signal_candle,decision,stop_candle,exit_candle,exit_reason,why'].concat(rows).join('\n') + '\n'], { type: 'text/csv' }));
+  a.href = URL.createObjectURL(new Blob([['symbol,tf,side,signal_candle,decision,stop_candle,exit_candle,exit_reason,why,mode'].concat(rows).join('\n') + '\n'], { type: 'text/csv' }));
   a.download = `owner_trades-${D.symbol}-${D.tf}.csv`; a.click();
 }
 document.addEventListener('keydown', e => {
@@ -319,6 +343,11 @@ document.addEventListener('keydown', e => {
   else if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
   else if (k === 'escape') closePop();
   if (e.target.tagName === 'INPUT') return;  // arrows move the cursor while you type
+  if (RP != null) {  // replay keys
+    if (k === 'arrowright' || k === ' ') { e.preventDefault(); return rStep(e.shiftKey ? 4 : 1); }
+    if (k === 'arrowleft') { e.preventDefault(); return rStep(-1); }
+    if (k === 'c') { e.preventDefault(); return rNextCross(); }
+  }
   const nav = { arrowleft: () => cross(-1), arrowright: () => cross(1), pageup: () => step(-BIG), pagedown: () => step(BIG),
     home: () => moveTo(0), end: () => moveTo(D.candles.length - 1) };
   if (e.shiftKey && k === 'arrowleft') { e.preventDefault(); step(-SMALL); }
@@ -363,9 +392,53 @@ function goDate(v) {
   const i = D.candles.findIndex(c => c[0] >= t);
   moveTo(i < 0 ? N - 1 : i, true);
 }
+// ---------------------------------------------------------------- replay (no peeking)
+const RKEY = KEY + '-replay';
+let RP = null;  // index of the newest visible candle
+const bar = c => ({ time: c[0], open: c[1], high: c[2], low: c[3], close: c[4] });
+function showUpTo(i) {
+  const t = D.candles[i][0];
+  cs.setData(D.candles.slice(0, i + 1).map(bar));
+  for (const p in ES) ES[p].setData(D.emas[p].filter(x => x[0] <= t).map(x => ({ time: x[0], value: x[1] })));
+}
+function rShow() {
+  document.getElementById('rNow').textContent = fmt(D.candles[RP][0]);
+  try { localStorage.setItem(RKEY, String(RP)); } catch (e) {}
+  draw(); ts.scrollToRealTime();
+}
+function startReplay(at) {
+  RP = Math.max(250, Math.min(N - 2, at != null ? at : centre()));
+  showUpTo(RP);
+  document.getElementById('rStart').style.display = 'none'; document.getElementById('rOn').style.display = '';
+  closePop(); rShow(); toast('Replay: everything after ' + fmt(D.candles[RP][0]) + ' is hidden');
+}
+function stopReplay() {
+  RP = null; try { localStorage.removeItem(RKEY); } catch (e) {}
+  cs.setData(D.candles.map(bar));
+  for (const p in ES) ES[p].setData(D.emas[p].map(x => ({ time: x[0], value: x[1] })));
+  document.getElementById('rStart').style.display = ''; document.getElementById('rOn').style.display = 'none';
+  closePop(); draw();
+}
+function rStep(k) {
+  if (RP == null) return;
+  if (k < 0) { RP = Math.max(250, RP + k); showUpTo(RP); return rShow(); }
+  for (let j = 0; j < k && RP < N - 1; j++) {
+    RP++; const c = D.candles[RP];
+    cs.update(bar(c));
+    for (const p in ES) if (emaAt[p][c[0]] != null) ES[p].update({ time: c[0], value: emaAt[p][c[0]] });
+  }
+  closePop(); rShow();
+}
+function rNextCross() {
+  if (RP == null) return;
+  const i = crossIdx.find(x => x > RP);
+  if (i == null) return toast('No later cross');
+  rStep(i - RP);
+}
 ts.subscribeVisibleLogicalRangeChange(() => { const c = centre(); if (D.candles[c]) document.getElementById('where').textContent = fmt(D.candles[c][0]); });
 draw();
 ts.setVisibleLogicalRange({ from: N - (DAILY ? 250 : 150), to: N + 5 });
+try { const r = localStorage.getItem(RKEY); if (r != null) startReplay(+r); } catch (e) {}  // resume where you stopped
 </script></body></html>
 """
 
