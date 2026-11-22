@@ -297,16 +297,24 @@ class OwnerStrategy:
             w.writerows(out_rows)
         self.log("check: " + "; ".join(f"{k}: {a} same / {b} within 1 of {taken}" for k, (a, b) in score.items()))
         self.log("stop candle same as yours: " + ", ".join(f"{k} {v}" for k, v in stop_hits.items()) + f" of {n_stop}")
-        # every version over all 2026 signals
-        md += ["", "## 1b. Each exit version over every 2026 signal (one position per side at a time)", "",
-               "| Version | Exit candles like yours (same / within 1) | Long | Short |", "|---|---|---|---|"]
-        for v in variants:
+        self.score, self.taken = score, taken
+        return md
+
+    def versions(self) -> list[str]:
+        """Every exit version over every signal of this timeframe (owner 2026-11-22: win rate on all TFs)."""
+        score, taken = getattr(self, "score", {}), getattr(self, "taken", 0)
+        short_note = " (research only: overnight cash shorts are not possible)" if not self.m.intraday else ""
+        md = ["", f"## 1b. Each exit version over every signal {self.tv(self.a0)[:10]} .. {self.tv(len(self.m) - 1)[:10]}"
+              " (one position per side at a time)", "",
+              f"| Version | Exit candles like yours (same / within 1) | Long | Short{short_note} |", "|---|---|---|---|"]
+        for v in self.spec["check"]["variants"]:
             cells = []
             for side, arr in self.sig.items():
                 s = self.stats(self.sim(side, arr, v))
                 cells.append(f"{s['label']}: {s['text']}")
-            a, b = score[v["name"]]
-            md.append(f"| {v['name']} | {a} / {b} of {taken} | " + " | ".join(cells) + " |")
+            a, b = score.get(v["name"], (0, 0))
+            md.append(f"| {v['name']} | " + (f"{a} / {b} of {taken}" if taken else "-") + " | " + " | ".join(cells) + " |")
+            self.log(f"{v['name']}: " + " | ".join(f"{side} {c.split(' | ')[0]}" for side, c in zip(self.sig, cells)))
         return md
 
     # ------------------------------------------------------------------ run
@@ -323,6 +331,7 @@ class OwnerStrategy:
             md.append(f"- **{side}**: {Exit.of(self.exit_doc(side)).text(None, side == 'short')}")
         if not self.a.no_check:
             md += self.check(root)
+        md += self.versions()
         # every trade, one position per side at a time
         allrows: list[dict[str, Any]] = []
         md += ["", "## 3. Every trade (default exit reading, one position per side at a time)", ""]
