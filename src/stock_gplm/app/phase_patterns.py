@@ -130,11 +130,11 @@ class Finder:
         self.net = np.full((E, n), np.nan)
         self.done = np.zeros((E, n), bool)
         self.peak = np.full((E, n), np.nan)
-        self.res = np.full((E, n), n + 1, np.int64)  # candle where the trade closed
+        self.closed_at = np.full((E, n), n + 1, np.int64)  # candle where the trade closed
         for k, h in enumerate(self.exits):
             t, net, win, pk, rs = self.label(m, n, h, L["buy"], L["sell"])
             self.net[k, t], self.win[k, t], self.done[k, t], self.peak[k, t] = net, win, True, pk
-            self.res[k, t] = rs
+            self.closed_at[k, t] = rs
         # owner rule (2026-11-21, MOST IMPORTANT): recent trades weigh more - age counted in sessions
         self.sid = (np.asarray(m.session_id, dtype=np.int64) if m.intraday else np.arange(n, dtype=np.int64))
         self.full_ok, self.full_done = self.ok.copy(), self.done.copy()
@@ -150,7 +150,7 @@ class Finder:
         self.cut = int(cut)
         idx = np.arange(self.n)
         self.ok = self.full_ok & (idx < self.cut)
-        self.done = self.full_done & (self.res < self.cut)
+        self.done = self.full_done & (self.closed_at < self.cut)
         self._legs = None
 
     def wt(self, idx: np.ndarray) -> np.ndarray:
@@ -267,7 +267,7 @@ class Finder:
             s = st[self.done[e, st]]
             if len(s) < R:
                 continue
-            s = _one_at_a_time(s, self.res[e])
+            s = _one_at_a_time(s, self.closed_at[e])
             if len(s) < R:
                 continue
             w = self.win[e, s]
