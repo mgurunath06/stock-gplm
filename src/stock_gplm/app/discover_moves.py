@@ -21,6 +21,7 @@ create a strategy").
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Mapping
 
 import numpy as np
@@ -41,6 +42,117 @@ SCHEMA = ('{"strategies": [{"name": "2-4 words, readable", "idea": "one sentence
           '"entry": "<DSL condition WITHOUT the liquidity floor>", '
           '"exit": {"target_atr": number, "stop_atr": number, "max_hold_bars": int, "trail_atr": number|null, '
           '"when": "<optional DSL exit condition>" or null}}]}')
+
+
+# ------------------------------------------------------------------ parallel helpers (owner 2026-11-22: use all cores)
+_G: dict[str, Any] = {}
+
+
+def _init_worker(shared: Mapping[str, Any]) -> None:
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    _G.clear()
+    _G.update(shared)
+
+
+def _run_parallel(fn: Any, shared: Mapping[str, Any], tasks: list) -> list:
+    """fn(task) for every task in a process pool; the big arrays in `shared` go to each worker once. Falls back to
+    one core if the pool fails, so a run never dies because of the parallel step."""
+    from concurrent.futures import ProcessPoolExecutor
+    nw = max(1, min(20, (os.cpu_count() or 4) - 4, len(tasks)))
+    if nw > 1:
+        try:
+            with ProcessPoolExecutor(nw, initializer=_init_worker, initargs=(shared,)) as ex:
+                return list(ex.map(fn, tasks))
+        except Exception as exc:  # noqa: BLE001 - fall back to the serial path
+            print(f"parallel step failed ({type(exc).__name__}: {str(exc)[:160]}); running on one core", flush=True)
+    _init_worker(shared)
+    try:
+        return [fn(t) for t in tasks]
+    finally:
+        _G.clear()
+
+
+def _chunks(items: list, n: int) -> list[list]:
+    n = max(1, min(n, len(items)))
+    return [items[i::n] for i in range(n)]
+
+
+def _combo_chunk(task: tuple) -> list[tuple]:
+    """Condition combinations: (hit rate, avg net, share, bars, cols, bins) for cells with >= min_n bars."""
+    combos, k, min_n = task
+    bins, hit, net, w = _G["bins"], _G["hit"], _G["net"], _G["w"]
+    N = len(hit)
+    out = []
+    for combo in combos:
+        cols = list(combo)
+        ok = np.all(bins[:, cols] >= 0, axis=1)
+        if not ok.any():
+            continue
+        idx = np.zeros(int(ok.sum()), np.int64)
+        for c in cols:
+            idx = idx * 5 + bins[ok, c].astype(np.int64)
+        size = 5 ** k
+        cnt = np.bincount(idx, minlength=size)
+        sw_ = np.bincount(idx, weights=w[ok], minlength=size)
+        sh = np.bincount(idx, weights=w[ok] * hit[ok], minlength=size)
+        sn = np.bincount(idx, weights=w[ok] * net[ok], minlength=size)
+        for cell in np.flatnonzero(cnt >= min_n):
+            if sw_[cell] <= 0:
+                continue
+            qs, rest = [], int(cell)
+            for _ in cols:
+                rest, q = divmod(rest, 5)
+                qs.append(q)
+            out.append((float(sh[cell] / sw_[cell]), float(sn[cell] / sw_[cell]), float(cnt[cell] / N), int(cnt[cell]),
+                        tuple(cols), tuple(qs[::-1])))
+    return out
+
+
+def _stock_chunk(task: tuple) -> dict[str, Any]:
+    """Per-stock condition-pair rules for a chunk of feature pairs (see MoveDiscoverer._stock_rules)."""
+    pairs, mb, mh, lift, min_stocks = task
+    bins, hit, net, st = _G["bins"], _G["hit"], _G["net"], _G["st"]
+    tune, conf, per, S, P, base_t = _G["tune"], _G["conf"], _G["per"], _G["S"], _G["P"], _G["base_t"]
+    res: dict[str, Any] = {"n_pass": 0, "n_elig": 0, "elig_s": np.zeros(S, np.int64), "per_stock": [], "found": []}
+    for a, b in pairs:
+        ok = (bins[:, a] >= 0) & (bins[:, b] >= 0)
+        key = st * 25 + bins[:, a].astype(np.int64) * 5 + bins[:, b]
+
+        def agg(sel: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            k = key[sel]
+            return (np.bincount(k, minlength=S * 25).reshape(S, 25),
+                    np.bincount(k, weights=hit[sel], minlength=S * 25).reshape(S, 25),
+                    np.bincount(k, weights=net[sel], minlength=S * 25).reshape(S, 25))
+        n_t, h_t, s_t = agg(ok & tune)
+        hr_t = h_t / np.maximum(n_t, 1)
+        elig = n_t >= mb
+        ok_pass = (elig & (h_t >= mh) & (hr_t >= np.maximum(lift * base_t[:, None], base_t[:, None] + 0.10))
+                   & (s_t > 0))
+        res["n_pass"] += int(ok_pass.sum())
+        res["n_elig"] += int(elig.sum())
+        res["elig_s"] += elig.sum(axis=1)
+        if not ok_pass.any():
+            continue
+        cnt = ok_pass.sum(axis=0)
+        n_c, h_c, s_c = agg(ok & conf)
+        # consistency = periods (years daily / months intraday, >= 3 bars) in which the rule beat the stock's base
+        selp = ok & tune
+        kp = key[selp] * P + per[selp]
+        pn = np.bincount(kp, minlength=S * 25 * P).reshape(S, 25, P)
+        ph = np.bincount(kp, weights=hit[selp], minlength=S * 25 * P).reshape(S, 25, P)
+        for s_, c_ in zip(*np.nonzero(ok_pass)):
+            okp = pn[s_, c_] >= 3
+            good = int((ph[s_, c_][okp] / pn[s_, c_][okp] > base_t[s_]).sum())
+            res["per_stock"].append((int(s_), (a, b, int(c_), int(n_t[s_, c_]), float(h_t[s_, c_]), float(s_t[s_, c_]),
+                                               int(okp.sum()), good, int(n_c[s_, c_]), float(h_c[s_, c_]),
+                                               float(s_c[s_, c_]), int(cnt[c_]))))
+        for c in np.flatnonzero(cnt >= min_stocks):
+            stocks = np.flatnonzero(ok_pass[:, c])
+            res["found"].append({"a": a, "b": b, "qa": int(c) // 5, "qb": int(c) % 5, "stocks": stocks,
+                                 "elig": int(elig[:, c].sum()), "n_t": int(n_t[stocks, c].sum()),
+                                 "h_t": float(h_t[stocks, c].sum()), "base_t": float(base_t[stocks].mean()),
+                                 "n_c": n_c[stocks, c], "h_c": h_c[stocks, c], "s_c": s_c[stocks, c]})
+    return res
 
 
 class MoveDiscoverer(Discoverer):
@@ -194,51 +306,20 @@ class MoveDiscoverer(Discoverer):
         nb_t = np.bincount(st[tune], minlength=S)
         base_t = np.bincount(st[tune], weights=hit[tune], minlength=S) / np.maximum(nb_t, 1)
         mb, mh, lift = int(self.sr["min_bars"]), int(self.sr["min_hits"]), float(self.sr["lift"])
-        found, n_pass, n_elig = [], 0, 0
         J = sorted(edges)
-        for ia, a in enumerate(J):
-            for b in J[ia + 1:]:
-                ok = (bins[:, a] >= 0) & (bins[:, b] >= 0)
-                key = st * 25 + bins[:, a].astype(np.int64) * 5 + bins[:, b]
-
-                def agg(sel: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-                    k = key[sel]
-                    return (np.bincount(k, minlength=S * 25).reshape(S, 25),
-                            np.bincount(k, weights=hit[sel], minlength=S * 25).reshape(S, 25),
-                            np.bincount(k, weights=net[sel], minlength=S * 25).reshape(S, 25))
-                n_t, h_t, s_t = agg(ok & tune)
-                hr_t = h_t / np.maximum(n_t, 1)
-                elig = n_t >= mb
-                ok_pass = (elig & (h_t >= mh) & (hr_t >= np.maximum(lift * base_t[:, None], base_t[:, None] + 0.10))
-                           & (s_t > 0))
-                n_pass += int(ok_pass.sum())
-                n_elig += int(elig.sum())
-                elig_s += elig.sum(axis=1)
-                if not ok_pass.any():
-                    continue
-                cnt = ok_pass.sum(axis=0)
-                n_c, h_c, s_c = agg(ok & conf)
-                # per-stock view (owner 2026-11-22): every passing rule of every stock, with consistency = periods
-                # (years daily / months intraday, >= 3 bars) in which it beat the stock's own base rate
-                selp = ok & tune
-                kp = key[selp] * P + per[selp]
-                pn = np.bincount(kp, minlength=S * 25 * P).reshape(S, 25, P)
-                ph = np.bincount(kp, weights=hit[selp], minlength=S * 25 * P).reshape(S, 25, P)
-                for s_, c_ in zip(*np.nonzero(ok_pass)):
-                    okp = pn[s_, c_] >= 3
-                    good = int((ph[s_, c_][okp] / pn[s_, c_][okp] > base_t[s_]).sum())
-                    per_stock.setdefault(int(s_), []).append(
-                        (a, b, int(c_), int(n_t[s_, c_]), float(h_t[s_, c_]), float(s_t[s_, c_]), int(okp.sum()), good,
-                         int(n_c[s_, c_]), float(h_c[s_, c_]), float(s_c[s_, c_]), int(cnt[c_])))
-                cells = np.flatnonzero(cnt >= int(self.sr["min_stocks"]))
-                if not len(cells):
-                    continue
-                for c in cells:
-                    stocks = np.flatnonzero(ok_pass[:, c])
-                    found.append({"a": a, "b": b, "qa": int(c) // 5, "qb": int(c) % 5, "stocks": stocks,
-                                  "elig": int(elig[:, c].sum()), "n_t": int(n_t[stocks, c].sum()),
-                                  "h_t": float(h_t[stocks, c].sum()), "base_t": float(base_t[stocks].mean()),
-                                  "n_c": n_c[stocks, c], "h_c": h_c[stocks, c], "s_c": s_c[stocks, c]})
+        pairs = [(a, b) for ia, a in enumerate(J) for b in J[ia + 1:]]
+        shared = {"bins": bins, "hit": hit, "net": net, "st": st, "tune": tune, "conf": conf, "per": per, "S": S, "P": P,
+                  "base_t": base_t}
+        tasks = [(ch, mb, mh, lift, int(self.sr["min_stocks"]))
+                 for ch in _chunks(pairs, 4 * max(1, min(20, (os.cpu_count() or 4) - 4)))]
+        found, n_pass, n_elig = [], 0, 0
+        for part in _run_parallel(_stock_chunk, shared, tasks):
+            n_pass += part["n_pass"]
+            n_elig += part["n_elig"]
+            elig_s += part["elig_s"]
+            for si, item in part["per_stock"]:
+                per_stock.setdefault(si, []).append(item)
+            found += part["found"]
         p_pass = n_pass / n_elig if n_elig else 0.0
         for f in found:
             f["chance"] = p_pass * f["elig"]
@@ -321,30 +402,16 @@ class MoveDiscoverer(Discoverer):
     def _combos(self, k: int, cols: list[int], bins: np.ndarray, edges: Mapping[int, np.ndarray], hit: np.ndarray,
                 net: np.ndarray, w: np.ndarray, names: list[str], min_n: int) -> list[tuple]:
         from itertools import combinations
-        N = len(hit)
+        combos = list(combinations(cols, k))
+        if not combos:
+            return []
+        tasks = [(ch, k, min_n) for ch in _chunks(combos, 4 * max(1, min(20, (os.cpu_count() or 4) - 4)))]
+        parts = _run_parallel(_combo_chunk, {"bins": bins, "hit": hit, "net": net, "w": w}, tasks)
         cells = []
-        for combo in combinations(cols, k):
-            ok = np.all(bins[:, list(combo)] >= 0, axis=1)
-            if not ok.any():
-                continue
-            idx = np.zeros(int(ok.sum()), np.int32)
-            for c in combo:
-                idx = idx * 5 + bins[ok, c].astype(np.int32)
-            size = 5 ** k
-            cnt = np.bincount(idx, minlength=size)
-            sw_ = np.bincount(idx, weights=w[ok], minlength=size)
-            sh = np.bincount(idx, weights=w[ok] * hit[ok], minlength=size)
-            sn = np.bincount(idx, weights=w[ok] * net[ok], minlength=size)
-            for cell in np.flatnonzero(cnt >= min_n):
-                if sw_[cell] <= 0:
-                    continue
-                qs, rest = [], int(cell)
-                for _ in combo:
-                    rest, q = divmod(rest, 5)
-                    qs.append(q)
-                qs = qs[::-1]
-                desc = " AND ".join(f"{names[c]} {self._rng(edges[c], q)}" for c, q in zip(combo, qs))
-                cells.append((sh[cell] / sw_[cell], sn[cell] / sw_[cell], cnt[cell] / N, cnt[cell], desc))
+        for part in parts:
+            for hr, nt, share, n, cc, qs in part:
+                desc = " AND ".join(f"{names[c]} {self._rng(edges[c], q)}" for c, q in zip(cc, qs))
+                cells.append((hr, nt, share, n, desc))
         cells.sort(key=lambda r: -r[0])
         return cells
 
