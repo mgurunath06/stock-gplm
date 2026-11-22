@@ -55,8 +55,14 @@ class Finder:
         ex = self.pc["exits"].get(a.tf) or self.pc["exits"]["1d"]
         self.exits = [int(h) for h in ex["holds"]]
         self.R = int(self.pc["recent_wins_needed"])
-        self.gain = float(self.pc["worked_net_pct"]) / 100.0
-        self.loss = float(self.pc["stop_net_pct"]) / 100.0
+        wk = self.pc["worked"].get(a.tf) or self.pc["worked"]["default"]
+        self.atr_mode = "target_atr" in wk
+        if self.atr_mode:
+            self.gain, self.loss = float(wk["target_atr"]), float(wk["stop_atr"])
+            self.wtext = f"+{self.gain:g} ATR before -{self.loss:g} ATR"
+        else:
+            self.gain, self.loss = float(wk["target_pct"]) / 100.0, float(wk["stop_pct"]) / 100.0
+            self.wtext = f"+{100 * self.gain:g}% before -{100 * self.loss:g}% (after costs)"
 
     # ------------------------------------------------------------------ data
     def load(self) -> bool:
@@ -81,6 +87,14 @@ class Finder:
                 continue
             names.append(nm)
             cols.append(np.array(x, dtype=float))
+        self.base_n = len(names)
+        for lb in self.pc.get("change_lookbacks") or []:  # how each indicator changed over the last lb candles
+            for j in range(self.base_n):
+                d = np.full(n, np.nan)
+                d[lb:] = cols[j][lb:] - cols[j][:-lb]
+                names.append(f"{names[j]}_chg{lb}")
+                cols.append(d)
+        self.o, self.c = np.asarray(m.open, dtype=float), np.asarray(m.close, dtype=float)
         self.names, self.exprs = names, exprs
         self.F = np.stack(cols, axis=1)
         bull = np.asarray(dsl.signal(self.pc["phase"]["bullish"], ctx), bool)
@@ -94,7 +108,8 @@ class Finder:
         for k, h in enumerate(self.exits):
             t, net, win = self.label(m, n, h, L["buy"], L["sell"])
             self.net[k, t], self.win[k, t], self.done[k, t] = net, win, True
-        self.log(f"{n:,} bars {_date(self.days[0])} .. {_date(self.days[-1])}; {len(names)} indicators; phase today: "
+        self.log(f"{n:,} bars {_date(self.days[0])} .. {_date(self.days[-1])}; {self.base_n} indicators + their "
+                 f"changes over {self.pc.get('change_lookbacks')} candles = {len(names)} values per bar; phase today: "
                  f"{PHASES[int(self.phase[-1])]}")
         return True
 
@@ -113,7 +128,11 @@ class Finder:
         o, hi, lo, cl = (np.asarray(x, dtype=float) for x in (m.open, m.high, m.low, m.close))
         ent = o[t + 1]
         g, lz = self.gain, self.loss
-        if self.short:
+        if self.atr_mode:
+            atr = natr[t] * ent
+            sg = -1.0 if self.short else 1.0
+            tgt, stp = ent + sg * g * atr, ent - sg * lz * atr
+        elif self.short:
             tgt, stp = ent * (1 - sell - g) / (1 + buy), ent * (1 - sell + lz) / (1 + buy)
         else:
             tgt, stp = ent * (1 + g) * (1 + buy) / (1 - sell), ent * (1 - lz) * (1 + buy) / (1 - sell)
@@ -258,16 +277,71 @@ class Finder:
     def rtext(self, rule: tuple[int, ...]) -> str:
         return " AND ".join(self.ctext(self.conds[c]) for c in rule)
 
+    def after(self, times: np.ndarray) -> list[float]:
+        """Average move from the entry (next open) to the close k candles after the signal, for each after offset."""
+        sg = -1.0 if self.short else 1.0
+        out = []
+        for k in self.pc["after_offsets"]:
+            t = times[times + max(k, 1) < self.n]
+            out.append(float(np.mean(sg * (self.c[t + k] / self.o[t + 1] - 1))) if len(t) else float("nan"))
+        return out
+
     def row(self, rule: tuple[int, ...], r: dict, P: int) -> str:
         h = self.exits[r["e"]]
         last = ", ".join(_date(self.days[t]) for t in r["times"][-self.R:][::-1])
         n = len(r["times"])
         rate = r["all_won"] / n
         base = self.base[P][r["e"]]
-        return (f"| {self.rtext(rule)} | max {h} bars | **{r['conf']}** | {r['streak']} | {last} | "
-                f"{r['all_won']} of {n} ({rate:.0%}, x{rate / base:.1f} base) | {100 * r['avg']:+.2f}% |"
-                if base > 0 else f"| {self.rtext(rule)} | max {h} bars | **{r['conf']}** | {r['streak']} | {last} | "
-                f"{r['all_won']} of {n} | {100 * r['avg']:+.2f}% |")
+        aft = " / ".join(f"{100 * x:+.1f}" for x in self.after(r["times"]))
+        won = f"{r['all_won']} of {n} ({rate:.0%}" + (f", x{rate / base:.1f} base)" if base > 0 else ")")
+        return (f"| {self.rtext(rule)} | max {h} bars | **{r['conf']}** | {r['streak']} | {last} | {won} | "
+                f"{100 * r['avg']:+.2f}% | {aft} |")
+
+    def profile(self, P: int) -> list[str]:
+        """-10..0 candles: how each indicator behaved before the right moves vs other bars; +1..+10: price after."""
+        import warnings
+        e = len(self.exits) - 1
+        sel = self.ok & (self.phase == P) & self.done[e]
+        mv, ot = np.flatnonzero(sel & self.win[e]), np.flatnonzero(sel & ~self.win[e])
+        h = self.exits[e]
+        out = [f"### Right moves in this phase: the candles around them ({len(mv):,} right moves = {self.wtext} "
+               f"within {h} candles, vs {len(ot):,} other bars)", ""]
+        if len(mv) < 20:
+            return out + ["Too few right moves to profile.", ""]
+        offs = self.pc["profile_offsets"]
+        rows = []
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for j in range(self.base_n):
+                x = self.F[:, j]
+                xs = x[sel][np.isfinite(x[sel])]
+                if len(xs) < 50:
+                    continue
+                binary = bool(np.isin(np.unique(xs), (0.0, 1.0)).all())
+                stat = np.nanmean if binary else np.nanmedian
+                scale = 0.5 if binary else float(np.percentile(xs, 75) - np.percentile(xs, 25))
+                if not scale > 0:
+                    continue
+                mm = [float(stat(x[mv[mv + k >= 0] + k])) for k in offs]
+                oo = [float(stat(x[ot[ot + k >= 0] + k])) for k in offs]
+                d = max(abs(p - q) for p, q in zip(mm, oo)) / scale
+                if np.isfinite(d):
+                    rows.append((d, j, mm, oo, binary))
+        rows.sort(key=lambda r: -r[0])
+        cols = " / ".join(str(k) for k in offs)
+        out += [f"Indicators whose path before the move differs most (median; yes/no indicators: share true). Candles "
+                f"{cols} (0 = signal candle).", "",
+                f"| Indicator | Right moves ({cols}) | Other bars ({cols}) | Difference (spreads) |", "|---|---|---|---|"]
+        for d, j, mm, oo, binary in rows[:int(self.pc.get("profile_top", 20))]:
+            f = (lambda v: f"{v:.0%}") if binary else (lambda v: f"{v:.3g}")
+            out.append(f"| {self.names[j]} | {' / '.join(f(v) for v in mm)} | {' / '.join(f(v) for v in oo)} | "
+                       f"{d:.2f} |")
+        am, ao = self.after(mv), self.after(ot)
+        ks = " / ".join(f"+{k}" for k in self.pc["after_offsets"])
+        out += ["", f"Price after the signal (avg move from entry to close at candle {ks}): right moves "
+                f"{' / '.join(f'{100 * x:+.2f}%' for x in am)}; other bars {' / '.join(f'{100 * x:+.2f}%' for x in ao)}.",
+                ""]
+        return out
 
     def distinct(self, lst: list[tuple[tuple[int, ...], dict]], top: int) -> list[tuple[tuple[int, ...], dict]]:
         """Skip patterns whose times overlap an already shown pattern by more than dedupe_overlap (same idea)."""
@@ -311,14 +385,17 @@ class Finder:
                             for e in range(len(self.exits))]
         res = {p: self.search(p) for p in (P, *[q for q in (1, 0, -1) if q != P])}
         top = int(self.pc["report_top"])
+        ks = "/".join(f"+{k}" for k in self.pc["after_offsets"])
         head = ["| Pattern | Exit | Confidence | Streak (back from today) | Last 3 times, newest first | "
-                "All times in phase that worked | Avg net, all times |", "|---|---|---|---|---|---|---|"]
+                f"All times in phase that worked | Avg net, all times | Avg move % after {ks} candles |",
+                "|---|---|---|---|---|---|---|---|"]
         md = [f"# Phase patterns - {self.sym} {self.tf} {self.side}", "",
               f"Last bar {_date(self.days[now])}: phase **{PHASES[P]}** since {_date(self.days[k])} "
               f"({now - k + 1} bars). Phase: bullish = EMA9 > EMA13 > EMA20 > EMA50, bearish = the reverse, "
               "sideways = anything else.",
-              f"Trade: enter next open; worked = +{100 * self.gain:g}% after costs before -{100 * self.loss:g}% after "
-              f"costs or the time exit. Streak = worked times in a row counted back from the pattern's most recent "
+              f"Trade: enter next open; worked = {self.wtext}, else stop / time exit (same candle: stop first). "
+              f"Patterns use {self.base_n} indicators and how each changed over the last "
+              f"{self.pc.get('change_lookbacks')} candles (names ending _chg3 / _chg10). Streak = worked times in a row counted back from the pattern's most recent "
               f"time; >= {self.R} = Medium, longer = higher (" + ", ".join(
                   f"{r['label']} >= {r['streak_min']}" for r in self.pc["confidence_ladder"]) + "). "
               "Near-duplicate patterns (same signals) are shown once.", ""]
@@ -328,10 +405,11 @@ class Finder:
             for _, x in lst:
                 n_conf[x["conf"]] = n_conf.get(x["conf"], 0) + 1
             md += [f"## {PHASES[q]}" + (" - CURRENT PHASE" if q == P else ""), "",
-                   "Base rate (any bar in this phase reached +1% first): " + ", ".join(
-                       f"{b:.0%} within {h} bars" for h, b in zip(self.exits, self.base[q])) + ".",
+                   f"Base rate (any bar in this phase: {self.wtext}): " + ", ".join(
+                       f"{b:.0%} within {h} candles" for h, b in zip(self.exits, self.base[q])) + ".",
                    f"{len(lst):,} qualifying patterns: " + (", ".join(f"{v} {k}" for k, v in sorted(
                        n_conf.items(), key=lambda kv: -kv[1])) or "none") + ".", "", self.method_check(lst, q), ""]
+            md += self.profile(q)
             if q == P:
                 active = [(r, x) for r, x in lst if np.logical_and.reduce(self.M[list(r), now]) and self.ok[now]]
                 md += ["### Active today (pattern true on the last bar)", ""]
@@ -358,17 +436,30 @@ class Finder:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--tf", required=True)
+    ap.add_argument("--tf", default="all", help="1d, 60m, 15m, 5m, a comma list, or all (default)")
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--side", choices=["long", "short"], default="long")
     ap.add_argument("--patterns", default=str(PATTERNS_CFG))
     ap.add_argument("--config", default=str(CONFIG))
     a = ap.parse_args(argv)
-    f = Finder(a)
-    try:
-        return f.run()
-    finally:
-        f.du.close()
+    tfs = ["1d", "60m", "15m", "5m"] if a.tf == "all" else [t.strip() for t in a.tf.split(",") if t.strip()]
+    rc = 0
+    for i, tf in enumerate(tfs):
+        print(f"=== {a.symbol.upper()} {tf} ({i + 1}/{len(tfs)}) ===", flush=True)
+        try:
+            f = Finder(argparse.Namespace(**{**vars(a), "tf": tf}))
+        except Exception as exc:  # noqa: BLE001 - one timeframe failing must not stop the others
+            print(f"{tf}: cannot start ({type(exc).__name__}: {exc})", flush=True)
+            rc = 1
+            continue
+        try:
+            rc = f.run() or rc
+        except Exception as exc:  # noqa: BLE001
+            f.log(f"{tf} failed: {type(exc).__name__}: {exc}")
+            rc = 1
+        finally:
+            f.du.close()
+    return rc
 
 
 if __name__ == "__main__":

@@ -4,8 +4,15 @@
     "bullish": "ema(close, 9) > ema(close, 13) and ema(close, 13) > ema(close, 20) and ema(close, 20) > ema(close, 50)",
     "bearish": "ema(close, 9) < ema(close, 13) and ema(close, 13) < ema(close, 20) and ema(close, 20) < ema(close, 50)"
   },
-  "worked_net_pct": 1.0,
-  "stop_net_pct": 0.5,
+  "worked": {
+    "_doc": "per TF: target/stop in % after costs (target_pct/stop_pct) or in ATR(14) multiples (target_atr/stop_atr). 1d: -0.5% is inside normal daily noise, so daily uses the same 2:1 shape sized to the stock's range.",
+    "1d": {"target_atr": 1.0, "stop_atr": 0.5},
+    "default": {"target_pct": 1.0, "stop_pct": 0.5}
+  },
+  "change_lookbacks": [3, 10],
+  "profile_offsets": [-10, -5, -3, -1, 0],
+  "after_offsets": [1, 3, 5, 10],
+  "profile_top": 20,
   "recent_wins_needed": 3,
   "base_confidence": "Medium",
   "confidence_ladder": [
@@ -15,9 +22,9 @@
   ],
   "exits": {
     "1d": {"holds": [3, 5, 10]},
-    "60m": {"holds": [3, 6, 12]},
-    "15m": {"holds": [4, 8, 16]},
-    "5m": {"holds": [6, 12, 24]}
+    "60m": {"holds": [3, 5, 10]},
+    "15m": {"holds": [3, 5, 10]},
+    "5m": {"holds": [3, 5, 10]}
   },
   "dedupe_overlap": 0.6,
   "levels": [0.2, 0.4, 0.6, 0.8],
