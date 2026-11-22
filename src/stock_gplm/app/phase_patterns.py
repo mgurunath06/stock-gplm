@@ -278,18 +278,22 @@ class Finder:
               "costs before the stop / time exit (Medium). Older times in the same phase raise the confidence when "
               "they also worked, or mark it 'Low (recent luck)' when they mostly failed. With thousands of "
               "combinations some 3-in-a-row are luck - trust patterns with many older times behind them.", ""]
-        cur = res[P]
-        active = [(r, x) for r, x in cur if np.logical_and.reduce(self.M[list(r), now]) and self.ok[now]]
-        md += [f"## 1. Active today ({PHASES[P]}, pattern true on the last bar)", ""]
-        md += head + [self.row(r, x) for r, x in active[:top]] if active else ["None of the qualifying patterns is "
-                                                                               "true on the last bar."]
-        md += ["", f"## 2. Best patterns for the current phase ({PHASES[P]}) - watch list", ""]
-        md += head + [self.row(r, x) for r, x in cur[:top]]
         for q in (1, 0, -1):
+            lst = res[q]
+            n_conf: dict[str, int] = {}
+            for _, x in lst:
+                n_conf[x["conf"]] = n_conf.get(x["conf"], 0) + 1
+            md += [f"## {PHASES[q]}" + (" - CURRENT PHASE" if q == P else ""), "",
+                   f"{len(lst):,} qualifying patterns: " + (", ".join(f"{v} {k}" for k, v in sorted(
+                       n_conf.items(), key=lambda kv: -kv[1])) or "none") + ".", ""]
             if q == P:
-                continue
-            md += ["", f"## {PHASES[q]} phase (for when the phase changes)", ""]
-            md += head + [self.row(r, x) for r, x in res[q][:top]]
+                active = [(r, x) for r, x in lst if np.logical_and.reduce(self.M[list(r), now]) and self.ok[now]]
+                md += ["### Active today (pattern true on the last bar)", ""]
+                md += (head + [self.row(r, x) for r, x in active[:top]]) if active else [
+                    "None of the qualifying patterns is true on the last bar."]
+                md += ["", "### Best patterns in this phase (watch list)", ""]
+            md += (head + [self.row(r, x) for r, x in lst[:top]]) if lst else ["No pattern qualified."]
+            md.append("")
         root = self.du.root
         (root / "PATTERNS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
         with (root / "patterns.csv").open("w", newline="", encoding="utf-8") as f:
