@@ -108,5 +108,17 @@
     ],
     "top": 3
   },
-  "batch": 8
+  "batch": 8,
+  "discover": {
+    "note": "LLM strategy discovery (owner 2026-11-22): facts from probe trades on raw candles -> new strategies. python -m stock_gplm.app.discover --tf 15m",
+    "provider": "ollama",
+    "model": "qwen3.6:35b-a3b",
+    "rounds": 8,
+    "ideas": 8,
+    "temperature": 0.8,
+    "check_top": 5,
+    "probes": {"1d": [5, 10, 20], "15m": [2, 4, 8], "5m": [3, 6, 12], "60m": [1, 2, 4]},
+    "min_cell_share": 0.01,
+    "min_cell_trades": 300
+  }
 }
