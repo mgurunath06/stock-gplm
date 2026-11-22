@@ -26,7 +26,7 @@ PC: i7-14700K 28 threads, 64 GB, RTX 5070 12 GB; venv has **torch 2.11 + CUDA 12
 (no lightgbm). Data: minute (5m/15m/60m) **from 2026-01-01 only**, ~2690 stocks; daily from 2000 (judge from 2010).
 Intraday reports: `H:\Guru\Learning\StockGLPM\state\reports\tuning\`; daily: `...\state-long\reports\tuning\`.
 
-## 1. The owner's strategy (from config/research/owner_trades.csv - owner-filled, RELIANCE 15m)
+## 1. The owner's strategy (from config/research/owner_trades.csv - owner-filled, RELIANCE 15m; git-ignored, on disk only - never delete)
 
 | Part | Rule |
 |---|---|
