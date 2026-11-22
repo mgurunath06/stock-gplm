@@ -14,7 +14,10 @@
  },
  "entry_rule": {
   "_doc": "Owner 2026-11-22: do not enter when the cross candle closes more than 0.3% from EMA13 - wait for price to come back and buy (short: sell) at the EMA13 touch, while EMA13 is still above (short: below) EMA20; no trade if the cross undoes itself first.",
-  "pullback": true, "max_dist_pct": 0.003, "ema": 13, "cancel_ema": 20, "max_wait": 400
+  "_far_doc": "Far from EMA13 = calibrated from the owner's examples (owner 2026-11-22): far_examples = cross candles too far to enter, ok_examples = fine. max_dist_pct 'auto' uses them (fallback 0.3%). Later learned by the ML step.",
+  "pullback": true, "max_dist_pct": "auto", "ema": 13, "cancel_ema": 20, "max_wait": 400,
+  "far_examples": ["2026-08-21 15:15", "2026-08-20 12:45", "2026-08-17 13:00"],
+  "ok_examples": ["2026-09-23 11:00"]
  },
  "exit": {
   "long": {
@@ -23,7 +26,7 @@
    "overnight": true,
    "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "last_swing", "strength": 3},
    "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close",
-                  "on_target": "trail", "after_target": "prev_close_or_touch"}
+                  "on_target": "trail", "after_target": "prev_close_far_or_touch"}
   },
   "short": {
    "_doc": "Cash shorts are same-day: no entry after 14:45, square-off 15:15 (owner 2026-11-22; multi-day option shorts deferred).",
@@ -31,7 +34,7 @@
    "overnight": false,
    "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "last_swing", "strength": 3},
    "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close",
-                  "on_target": "trail", "after_target": "prev_close_or_touch"}
+                  "on_target": "trail", "after_target": "prev_close_far_or_touch"}
   }
  },
  "check": {
@@ -74,14 +77,18 @@
    {"name": "V12 = V10 + after EMA200: close below prev close or EMA20 touch (plain entry)",
     "pullback_stop": {"mode": "last_swing", "strength": 3},
     "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_or_touch"}},
-   {"name": "V13 = owner rules 2026-11-22: pullback entry + after-EMA200 exit (= DEFAULT)",
-    "entry": {"pullback": true},
+   {"name": "V13 = owner rules with 0.3%: pullback entry + after-EMA200 exit",
+    "entry": {"pullback": true, "max_dist_pct": 0.003, "far_examples": []},
     "pullback_stop": {"mode": "last_swing", "strength": 3},
     "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_or_touch"}},
-   {"name": "V14 = V13 + shorts held overnight (options; research only for cash)",
+   {"name": "V15 = owner rules, 'far' from your examples (= DEFAULT)",
+    "entry": {"pullback": true},
+    "pullback_stop": {"mode": "last_swing", "strength": 3},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_far_or_touch"}},
+   {"name": "V16 = V15 + shorts held overnight (options; research only for cash)",
     "entry": {"pullback": true}, "short_overnight": true,
     "pullback_stop": {"mode": "last_swing", "strength": 3},
-    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_or_touch"}}
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_far_or_touch"}}
   ]
  },
  "labels": {"HC": {"min_trades": 12, "min_win_w": 0.6},

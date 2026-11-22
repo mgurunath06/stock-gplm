@@ -101,6 +101,12 @@ class Exit:
     # regime_after "prev_close_or_touch" (owner 2026-11-22): after the EMA anchor was hit (on_target "trail"), exit on the
     # first close below the previous close (short: above) or a touch of EMA(trail).
     regime_after: str = ""
+    # "prev_close_far_or_touch": the close-beyond-previous-close exit only counts when price is FAR from EMA(far_ema):
+    # distance > regime_far x (ATR when regime_far_atr, else price). Owner 2026-11-22 ("red closed below green and far
+    # away from 13 EMA"); the threshold is calibrated from the owner's examples by owner_strategy.
+    regime_far: float = 0.0
+    regime_far_atr: bool = False
+    regime_far_ema: int = 13
 
     @property
     def structural(self) -> bool:
@@ -126,7 +132,8 @@ class Exit:
                     rg.get("target", "live") == "fixed", str(rg.get("breach_fill", "close")),
                     float(rg.get("margin", 0.0)), str(rg.get("on_target", "exit")), int(rg.get("swing_trail", 0)),
                     float(rg["breakeven_r"]) if rg.get("breakeven_r") is not None else None,
-                    bool(rg.get("stop_close", False)), str(rg.get("after_target", "")))
+                    bool(rg.get("stop_close", False)), str(rg.get("after_target", "")),
+                    float(rg.get("far", 0.0)), rg.get("far_unit", "pct") == "atr", int(rg.get("far_ema", 13)))
 
     def key(self) -> str:
         k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
@@ -150,7 +157,8 @@ class Exit:
         if self.regime_anchor is not None:
             k += (f"|regime:{self.regime_anchor}:{self.regime_trail}:{'fixed' if self.regime_fixed else 'live'}:"
                   f"{self.regime_breach}:{self.regime_margin:g}:{self.regime_on_target}:{self.swing_trail}:"
-                  f"{self.breakeven_r}:{int(self.stop_close)}:{self.regime_after}")
+                  f"{self.breakeven_r}:{int(self.stop_close)}:{self.regime_after}:{self.regime_far:g}"
+                  f"{'atr' if self.regime_far_atr else ''}:{self.regime_far_ema}")
         return k
 
     def text(self, when: str | None, short: bool) -> str:
@@ -202,9 +210,13 @@ class Exit:
                              "candles each side)")
             if self.breakeven_r is not None:
                 parts.append(f"stop to entry at +{self.breakeven_r:g}R")
-            if self.regime_after == "prev_close_or_touch":
+            if self.regime_after in ("prev_close_or_touch", "prev_close_far_or_touch"):
+                far = ""
+                if self.regime_after == "prev_close_far_or_touch":
+                    far = (f" while price is more than {self.regime_far:g} ATR" if self.regime_far_atr else
+                           f" while price is more than {self.regime_far:.2%}") + f" from EMA {self.regime_far_ema}"
                 parts.append(f"after EMA {self.regime_anchor} is hit: exit on a close {'above' if short else 'below'} the "
-                             f"previous close or a touch of EMA {self.regime_trail}")
+                             f"previous close{far}, or a touch of EMA {self.regime_trail}")
         if when:
             parts.append(f"exit at next open when: {when}")
         return "; ".join(parts)
@@ -496,12 +508,18 @@ def _regime_loop(m: LaneMarket, t: int, p: Exit, last: int, short: bool, entry: 
                     return (j, o, "TARGET_GAP") if hit_gap else (j, float(lvl), "TARGET")
                 mode, hit = "trail", True  # trailing A: keep holding, now on the EMA trail exit (from the next candle)
         # after the anchor was hit (owner): close beyond the previous close, or EMA trail touch
-        elif hit and p.regime_after == "prev_close_or_touch":
+        elif hit and p.regime_after in ("prev_close_or_touch", "prev_close_far_or_touch"):
             lv = float(et[j - 1])
             if math.isfinite(lv) and adv * sg <= lv * sg:
                 return j, (o if o * sg < lv * sg else lv), "EMA_TOUCH"
             if cl * sg < float(c_[j - 1]) * sg:
-                return j, cl, "CLOSE_BEYOND_PREV"
+                far = True
+                if p.regime_after == "prev_close_far_or_touch":
+                    ef = float(_ema_of(m, p.regime_far_ema)[j])
+                    unit = float(m.natr[j]) * cl if p.regime_far_atr else ef
+                    far = math.isfinite(ef) and math.isfinite(unit) and (cl - ef) * sg > p.regime_far * unit
+                if far:
+                    return j, cl, "CLOSE_BEYOND_PREV"
         # EMA trail exit
         elif p.regime_breach == "touch":
             lv = float(et[j - 1])  # previous candle's EMA, known at this candle's open

@@ -74,13 +74,16 @@ def owner_rows(path: Path, sym: str, tf: str) -> list[dict[str, Any]]:
 
 def all_owner_rows(path: Path, sym: str, tf: str) -> list[dict[str, Any]]:
     """owner_trades.csv plus the chart exports owner_trades-<SYM>-<tf>.csv next to it (owner_chart.py Export)."""
-    out = owner_rows(path, sym, tf)
+    base = owner_rows(path, sym, tf)
+    newer: list[dict[str, Any]] = []
     for p in sorted(path.parent.glob(f"{path.stem}-*.csv")):
         rows = owner_rows(p, sym, tf)
         for r in rows:
             r["row"] = f"{p.stem.split('-', 1)[1]}:{r['row']}"
-        out += rows
-    return out
+        newer += rows
+    # owner 2026-11-22: the chart marks are the latest - they replace the old file's rows of the same side and day
+    seen = {((r["side"] or "long"), (r["signal"] or "")[:10]) for r in newer}
+    return [r for r in base if ((r["side"] or "long"), (r["signal"] or "")[:10]) not in seen] + newer
 
 
 class OwnerStrategy:
@@ -120,7 +123,65 @@ class OwnerStrategy:
                 d[k] = {**d[k], **v}
         if side == "short" and (variant or {}).get("short_overnight"):
             d["overnight"] = True  # research only for cash (options can be held overnight)
+        rg = d.get("ema_regime") or {}
+        if rg.get("after_target") == "prev_close_far_or_touch" and "far" not in rg:
+            far = getattr(self, "far", {"unit": "pct", "value": 0.003})  # calibrated from the owner's examples
+            rg.update(far=far["value"], far_unit=far["unit"], far_ema=int(self.entry_rule(None).get("ema", 13)))
         return d
+
+    def dist(self, t: int, ema: int = 13) -> tuple[float, float]:
+        """Signed distance of the close from EMA(ema) at candle t: (fraction of price, ATR multiples)."""
+        from .strategy_engine import _ema_of
+        e = float(_ema_of(self.m, ema)[t])
+        c = float(self.m.close[t])
+        atr = float(self.m.natr[t]) * c
+        return (c - e) / e, ((c - e) / atr if np.isfinite(atr) and atr > 0 else float("nan"))
+
+    def is_far(self, t: int) -> bool:
+        p, a = self.dist(t, int(self.entry_rule(None).get("ema", 13)))
+        return (abs(a) > self.far["value"]) if self.far["unit"] == "atr" else (abs(p) > self.far["value"])
+
+    def calibrate(self) -> list[str]:
+        """'Far from EMA 13' from the owner's examples (2026-11-22): the line between the farthest 'fine' cross and the
+        nearest 'far' one; ATR multiples preferred (scales to every stock / timeframe), % of price if only that
+        separates them. entry_rule.max_dist_pct is used when there are no examples."""
+        rule = self.entry_rule(None)
+        md_ = rule.get("max_dist_pct", 0.003)
+        self.far = {"unit": "pct", "value": 0.003 if md_ == "auto" else float(md_), "how": "fixed (entry_rule.max_dist_pct)"}
+        ex = [(x, "far") for x in rule.get("far_examples") or []] + [(x, "fine") for x in rule.get("ok_examples") or []]
+        if not ex:
+            return []
+        md = ["", "## 0. 'Far from EMA 13' - from your examples", "",
+              "| Candle | You said | Close | EMA 13 | Distance % | Distance in ATR |", "|---|---|---|---|---|---|"]
+        vals: dict[str, list[tuple[float, float]]] = {"far": [], "fine": []}
+        from .strategy_engine import _ema_of
+        e13 = _ema_of(self.m, int(rule.get("ema", 13)))
+        for x, kind in ex:
+            i = self.find(x)
+            if i is None:
+                md.append(f"| {x} | {kind} | no {self.tf} candle | | | |")
+                continue
+            p, a = self.dist(i, int(rule.get("ema", 13)))
+            vals[kind].append((abs(p), abs(a)))
+            md.append(f"| {x} | {kind} | {self.m.close[i]:.2f} | {e13[i]:.2f} | {100 * p:+.2f}% | {a:+.2f} |")
+        if vals["far"] and vals["fine"]:
+            for k, unit in ((1, "atr"), (0, "pct")):
+                lo, hi = max(v[k] for v in vals["fine"]), min(v[k] for v in vals["far"])
+                if lo < hi:
+                    self.far = {"unit": unit, "value": (lo + hi) / 2, "how": f"midway between your farthest fine "
+                                f"({lo:.2f}{' ATR' if unit == 'atr' else ''}) and nearest far"
+                                f" ({hi:.2f}{' ATR' if unit == 'atr' else ''})" if unit == "atr" else
+                                f"midway between your farthest fine ({100 * lo:.2f}%) and nearest far ({100 * hi:.2f}%)"}
+                    break
+            else:
+                self.far["how"] += " - your examples overlap, kept the fixed value"
+        v = self.far
+        md += ["", f"**Far = more than {v['value']:.2f} ATR from EMA 13**" if v["unit"] == "atr" else
+               f"**Far = more than {100 * v['value']:.2f}% from EMA 13**", f" ({v['how']}). Used for the pullback entry "
+               "and for the 'close below the previous close' exit after EMA 200."]
+        self.log("far from EMA 13 = " + (f"{v['value']:.2f} ATR" if v["unit"] == "atr" else f"{100 * v['value']:.2f}%")
+                 + f" ({v['how']})")
+        return md
 
     def entry_rule(self, variant: dict[str, Any] | None) -> dict[str, Any]:
         """Default run: the spec's entry_rule. A check version: plain entry unless the version sets "entry"."""
@@ -138,10 +199,12 @@ class OwnerStrategy:
         from .strategy_engine import _ema_of
         m, n = self.m, len(self.m)
         e, ec = _ema_of(m, int(rule.get("ema", 13))), _ema_of(m, int(rule.get("cancel_ema", 20)))
-        mx, wait, S = float(rule.get("max_dist_pct", 0.003)), int(rule.get("max_wait", 400)), side == "short"
+        md_ = rule.get("max_dist_pct", 0.003)
+        mx, wait, S = (0.003 if md_ == "auto" else float(md_)), int(rule.get("max_wait", 400)), side == "short"
         out: dict[int, tuple[int, float] | None] = {}
+        auto = rule.get("max_dist_pct") == "auto" or rule.get("far_examples")
         for t in np.asarray(arr).tolist():
-            if not np.isfinite(e[t]) or abs(m.close[t] - e[t]) / e[t] <= mx:
+            if not np.isfinite(e[t]) or not (self.is_far(t) if auto else abs(m.close[t] - e[t]) / e[t] > mx):
                 continue  # close enough to EMA 13: normal entry at the next open
             out[t] = None
             for j in range(t + 1, min(n, t + 1 + wait)):
@@ -176,6 +239,23 @@ class OwnerStrategy:
             px = float(self.m.high[js] if side == "short" else self.m.low[js])
         return (ent - px) / ent if side == "short" else (px - ent) / ent
 
+    def diag(self, i: int, je: int | None, side: str) -> dict[str, Any]:
+        """What the chart looked like at your entry / exit candle (owner 2026-11-22: to learn your 'far' and exits)."""
+        from .strategy_engine import _ema_of
+        S = side == "short"
+        e13, e20 = _ema_of(self.m, 13), _ema_of(self.m, 20)
+        p, a = self.dist(i)
+        out = {"entry_dist_pct": round(100 * p, 2), "entry_dist_atr": round(a, 2),
+               "entry_touched_ema13": bool(self.m.high[i] >= e13[i] if S else self.m.low[i] <= e13[i]),
+               "entry_far": self.is_far(i)}
+        if je is not None:
+            p2, a2 = self.dist(je)
+            out.update(exit_dist_pct=round(100 * p2, 2), exit_dist_atr=round(a2, 2),
+                       exit_close_beyond_prev=bool(self.m.close[je] > self.m.close[je - 1] if S
+                                                   else self.m.close[je] < self.m.close[je - 1]),
+                       exit_touched_ema20=bool(self.m.high[je] >= e20[je] if S else self.m.low[je] <= e20[je]))
+        return out
+
     def compare(self, rows: list[dict[str, Any]], variant: dict[str, Any] | None, W: int
                 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Your trades vs the program's whole trade list (one position per side): which of yours we also take
@@ -201,7 +281,7 @@ class OwnerStrategy:
                         best, bd = k, d
                 je = self.find(r["exit"])
                 row = {"side": side, "your_entry": r["signal"], "your_exit": r["exit"], "your_reason": r["reason"],
-                       "your_pct": round(100 * yr, 2) if yr is not None else "", "why": r["why"]}
+                       "your_pct": round(100 * yr, 2) if yr is not None else "", "why": r["why"], **self.diag(i, je, side)}
                 if best is None:
                     res["missed"] += 1
                     row.update(our_entry="", our_exit="", our_how="missed", our_pct="")
@@ -338,15 +418,25 @@ class OwnerStrategy:
             self.log(f"vs your trades - {nm}: matched {res['matched']}/{res['yours']}, exit same {res['exit_same']}, "
                      f"near {res['exit_near']}, program {res['our_pct']:+.1f}% vs yours {res['your_pct']:+.1f}%")
         md0 += ["", f"Most like you: **{best_v}**.", "", "Trade by trade (DEFAULT):", "",
-                "| Side | Your entry | Your exit | Your reason | Yours | Program entry | Program exit | How | Program | Exit diff | Your note |",
-                "|---|---|---|---|---|---|---|---|---|---|---|"]
+                "Your entry: distance of the close from EMA 13 (% / ATR), did the candle touch EMA 13. Your exit: distance "
+                "from EMA 13, closed beyond the previous close, touched EMA 20.", "",
+                "| Side | Your entry | Entry dist % / ATR, touched 13 | Your exit | Exit dist % / ATR, close<prev, touched 20 "
+                "| Your reason | Yours | Program entry | Program exit | How | Program | Exit diff | Your note |",
+                "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        yn = lambda b: "y" if b is True else ("n" if b is False else "")  # noqa: E731
         for d in sorted(detail_default, key=lambda d: d["your_entry"], reverse=True):  # latest first (owner: they count most)
-            md0.append(f"| {d['side']} | {d['your_entry']} | {d['your_exit']} | {d['your_reason']} | {d['your_pct']} | "
+            md0.append(f"| {d['side']} | {d['your_entry']} | {d['entry_dist_pct']:+.2f}% / {d['entry_dist_atr']:+.2f}, "
+                       f"{yn(d['entry_touched_ema13'])}{' FAR' if d['entry_far'] else ''} | {d['your_exit']} | "
+                       + (f"{d['exit_dist_pct']:+.2f}% / {d['exit_dist_atr']:+.2f}, {yn(d['exit_close_beyond_prev'])}, "
+                          f"{yn(d['exit_touched_ema20'])}" if "exit_dist_pct" in d else "")
+                       + f" | {d['your_reason']} | {d['your_pct']} | "
                        f"{d['our_entry'] or '**missed**'} | {d['our_exit']} | {d['our_how']} | {d['our_pct']} | "
                        f"{d.get('exit_diff', '')} | {d['why']} |")
         with (root / "vs_yours.csv").open("w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=["side", "your_entry", "your_exit", "your_reason", "your_pct", "our_entry",
-                                               "our_exit", "our_how", "our_pct", "exit_diff", "why"])
+                                               "our_exit", "our_how", "our_pct", "exit_diff", "why", "entry_dist_pct",
+                                               "entry_dist_atr", "entry_touched_ema13", "entry_far", "exit_dist_pct",
+                                               "exit_dist_atr", "exit_close_beyond_prev", "exit_touched_ema20"])
             w.writeheader()
             w.writerows(detail_default)
         score = {v["name"]: [0, 0] for v in variants}  # exit candle exact, within 1 candle
@@ -479,12 +569,14 @@ class OwnerStrategy:
         if not self.load():
             return 1
         root = self.du.root
+        cal = self.calibrate()  # before any simulation: 'far' feeds the entry and the after-EMA200 exit
         md = [f"# Owner strategy {self.spec.get('name', '')} - {self.sym} {self.tf}", "",
               f"Data {self.tv(self.a0)} .. {self.tv(len(self.m) - 1)} (candle START times, IST). "
               "Every stock is judged on its own trades; recent trades weigh more.", "", "Exit rules:"]
         from .strategy_engine import Exit
         for side in self.sig:
             md.append(f"- **{side}**: {Exit.of(self.exit_doc(side)).text(None, side == 'short')}")
+        md += cal
         if not self.a.no_check:
             md += self.check(root)
         md += self.versions()
