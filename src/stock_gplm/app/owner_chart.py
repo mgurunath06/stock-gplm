@@ -113,12 +113,13 @@ PAGE = r"""<!doctype html>
  <div style="font-size:15px"><b>Click any candle</b> - a menu opens there.</div>
  <div class="muted">Buy / Short at the entry candle, then click the candle for the SL, then the candle to square off.
   Scroll / drag to move, mouse wheel to zoom.</div>
+ <div id="saved" style="color:#26a69a;margin-top:6px;font-weight:600">&#10003; Saved</div>
  <div style="margin-top:8px"><button class="big" id="undoB" onclick="undo()">&#8630; Undo</button><button class="big" id="redoB" onclick="redo()">Redo &#8631;</button>
   <span class="muted">Ctrl+Z / Ctrl+Y</span></div>
  <h3>Your trades (<span id="nm">0</span>)</h3>
  <div id="list"></div>
  <div style="margin-top:8px"><button class="big bm" onclick="exportCsv()">Export CSV</button></div>
- <div class="muted">Saved in this browser automatically. Export gives owner_trades-SYMBOL-TF.csv - put it in config\research.</div>
+ <div class="muted">Everything you click or type is saved in this browser at once (watch the green tick). Export gives owner_trades-SYMBOL-TF.csv - put it in config\research.</div>
 </aside></div>
 <div id="toast"></div>
 <script>
@@ -129,7 +130,16 @@ let T = [];  // your trades: {id, side: long|short|skip, entry, sl, exit, reason
 try { T = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { T = []; }
 let past = [], future = [];
 function snap() { past.push(JSON.stringify(T)); if (past.length > 200) past.shift(); future = []; }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(T)); } catch (e) {} draw(); }
+function store() {  // write to the browser + show the tick; no redraw (keeps the cursor in the box you type in)
+  let ok = true;
+  try { localStorage.setItem(KEY, JSON.stringify(T)); localStorage.setItem(KEY + '-draft', draft); } catch (e) { ok = false; }
+  const el = document.getElementById('saved');
+  el.innerHTML = ok ? '&#10003; Saved ' + new Date().toTimeString().slice(0, 8) : '&#9888; NOT saved - use Export CSV now';
+  el.style.color = ok ? '#26a69a' : '#ef5350';
+}
+function save() { store(); draw(); }
+let draft = '';  // comment typed in the menu before Buy / Short / Skip - kept even if the menu is closed
+try { draft = localStorage.getItem(KEY + '-draft') || ''; } catch (e) {}
 function undo() { if (!past.length) return toast('Nothing to undo'); future.push(JSON.stringify(T)); T = JSON.parse(past.pop()); save(); closePop(); toast('Undone'); }
 function redo() { if (!future.length) return; past.push(JSON.stringify(T)); T = JSON.parse(future.pop()); save(); closePop(); }
 function toast(s) { const t = document.getElementById('toast'); t.textContent = s; t.style.display = 'block';
@@ -191,11 +201,11 @@ chart.subscribeClick(p => {
     popReason = guessReason(o, p.time);
     h += `<div style="margin-top:8px">Square off your <b>${o.side}</b> from ${fmt(o.entry)} here - why?</div><div id="chips">` +
       REASONS.map(r => `<button class="chip${r === popReason ? ' on' : ''}" onclick="pickReason(this,'${r}')">${r}</button>`).join('') +
-      `</div><input type="text" id="pw" placeholder="comment (optional)"><button class="big bm" style="margin-top:6px" onclick="setExit()">Square off here</button>`;
+      `</div><input type="text" id="pw" placeholder="why you exit (optional)" value="${esc(o.exitWhy)}"><button class="big bm" style="margin-top:6px" onclick="setExit()">Square off here</button>`;
   } else {
     h += `<div style="margin-top:8px"><button class="big bl" onclick="newTrade('long')">Buy here</button>` +
       `<button class="big bs" onclick="newTrade('short')">Short here</button><button class="big" onclick="newTrade('skip')">Skip</button></div>` +
-      `<input type="text" id="pw" placeholder="why? (optional) e.g. broke PDH, too far from EMA 200">`;
+      `<input type="text" id="pw" placeholder="why? (optional) e.g. broke PDH, too far from EMA 200" value="${esc(draft)}">`;
   }
   if (here.length) h += `<div style="margin-top:8px"><button onclick="removeHere()">Remove my mark on this candle</button></div>`;
   if (o) h += `<div class="muted" style="margin-top:6px;font-size:12px">Esc = close. Undo = Ctrl+Z.</div>`;
@@ -204,7 +214,12 @@ chart.subscribeClick(p => {
   const W = chartEl.clientWidth, H = chartEl.clientHeight;
   pop.style.left = Math.min(Math.max(8, p.point.x + 14), W - 310) + 'px';
   pop.style.top = Math.min(Math.max(8, p.point.y - 40), H - pop.offsetHeight - 8) + 'px';
-  const inp = document.getElementById('pw'); if (inp) { inp.focus(); inp.onkeydown = e => { if (e.key === 'Enter') { const b = pop.querySelector('.big.bm,.big.bl'); if (b) b.click(); } }; }
+  const inp = document.getElementById('pw');
+  if (inp) inp.oninput = () => {  // every keystroke is stored
+    if (o && o.sl && !o.exit && p.time > o.entry) o.exitWhy = inp.value; else draft = inp.value;
+    store();
+  };
+  if (inp) { inp.focus(); inp.onkeydown = e => { if (e.key === 'Enter') { const b = pop.querySelector('.big.bm,.big.bl'); if (b) b.click(); } }; }
 });
 function pickReason(el, r) { popReason = r; document.querySelectorAll('#chips .chip').forEach(b => b.classList.remove('on')); el.classList.add('on'); }
 const pw = () => (document.getElementById('pw') || {}).value ? document.getElementById('pw').value.trim() : '';
@@ -212,6 +227,7 @@ function newTrade(side) {
   const o = openTrade();
   if (o && side !== 'skip') { toast('Finish or remove your open trade first'); return; }
   snap(); T.push({ id: Date.now(), side, entry: popT, sl: null, exit: null, reason: '', why: pw(), exitWhy: '' });
+  draft = '';
   save(); closePop(); toast(side === 'skip' ? 'Skip saved' : 'Entry saved - now click the SL candle');
 }
 function setSL() { const o = openTrade(); snap(); o.sl = popT; save(); closePop(); toast('SL saved - now click the square-off candle'); }
@@ -224,7 +240,12 @@ function removeHere() {
   save(); closePop();
 }
 function delTrade(id) { snap(); T = T.filter(x => x.id !== id); save(); toast('Trade deleted (Undo to bring it back)'); }
-function editNote(id, field, v) { const x = T.find(y => y.id === id); if (!x || x[field] === v) return; snap(); x[field] = v; save(); }
+let typing = null;  // one undo step per box you type in, not one per letter
+function editNote(id, field, v) {
+  const x = T.find(y => y.id === id); if (!x) return;
+  if (typing !== id + field) { snap(); typing = id + field; }
+  x[field] = v; store();
+}
 function go(t) { const i = idx[t]; chart.timeScale().setVisibleLogicalRange({ from: i - 80, to: i + 40 }); }
 
 // ---------------------------------------------------------------- drawing
@@ -261,8 +282,8 @@ function draw() {
       `<button class="del" title="delete" onclick="delTrade(${x.id})">&times;</button></span></div>` +
       (x.side === 'skip' ? '' : `<div class="muted" style="font-size:12px">SL ${x.sl ? fmt(x.sl).slice(5) + ' @ ' + slPx(x) : '-'} &middot; ` +
         `out ${x.exit ? fmt(x.exit).slice(5) + ' (' + esc(x.reason) + ')' : '-'}${open ? ` &middot; <span style="color:#ff9800">next: ${next}</span>` : ''}</div>`) +
-      `<input type="text" value="${esc(x.why)}" placeholder="why you ${x.side === 'skip' ? 'skip' : 'enter'}..." onchange="editNote(${x.id},'why',this.value)">` +
-      (x.exit ? `<input type="text" value="${esc(x.exitWhy)}" placeholder="why you exit..." onchange="editNote(${x.id},'exitWhy',this.value)">` : '') +
+      `<input type="text" value="${esc(x.why)}" placeholder="why you ${x.side === 'skip' ? 'skip' : 'enter'}..." oninput="editNote(${x.id},'why',this.value)" onblur="typing=null">` +
+      (x.exit ? `<input type="text" value="${esc(x.exitWhy)}" placeholder="why you exit..." oninput="editNote(${x.id},'exitWhy',this.value)" onblur="typing=null">` : '') +
       `</div>`;
   }).join('') || '<div class="muted">None yet.</div>';
 }
