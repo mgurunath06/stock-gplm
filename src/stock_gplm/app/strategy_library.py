@@ -231,6 +231,12 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
         v = ex.get(k)
         if v is not None and not (isinstance(v, (int, float)) and 0 < v <= 50):
             raise StrategyConfigError(f"exit.{k} must be null or in (0, 50]")
+    for k in ("stop_pct", "target_pct"):  # owner 2026-11-22: fixed % stop / target (0.01 = 1%)
+        v = ex.get(k)
+        if v is not None and not (isinstance(v, (int, float)) and 0 < v <= 0.5):
+            raise StrategyConfigError(f"exit.{k} must be null or in (0, 0.5]")
+    if not isinstance(ex.get("overnight", False), bool):
+        raise StrategyConfigError("exit.overnight must be true or false")
     sw = ex.get("swing_stop")
     if sw is not None:
         if not isinstance(sw, dict) or set(sw) - {"buffer", "rr", "lookback", "max_swing_pct"}:

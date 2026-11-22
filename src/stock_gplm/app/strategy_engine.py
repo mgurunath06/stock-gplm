@@ -60,14 +60,21 @@ class Exit:
     # owner 2026-11-20: when the swing level is further than this from entry, the stop goes beyond the
     # signal candle's own low (high for shorts) instead. None = always the swing level.
     swing_max: float | None = None
+    # owner 2026-11-22: fixed price stop / target as a fraction of entry (0.01 = 1%), and intraday positions
+    # held overnight (no 15:15 square-off, entries allowed on any candle) - 15m legs run over several days.
+    stop_pct: float | None = None
+    target_pct: float | None = None
+    overnight: bool = False
 
     @staticmethod
     def of(d: Mapping[str, Any]) -> "Exit":
         sw = d.get("swing_stop") or {}
         mx = sw.get("max_swing_pct") if sw else None
+        sp, tp = d.get("stop_pct"), d.get("target_pct")
         return Exit(int(d["max_hold_bars"]), d.get("stop_atr"), d.get("target_atr"), d.get("trail_atr"),
                     float(sw.get("buffer", 0.002)) if sw else None, float(sw.get("rr", 2.0)),
-                    int(sw.get("lookback", 20)), float(mx) if mx is not None else None)
+                    int(sw.get("lookback", 20)), float(mx) if mx is not None else None,
+                    float(sp) if sp else None, float(tp) if tp else None, bool(d.get("overnight", False)))
 
     def key(self) -> str:
         k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
@@ -75,6 +82,10 @@ class Exit:
             k += f"|swing:{self.swing_buffer:g}:{self.swing_rr:g}:{self.swing_lookback}"
             if self.swing_max is not None:
                 k += f":max{self.swing_max:g}"
+        if self.stop_pct or self.target_pct:
+            k += f"|pct:{self.stop_pct or 0:g}:{self.target_pct or 0:g}"
+        if self.overnight:
+            k += "|overnight"
         return k
 
     def text(self, when: str | None, short: bool) -> str:
@@ -93,6 +104,12 @@ class Exit:
             parts.append(f"target {self.target_atr:g}xATR(14) {other} entry")
         if self.trail_atr:
             parts.append(f"trailing stop {self.trail_atr:g}xATR(14)")
+        if self.stop_pct:
+            parts.append(f"stop {self.stop_pct:.1%} {side} entry")
+        if self.target_pct:
+            parts.append(f"target {self.target_pct:.1%} {other} entry")
+        if self.overnight:
+            parts.append("held overnight (no 15:15 square-off)")
         if when:
             parts.append(f"exit at next open when: {when}")
         return "; ".join(parts)
@@ -184,8 +201,13 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
             return None  # entry opened beyond the swing level: no valid stop, no trade
         stop = lvl * (1 + p.swing_buffer) if short else lvl * (1 - p.swing_buffer)
         target = entry - p.swing_rr * (stop - entry) if short else entry + p.swing_rr * (entry - stop)
+    if p.stop_pct:
+        stop = entry * (1 + p.stop_pct) if short else entry * (1 - p.stop_pct)
+    if p.target_pct:
+        target = entry * (1 - p.target_pct) if short else entry * (1 + p.target_pct)
+    sess = m.intraday and not p.overnight  # session square-off applies
     time_bar = t + 1 + p.max_hold
-    if m.intraday:
+    if sess:
         sess_end = int(m.exit_last[t + 1])  # square-off bar (15:15 IST), owner rule 2026-11-20
         if sess_end < t + 1:
             return None
@@ -197,11 +219,11 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         hold_end = time_bar - 1
     # owner 2026-11-20: daily/weekly swing trades hold until stop or target - no bar limit. A trade still
     # running at the end of the range is closed there at the close and labelled OPEN_END.
-    hold_open = p.swing_buffer is not None and not m.intraday
+    hold_open = p.swing_buffer is not None and not sess
     if hold_open:
         time_bar = last + 1
         hold_end = last
-    if not hold_open and (hold_end > last or (not m.intraday and time_bar > last)):
+    if not hold_open and (hold_end > last or (not sess and time_bar > last)):
         return None
     if hold_end < t + 1:
         return None
@@ -209,7 +231,8 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     # (2026-11-21: one blocked bar used to drop every earlier daily trade, e.g. all RELIANCE trades before 2009-05-18)
     if not hold_open and m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
         return None
-    simple = not (p.stop_atr or p.target_atr or p.trail_atr or p.swing_buffer is not None) and xmask is None
+    simple = not (p.stop_atr or p.target_atr or p.trail_atr or p.swing_buffer is not None or p.stop_pct
+                  or p.target_pct) and xmask is None
     if not simple:
         water = entry
         o_, h_, l_ = m.open, m.high, m.low
@@ -240,14 +263,14 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
                     water = min(water, lo)
                     stop = min(stop, water + p.trail_atr * atr)
             if xmask is not None and xmask[j]:
-                if m.intraday and j >= sess_end:
+                if sess and j >= sess_end:
                     return sess_end, float(m.close[sess_end]), "SESSION_CLOSE"
                 if j + 1 > last:  # exit signal on the latest candle: the next open is not known yet
                     if hold_open:
                         return last, float(m.close[last]), "OPEN_END"
                 elif j + 1 <= time_bar:
                     return j + 1, float(m.open[j + 1]), "SIGNAL_EXIT"
-    if m.intraday and time_bar > sess_end:
+    if sess and time_bar > sess_end:
         return sess_end, float(m.close[sess_end]), "SESSION_CLOSE"
     if hold_open:
         return last, float(m.close[last]), "OPEN_END"
@@ -264,11 +287,11 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
     trades: list[dict[str, Any]] = []
     nxt = -1
     sid = m.session_id
-    hold = p.swing_buffer is not None and not m.intraday
+    hold = p.swing_buffer is not None and not (m.intraday and not p.overnight)
     for t in fired.tolist():
         if t < nxt or t + 1 > last:
             continue
-        if m.intraday and (sid[t + 1] != sid[t] or not m.entry_ok[t]):
+        if m.intraday and not p.overnight and (sid[t + 1] != sid[t] or not m.entry_ok[t]):
             continue
         fill = _path(m, t, p, last, short, xmask)
         if fill is None:

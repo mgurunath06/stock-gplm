@@ -1,0 +1,18 @@
+{
+  "_doc": "Trend wake-up (owner 2026-11-22, from RELIANCE 15m phase_patterns): choppiness drops fast, volume wakes up, often after a small dip. Each variant = DSL entry WITHOUT the liquidity floor (added automatically). Exits: fixed % target/stop, held overnight. Checked by: python -m stock_gplm.app.pattern_check --spec config/research/wakeup_15m.json --symbol RELIANCE",
+  "name": "TrendWakeUp",
+  "tf": "15m",
+  "direction": "long",
+  "exits": {
+    "3d": {"max_hold_bars": 75, "stop_pct": 0.01, "target_pct": 0.02, "overnight": true},
+    "5d": {"max_hold_bars": 125, "stop_pct": 0.01, "target_pct": 0.02, "overnight": true}
+  },
+  "variants": {
+    "ChopDropVol": "chop(14) - chop(14)[3] < -5 and slot_rvol(20) >= 1.25",
+    "ChopDropVolDip": "chop(14) - chop(14)[3] < -5 and slot_rvol(20) >= 1.25 and close < close[3]",
+    "ChopDropVolLowMfi": "chop(14) - chop(14)[3] < -5 and slot_rvol(20) >= 1.25 and mfi(14) < 53",
+    "ChopDropVolEfficient": "chop(14) - chop(14)[3] < -5 and slot_rvol(20) >= 1.25 and er(10) - er(10)[10] > 0.08",
+    "ChopDropVolSurgeLowMfi": "chop(14) - chop(14)[3] < -5 and mfi(14) < 53 and (slope(volume, 5) - slope(volume, 5)[3]) / max(sma(volume, 20), 1) >= 0.6"
+  },
+  "min_trades_per_stock": 5
+}
