@@ -98,6 +98,9 @@ class Exit:
     swing_trail: int = 0
     breakeven_r: float | None = None
     stop_close: bool = False
+    # regime_after "prev_close_or_touch" (owner 2026-11-22): after the EMA anchor was hit (on_target "trail"), exit on the
+    # first close below the previous close (short: above) or a touch of EMA(trail).
+    regime_after: str = ""
 
     @property
     def structural(self) -> bool:
@@ -123,7 +126,7 @@ class Exit:
                     rg.get("target", "live") == "fixed", str(rg.get("breach_fill", "close")),
                     float(rg.get("margin", 0.0)), str(rg.get("on_target", "exit")), int(rg.get("swing_trail", 0)),
                     float(rg["breakeven_r"]) if rg.get("breakeven_r") is not None else None,
-                    bool(rg.get("stop_close", False)))
+                    bool(rg.get("stop_close", False)), str(rg.get("after_target", "")))
 
     def key(self) -> str:
         k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
@@ -147,7 +150,7 @@ class Exit:
         if self.regime_anchor is not None:
             k += (f"|regime:{self.regime_anchor}:{self.regime_trail}:{'fixed' if self.regime_fixed else 'live'}:"
                   f"{self.regime_breach}:{self.regime_margin:g}:{self.regime_on_target}:{self.swing_trail}:"
-                  f"{self.breakeven_r}:{int(self.stop_close)}")
+                  f"{self.breakeven_r}:{int(self.stop_close)}:{self.regime_after}")
         return k
 
     def text(self, when: str | None, short: bool) -> str:
@@ -199,6 +202,9 @@ class Exit:
                              "candles each side)")
             if self.breakeven_r is not None:
                 parts.append(f"stop to entry at +{self.breakeven_r:g}R")
+            if self.regime_after == "prev_close_or_touch":
+                parts.append(f"after EMA {self.regime_anchor} is hit: exit on a close {'above' if short else 'below'} the "
+                             f"previous close or a touch of EMA {self.regime_trail}")
         if when:
             parts.append(f"exit at next open when: {when}")
         return "; ".join(parts)
@@ -336,9 +342,10 @@ def _ema_of(m: LaneMarket, n: int) -> np.ndarray:
     return arr
 
 
-def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndarray | None
-          ) -> tuple[int, float, str] | None:
-    entry = m.open[t + 1]
+def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndarray | None,
+          entry_px: float | None = None) -> tuple[int, float, str] | None:
+    # entry_px: a limit fill inside candle t+1 (owner pullback entry) instead of its open
+    entry = m.open[t + 1] if entry_px is None else entry_px
     atr = m.natr[t] * entry if math.isfinite(m.natr[t]) else float("nan")
     if (p.stop_atr or p.target_atr or p.trail_atr) and not math.isfinite(atr):
         return None
@@ -461,6 +468,7 @@ def _regime_loop(m: LaneMarket, t: int, p: Exit, last: int, short: bool, entry: 
     mode = "target" if (c0 * sg < a0 * sg and entry * sg < a0 * sg) else "trail"
     target = a0
     k = p.swing_trail
+    hit = False
     for j in range(t + 1, hold_end + 1):
         o, hi, lo, cl = float(o_[j]), float(h_[j]), float(l_[j]), float(c_[j])
         fav, adv = (lo, hi) if short else (hi, lo)  # favourable / adverse extreme of the candle
@@ -486,7 +494,14 @@ def _regime_loop(m: LaneMarket, t: int, p: Exit, last: int, short: bool, entry: 
             if hit_gap or fav * sg >= lvl * sg:
                 if p.regime_on_target != "trail":
                     return (j, o, "TARGET_GAP") if hit_gap else (j, float(lvl), "TARGET")
-                mode = "trail"  # trailing A: keep holding, now on the EMA trail exit (from the next candle)
+                mode, hit = "trail", True  # trailing A: keep holding, now on the EMA trail exit (from the next candle)
+        # after the anchor was hit (owner): close beyond the previous close, or EMA trail touch
+        elif hit and p.regime_after == "prev_close_or_touch":
+            lv = float(et[j - 1])
+            if math.isfinite(lv) and adv * sg <= lv * sg:
+                return j, (o if o * sg < lv * sg else lv), "EMA_TOUCH"
+            if cl * sg < float(c_[j - 1]) * sg:
+                return j, cl, "CLOSE_BEYOND_PREV"
         # EMA trail exit
         elif p.regime_breach == "touch":
             lv = float(et[j - 1])  # previous candle's EMA, known at this candle's open
@@ -515,7 +530,10 @@ def _regime_loop(m: LaneMarket, t: int, p: Exit, last: int, short: bool, entry: 
 
 def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy: float, sell: float,
              short: bool = False, xmask: np.ndarray | None = None, independent: bool = True,
-             fired: np.ndarray | None = None) -> list[dict[str, Any]]:
+             fired: np.ndarray | None = None, fills: Mapping[int, tuple[int, float] | None] | None = None
+             ) -> list[dict[str, Any]]:
+    """fills (owner pullback entry): signal t -> (candle j, price) = a limit fill inside candle j instead of the next
+    open, or None = no entry for that signal. The trade then counts from candle j - 1 ("t")."""
     a, b = seg
     last = b - 1
     if fired is None:
@@ -524,18 +542,24 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
     nxt = -1
     sid = m.session_id
     hold = p.structural and not (m.intraday and not p.overnight)
-    for t in fired.tolist():
-        if t < nxt or t + 1 > last:
+    for sig_t in fired.tolist():
+        t, epx = sig_t, None
+        if fills is not None and sig_t in fills:
+            if fills[sig_t] is None:
+                continue
+            j, epx = fills[sig_t]
+            t = j - 1
+        if sig_t < nxt or t < nxt or t + 1 > last:
             continue
         if m.intraday and not p.overnight and (sid[t + 1] != sid[t] or not m.entry_ok[t]):
             continue
-        fill = _path(m, t, p, last, short, xmask)
+        fill = _path(m, t, p, last, short, xmask, epx)
         if fill is None:
             continue
         e, px, reason = fill
         if hold and m._blocked_cum[min(e, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
             continue  # the trade's own path touches a blocked (discontinuity) bar
-        ent = float(m.open[t + 1])
+        ent = float(m.open[t + 1]) if epx is None else float(epx)
         if short:
             net = (ent * (1 - sell) - px * (1 + buy)) / ent
             gross = 1 - px / ent
@@ -550,7 +574,7 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
             mfe, mae = hi / ent - 1, lo / ent - 1
         trades.append({"t": t, "exit_index": e, "session_id": int(sid[t]), "entry_price": ent, "exit_price": px,
                        "gross_return": gross, "net_return": net, "bars_held": e - t, "exit_reason": reason,
-                       "mfe": mfe, "mae": mae})
+                       "mfe": mfe, "mae": mae, "signal_t": sig_t})
         if independent:
             nxt = e
     return trades

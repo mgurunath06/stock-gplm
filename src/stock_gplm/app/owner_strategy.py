@@ -118,14 +118,108 @@ class OwnerStrategy:
         for k, v in (variant or {}).items():  # a version overrides parts of pullback_stop / ema_regime
             if isinstance(v, dict) and isinstance(d.get(k), dict):
                 d[k] = {**d[k], **v}
+        if side == "short" and (variant or {}).get("short_overnight"):
+            d["overnight"] = True  # research only for cash (options can be held overnight)
         return d
+
+    def entry_rule(self, variant: dict[str, Any] | None) -> dict[str, Any]:
+        """Default run: the spec's entry_rule. A check version: plain entry unless the version sets "entry"."""
+        base = dict(self.spec.get("entry_rule") or {})
+        base.pop("_doc", None)
+        if variant is None:
+            return base
+        return {**base, "pullback": False, **(variant.get("entry") or {})}
+
+    def fills(self, side: str, arr: np.ndarray, rule: dict[str, Any]) -> dict[int, tuple[int, float] | None]:
+        """Owner pullback entry (2026-11-22): cross candle closing more than max_dist_pct from EMA(ema) -> no entry at
+        the next open; buy (short: sell) at EMA(ema) on the first later candle that touches it (limit at the previous
+        candle's EMA, the open if it gaps through), while EMA(ema) is still above (short: below) EMA(cancel_ema);
+        no trade if that ends first."""
+        from .strategy_engine import _ema_of
+        m, n = self.m, len(self.m)
+        e, ec = _ema_of(m, int(rule.get("ema", 13))), _ema_of(m, int(rule.get("cancel_ema", 20)))
+        mx, wait, S = float(rule.get("max_dist_pct", 0.003)), int(rule.get("max_wait", 400)), side == "short"
+        out: dict[int, tuple[int, float] | None] = {}
+        for t in np.asarray(arr).tolist():
+            if not np.isfinite(e[t]) or abs(m.close[t] - e[t]) / e[t] <= mx:
+                continue  # close enough to EMA 13: normal entry at the next open
+            out[t] = None
+            for j in range(t + 1, min(n, t + 1 + wait)):
+                if (e[j] >= ec[j]) if S else (e[j] <= ec[j]):
+                    break  # the cross undid itself before price came back
+                lv = float(e[j - 1])
+                if (m.high[j] >= lv) if S else (m.low[j] <= lv):
+                    o = float(m.open[j])
+                    out[t] = (j, max(o, lv) if S else min(o, lv))
+                    break
+        return out
 
     def sim(self, side: str, fired: np.ndarray, variant: dict[str, Any] | None = None, independent: bool = True
             ) -> list[dict[str, Any]]:
         from .strategy_engine import Exit, simulate
         L = self.L
+        rule = self.entry_rule(variant)
+        fl = self.fills(side, fired, rule) if rule.get("pullback") else None
         return simulate(self.m, np.zeros(len(self.m), bool), (self.a0, len(self.m)), Exit.of(self.exit_doc(side, variant)),
-                        L["buy"], L["sell"], side == "short", independent=independent, fired=np.asarray(fired, np.int64))
+                        L["buy"], L["sell"], side == "short", independent=independent, fired=np.asarray(fired, np.int64),
+                        fills=fl)
+
+    def owner_result(self, r: dict[str, Any], side: str) -> float | None:
+        """Your trade's result as the chart shows it: entry at the next open, exit at the square-off candle's close
+        (at the SL candle's low / high when the reason is a stop), before costs."""
+        i, je, js = self.find(r["signal"]), self.find(r["exit"]), self.find(r["stop"])
+        if i is None or je is None or i + 1 >= len(self.m):
+            return None
+        ent = float(self.m.open[i + 1])
+        px = float(self.m.close[je])
+        if r["reason"].lower().startswith("stop") and js is not None:
+            px = float(self.m.high[js] if side == "short" else self.m.low[js])
+        return (ent - px) / ent if side == "short" else (px - ent) / ent
+
+    def compare(self, rows: list[dict[str, Any]], variant: dict[str, Any] | None, W: int
+                ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Your trades vs the program's whole trade list (one position per side): which of yours we also take
+        (entry within W candles), how close our exit is, which we miss."""
+        res = {"yours": 0, "matched": 0, "exit_same": 0, "exit_near": 0, "our_pct": 0.0, "your_pct": 0.0,
+               "missed": 0}
+        detail: list[dict[str, Any]] = []
+        for side in self.sig:
+            ours = self.sim(side, self.sig[side], variant)
+            used: set[int] = set()
+            for r in rows:
+                if (r["side"] or "long") != side or r["decision"] != "take" or not r["exit"]:
+                    continue
+                i = self.find(r["signal"])
+                if i is None:
+                    continue
+                res["yours"] += 1
+                yr = self.owner_result(r, side)
+                best, bd = None, W + 1
+                for k, x in enumerate(ours):
+                    d = min(abs(int(x["t"]) - i), abs(int(x["t"]) + 1 - i))
+                    if k not in used and d < bd:
+                        best, bd = k, d
+                je = self.find(r["exit"])
+                row = {"side": side, "your_entry": r["signal"], "your_exit": r["exit"], "your_reason": r["reason"],
+                       "your_pct": round(100 * yr, 2) if yr is not None else "", "why": r["why"]}
+                if best is None:
+                    res["missed"] += 1
+                    row.update(our_entry="", our_exit="", our_how="missed", our_pct="")
+                else:
+                    used.add(best)
+                    x = ours[best]
+                    e = int(x["exit_index"])
+                    res["matched"] += 1
+                    if je is not None:
+                        res["exit_same"] += e == je
+                        res["exit_near"] += abs(e - je) <= 4
+                    res["our_pct"] += 100 * x["net_return"]
+                    res["your_pct"] += 100 * (yr or 0.0)
+                    row.update(our_entry=self.tv(int(x["t"]) + 1) + f" @ {x['entry_price']:.2f}", our_exit=self.tv(e),
+                               our_how=x["exit_reason"], our_pct=round(100 * x["net_return"], 2),
+                               exit_diff=(e - je) if je is not None else "")
+                detail.append(row)
+        return res, detail
 
     def stop_of(self, side: str, t: int, mode: str | None = None, strength: int | None = None
                 ) -> tuple[float, int] | None:
@@ -210,12 +304,57 @@ class OwnerStrategy:
             return ["", "## Check against your trades", "", f"No rows for {self.sym} {self.tf} in {ck['owner_trades']}."]
         W = int(ck.get("match_candles", 2))
         variants = ck["variants"]
+        # --- your whole trade list vs ours, per version (owner 2026-11-22: 67 marked trades)
+        yours = [(r, r["side"] or "long") for r in rows if r["decision"] == "take" and r["exit"]]
+        yr = [self.owner_result(r, s) for r, s in yours]
+        yr = [x for x in yr if x is not None]
+        head = (f"Your {len(yr)} trades (entry next open, exit at the square-off close, before costs): "
+                f"{sum(x > 0 for x in yr)} won ({sum(x > 0 for x in yr) / max(1, len(yr)):.0%}), total "
+                f"{100 * sum(yr):+.1f}%." if yr else "")
+        md0 = ["", "## 1. Your trades vs the program's trades", "", head, "",
+               f"Matched = the program also took a trade of that side within {W} candles of your entry. Exit same = same "
+               "candle; near = within 4 candles. Totals over the matched trades (program after costs, yours before).", "",
+               "| Version | Matched of yours | Missed | Exit same / near | Program total | Your total | "
+               "RECENT: matched | RECENT: exit same / near |",
+               "|---|---|---|---|---|---|---|---|"]
+        # owner 2026-11-22: the latest trades follow the rules best (earlier ones may break them) -> judged on recent
+        dates = sorted(r["signal"][:10] for r in rows if r["signal"])
+        cut = str(np.datetime64(dates[-1]) - np.timedelta64(int(ck.get("recent_days", 92)), "D")) if dates else ""
+        recent = [r for r in rows if r["signal"] and r["signal"][:10] >= cut]
+        md0[3] += f" Recent = your trades from {cut} on ({sum(1 for r in recent if r['decision'] == 'take' and r['exit'])})."
+        best_v, best_key, detail_best = None, None, []
+        for v in [None] + variants:
+            res, det = self.compare(rows, v, W)
+            rr, _ = self.compare(recent, v, W)
+            nm = "DEFAULT (config)" if v is None else v["name"]
+            md0.append(f"| {nm} | {res['matched']} of {res['yours']} | {res['missed']} | {res['exit_same']} / "
+                       f"{res['exit_near']} | {res['our_pct']:+.1f}% | {res['your_pct']:+.1f}% | "
+                       f"{rr['matched']} of {rr['yours']} | {rr['exit_same']} / {rr['exit_near']} |")
+            key = (rr["matched"], rr["exit_near"], rr["exit_same"], res["matched"], res["exit_near"])
+            if best_key is None or key > best_key:
+                best_v, best_key, detail_best = nm, key, det
+            if v is None:
+                detail_default = det
+            self.log(f"vs your trades - {nm}: matched {res['matched']}/{res['yours']}, exit same {res['exit_same']}, "
+                     f"near {res['exit_near']}, program {res['our_pct']:+.1f}% vs yours {res['your_pct']:+.1f}%")
+        md0 += ["", f"Most like you: **{best_v}**.", "", "Trade by trade (DEFAULT):", "",
+                "| Side | Your entry | Your exit | Your reason | Yours | Program entry | Program exit | How | Program | Exit diff | Your note |",
+                "|---|---|---|---|---|---|---|---|---|---|---|"]
+        for d in sorted(detail_default, key=lambda d: d["your_entry"], reverse=True):  # latest first (owner: they count most)
+            md0.append(f"| {d['side']} | {d['your_entry']} | {d['your_exit']} | {d['your_reason']} | {d['your_pct']} | "
+                       f"{d['our_entry'] or '**missed**'} | {d['our_exit']} | {d['our_how']} | {d['our_pct']} | "
+                       f"{d.get('exit_diff', '')} | {d['why']} |")
+        with (root / "vs_yours.csv").open("w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=["side", "your_entry", "your_exit", "your_reason", "your_pct", "our_entry",
+                                               "our_exit", "our_how", "our_pct", "exit_diff", "why"])
+            w.writeheader()
+            w.writerows(detail_default)
         score = {v["name"]: [0, 0] for v in variants}  # exit candle exact, within 1 candle
         readings = (("lowest", 1, "lowest"), ("last_swing", 1, "swing-1"), ("last_swing", 2, "swing-2"),
                     ("last_swing", 3, "swing-3"))
         stop_hits = {lab: 0 for _, _, lab in readings}
         out_rows: list[dict[str, Any]] = []
-        md = ["", "## 1. Check against your trades (owner_trades.csv)", "",
+        md = md0 + ["", "## 1d. Row by row from YOUR candle (one trade each, ignores open positions)", "",
               f"Our signal = nearest {'/'.join(self.spec['entries'])} signal of the same side within {W} candles of "
               "yours (shift = our candle minus yours). Exit and stop are computed from YOUR signal candle when we have "
               "no signal there. Exit columns: our exit candle per reading of your exit rule; ✓ = same candle, "

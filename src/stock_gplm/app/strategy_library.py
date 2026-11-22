@@ -264,7 +264,7 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
     rg = ex.get("ema_regime")  # owner 2026-11-22: below EMA anchor -> target it; above -> exit on EMA trail breach
     if rg is not None:
         keys = {"anchor", "trail", "target", "breach_fill", "margin", "on_target", "swing_trail", "breakeven_r",
-                "stop_close"}
+                "stop_close", "after_target"}
         if not isinstance(rg, dict) or set(rg) - keys:
             raise StrategyConfigError(f"exit.ema_regime keys: {sorted(keys)}")
         be = rg.get("breakeven_r")
@@ -273,7 +273,8 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
                 or rg.get("breach_fill", "close") not in ("close", "next_open", "touch", "none") \
                 or not 0 <= float(rg.get("margin", 0.0)) <= 0.02 or rg.get("on_target", "exit") not in ("exit", "trail") \
                 or not 0 <= int(rg.get("swing_trail", 0)) <= 10 or (be is not None and not 0 < float(be) <= 10) \
-                or not isinstance(rg.get("stop_close", False), bool):
+                or not isinstance(rg.get("stop_close", False), bool) \
+                or rg.get("after_target", "") not in ("", "prev_close_or_touch"):
             raise StrategyConfigError("exit.ema_regime: 2 <= trail < anchor <= 500, target live|fixed, breach_fill "
                                       "close|next_open|touch|none, margin 0..0.02, on_target exit|trail, swing_trail "
                                       "0..10, breakeven_r null or (0, 10], stop_close true|false")

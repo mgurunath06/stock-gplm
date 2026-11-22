@@ -12,26 +12,33 @@
    "EMA13xEMA200-milestone": "cross_below(ema(close, 13), ema(close, 200))"
   }
  },
+ "entry_rule": {
+  "_doc": "Owner 2026-11-22: do not enter when the cross candle closes more than 0.3% from EMA13 - wait for price to come back and buy (short: sell) at the EMA13 touch, while EMA13 is still above (short: below) EMA20; no trade if the cross undoes itself first.",
+  "pullback": true, "max_dist_pct": 0.003, "ema": 13, "cancel_ema": 20, "max_wait": 400
+ },
  "exit": {
   "long": {
    "_doc": "Longs may be held overnight (owner: 21 Sep -> 23 Sep).",
    "max_hold_bars": 2000,
    "overnight": true,
    "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "last_swing", "strength": 3},
-   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close"}
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close",
+                  "on_target": "trail", "after_target": "prev_close_or_touch"}
   },
   "short": {
    "_doc": "Cash shorts are same-day: no entry after 14:45, square-off 15:15 (owner 2026-11-22; multi-day option shorts deferred).",
    "max_hold_bars": 2000,
    "overnight": false,
    "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400, "mode": "last_swing", "strength": 3},
-   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close"}
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "margin": 0.001, "breach_fill": "close",
+                  "on_target": "trail", "after_target": "prev_close_or_touch"}
   }
  },
  "check": {
   "_doc": "--check compares owner_trades.csv row by row. Both readings of the exit are tried; match window in candles.",
   "owner_trades": "config/research/owner_trades.csv",
   "match_candles": 2,
+  "recent_days": 92,
   "_variants_doc": "Each version overrides parts of exit.<side>.pullback_stop / ema_regime. margin 0.001 = EMA200 counts as reached within 0.1%. touch = exit when price touches EMA20. A = on reaching EMA200 keep holding, exit on EMA20 touch. B = trailing stop under each new swing low (2 candles each side), no EMA20 exit. C = A + stop to entry at +1R. close-stop = stop fires only on a close beyond it.",
   "variants": [
    {"name": "V1 lowest-low stop, EMA200 fixed, EMA20 close",
@@ -59,7 +66,22 @@
     "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}},
    {"name": "V10 = V8 with 3-candle swing stop",
     "pullback_stop": {"mode": "last_swing", "strength": 3},
-    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}}
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}},
+   {"name": "V11 = V10 + EMA13 pullback entry",
+    "entry": {"pullback": true},
+    "pullback_stop": {"mode": "last_swing", "strength": 3},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close"}},
+   {"name": "V12 = V10 + after EMA200: close below prev close or EMA20 touch (plain entry)",
+    "pullback_stop": {"mode": "last_swing", "strength": 3},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_or_touch"}},
+   {"name": "V13 = owner rules 2026-11-22: pullback entry + after-EMA200 exit (= DEFAULT)",
+    "entry": {"pullback": true},
+    "pullback_stop": {"mode": "last_swing", "strength": 3},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_or_touch"}},
+   {"name": "V14 = V13 + shorts held overnight (options; research only for cash)",
+    "entry": {"pullback": true}, "short_overnight": true,
+    "pullback_stop": {"mode": "last_swing", "strength": 3},
+    "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_or_touch"}}
   ]
  },
  "labels": {"HC": {"min_trades": 12, "min_win_w": 0.6},
