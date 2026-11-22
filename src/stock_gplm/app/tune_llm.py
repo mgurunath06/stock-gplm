@@ -170,7 +170,7 @@ def dsl_help(intraday: bool) -> str:
     return ("DSL: operators + - * / > < >= <= == != and or not; x[n] = value n bars ago; series: "
             + ", ".join(sorted(SERIES)) + ". Functions:\n" + "\n".join(lines)
             + '\nExamples: close > ema(close, 200) ; rsi(close, 14) < 70 ; volume > 1.5 * median(volume, 20) ; '
-            + 'htf(close > ema(close, 50), "1d")' + (' ; minute_of_session >= 30' if intraday else ''))
+            + 'atr(14) / close < 0.03 (atr takes ONLY the length) ; htf(close > ema(close, 50), "1d")' + (' ; minute_of_session >= 30' if intraday else ''))
 
 
 # ------------------------------------------------------------------ validation
@@ -198,6 +198,14 @@ def dsl_balanced(s: str) -> bool:
     return depth == 0
 
 
+_ATR_SERIES_ARG = re.compile(r"\batr\(\s*(?:close|high|low|open|hl2|hlc3|ohlc4)\s*,\s*(\d+)\s*\)")
+
+
+def repair_dsl(s: str) -> str:
+    """Fix common small-model slips that would otherwise waste a proposal: atr(close, 14) -> atr(14)."""
+    return _ATR_SERIES_ARG.sub(r"atr(\1)", s)
+
+
 def liquidity_floor(entry: str) -> str:
     m = re.match(r"\s*(median\(volume \* close, 20\)\[1\] >= \d+ and close\[1\] >= \d+)", entry)
     return m.group(1) if m else ""
@@ -211,6 +219,9 @@ def validate_variant(parent: Mapping[str, Any], v: Mapping[str, Any], tf: str) -
     entry = parent["entry"]
     edits, change = 0, []
     v = dict(v)
+    for key in ("entry", "add_filter"):
+        if v.get(key):
+            v[key] = repair_dsl(str(v[key]))
     new_entry = str(v.get("entry") or "").strip()
     if new_entry.startswith(entry) and new_entry != entry:
         # Model wrote "original and (filter)" as a full entry: treat the tail as the filter (once).
