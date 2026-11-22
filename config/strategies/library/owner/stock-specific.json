@@ -1,0 +1,23 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "Owner 2026-11-22: strategies fine-tuned per stock x timeframe (phase_patterns -> pattern_check / stock_tf). Owner-approved for PAPER trading only; evidence is in-sample 2026 (no older intraday data) - judge by forward paper results.",
+  "defaults": {
+    "origin": "USER_DEFINED",
+    "category": "17: Stock-specific (per stock x TF)",
+    "style": "MOMENTUM",
+    "fidelity": "EXACT"
+  },
+  "strategies": [
+    {
+      "id": "RELIANCE-15m-ChopDropVolSurgeLowMfi-3d",
+      "name": "RELIANCE 15m: trend wake-up (choppiness drop, low MFI, volume surge)",
+      "direction": "long",
+      "description": "Choppiness(14) falls > 5 in 3 candles, MFI(14) < 53, volume slope jumps; +2% target / -1% stop, held overnight, max 3 days (75 candles). 2026 RELIANCE 15m: 43 trades, win 49%, avg +0.44%, PF 1.77 (pattern_check 2026-11-22). Worked on only ~18% of 200 other stocks - RELIANCE-specific.",
+      "entry": "avg_day_volume(20) * prev_day_close() >= 150000000 and prev_day_close() >= 50 and (chop(14) - chop(14)[3] < -5 and mfi(14) < 53 and (slope(volume, 5) - slope(volume, 5)[3]) / max(sma(volume, 20), 1) >= 0.6)",
+      "exit": {"max_hold_bars": 75, "stop_pct": 0.01, "target_pct": 0.02, "overnight": true},
+      "enabled": true,
+      "applicability": {"symbols": ["RELIANCE-EQ"], "timeframes": ["15m"]},
+      "tags": ["stock-specific", "paper-only", "owner-approved:2026-11-22", "TrendWakeUp", "execution:cash-long"]
+    }
+  ]
+}

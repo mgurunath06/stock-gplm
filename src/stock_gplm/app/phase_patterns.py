@@ -97,6 +97,7 @@ class Finder:
         n = len(m)
         self.n, self.days = n, L["days"]
         a0 = int(np.searchsorted(L["ses"], self.du.t["tune_start"]))
+        self.L, self.a0 = L, a0  # kept for stock_tf (real-engine check on the same data)
         floor = np.asarray(dsl.signal(self.du.floor, ctx), bool)
         exprs = {**te.feature_exprs(m.intraday), **(self.pc.get("extra_features") or {})}
         names, cols = [], []
@@ -461,6 +462,7 @@ class Finder:
             self.base[q] = [float(self.win[e, sel & self.done[e]].mean()) if (sel & self.done[e]).any() else 0.0
                             for e in range(len(self.exits))]
         res = {p: self.search(p) for p in (P, *[q for q in (1, 0, -1) if q != P])}
+        self.res, self.P = res, P
         top = int(self.pc["report_top"])
         ks = "/".join(f"+{k}" for k in self.pc["after_offsets"])
         head = ["| Pattern | Exit | Confidence | Streak (back from today) | Last 3 times, newest first | "
