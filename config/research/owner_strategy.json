@@ -91,6 +91,8 @@
     "ema_regime": {"target": "live", "margin": 0.001, "breach_fill": "close", "on_target": "trail", "after_target": "prev_close_far_or_touch"}}
   ]
  },
+ "ml": {"_doc": "owner_ml.py: WIN labels use this check version's exit (V2 = closest to the owner's trades, 2026-11-22).",
+        "base_version": "V2"},
  "labels": {"HC": {"min_trades": 12, "min_win_w": 0.6},
             "HCLT": {"min_trades": 3, "max_trades": 11, "small_below": 5, "max_losses": 1},
             "MC": {"min_win_w": 0.4}},
