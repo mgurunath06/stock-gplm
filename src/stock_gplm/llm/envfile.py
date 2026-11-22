@@ -9,7 +9,7 @@ Search order (first existing file wins):
    worktree use the single private file in the primary checkout.
 
 The file must be a regular file (not a symlink) owned by the current user with mode
-``0600`` or stricter; otherwise loading is refused. Only ``GPLM_*`` names are
+``0600`` or stricter (POSIX only; Windows relies on NTFS ACLs); otherwise loading is refused. Only ``GPLM_*`` names are
 loaded, values are never evaluated, interpolated, logged or returned. Existing
 environment variables win unless ``override=True``.
 """
@@ -82,7 +82,9 @@ def check_permissions(path: Path) -> None:
         raise InsecureEnvFile(f"{path} must be a regular file, not a symlink or special file")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise InsecureEnvFile(f"{path} is not owned by the current user")
-    if info.st_mode & 0o077:
+    # Windows has no POSIX mode bits (files always report 0o666/0o444); access is governed by
+    # NTFS ACLs of the user's own drive/profile, so the mode check only applies on POSIX.
+    if os.name != "nt" and info.st_mode & 0o077:
         raise InsecureEnvFile(f"{path} has mode {oct(info.st_mode & 0o777)}; run: chmod 600 {path}")
     if info.st_size > MAX_BYTES:
         raise InsecureEnvFile(f"{path} exceeds {MAX_BYTES} bytes")
