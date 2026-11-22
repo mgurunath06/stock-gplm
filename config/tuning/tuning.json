@@ -197,6 +197,13 @@
           "s": 2.0
         }
       ]
+    },
+    "stock_rules": {
+      "note": "Per-stock rules then combined across stocks (owner 2026-11-22)",
+      "min_bars": 40,
+      "min_hits": 8,
+      "lift": 1.5,
+      "min_stocks": 5
     }
   }
 }

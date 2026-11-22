@@ -10,6 +10,11 @@ create a strategy").
    breakouts, time of day ...) the HIT RATE that followed - i.e. precision, how often the condition was FOLLOWED by
    a move, not how often moves had it - and the lift over the base rate; best 2- and 3-condition combinations; and
    readable rules from a small decision tree (weighted by recency).
+2b. Per stock, then combined (owner 2026-11-22: "find what works for each stock, then combine if the same thing
+   works on multiple stocks"): for every stock separately, condition pairs followed by the move far more often than
+   that stock's own base rate; then how many stocks share each rule vs how many pure chance would give. Recurring
+   rules (TUNE only) go to the LLM; STOCK_RULES.md / stock_rules.json add each rule's result on those stocks' unseen
+   CONFIRM bars (owner report only, never shown to the LLM).
 3. The LLM turns the best rules into strategies whose exit IS the move (target T ATR, stop S ATR, H bars); the
    usual rounds, exit sweep and CONFIRM gate follow (discover.py). Ids MOVE-<tf>-<Name>.
 """
@@ -43,6 +48,9 @@ class MoveDiscoverer(Discoverer):
         super().__init__(tf, name, cfg, stocks_arg, workers)
         self.prefix = "MOVE"
         self.moves = ((cfg.get("discover") or {}).get("moves") or MOVES_DEFAULT).get(tf) or MOVES_DEFAULT[tf]
+        self.sr = {"min_bars": 40, "min_hits": 8, "lift": 1.5, "min_stocks": 5,
+                   **((cfg.get("discover") or {}).get("stock_rules") or {})}
+        self._edges: dict[int, np.ndarray] = {}
 
     # -------------------------------------------------------------- facts: start from the moves
     def facts(self) -> str:
@@ -54,7 +62,7 @@ class MoveDiscoverer(Discoverer):
             for dr in dirs:
                 ex = {"max_hold_bars": int(mv["h"]), "target_atr": float(mv["t"]), "stop_atr": float(mv["s"])}
                 probes.append(te.Variant(f"MOVE~{dr}-{mv['h']}-{mv['t']:g}-{mv['s']:g}", self.tf, self.floor, ex, dr,
-                                         True))
+                                         True, {"h": int(mv["h"]), "t": float(mv["t"]), "s": float(mv["s"])}))
         self.log(f"moves: labelling every liquid bar for {len(probes)} move definitions {self.moves} {dirs}")
         res = self.evaluate(probes)
         names = te.feature_names(self.intraday)
@@ -67,6 +75,13 @@ class MoveDiscoverer(Discoverer):
              "Feature DSL: " + "; ".join(f"{k} = {exprs[k]}" for k in names),
              "Build entries from the HIGHEST hit-rate rules (tree rules, combinations); the hit rate must be clearly "
              "above the break-even hit rate. Use the move's target / stop / H as the exit.", ""]
+        report, rules_json = [f"# Per-stock move rules {self.tf} ({self.name})", "",
+                              "Each rule was found SEPARATELY on each stock (TUNE window: hit rate >= "
+                              f"{self.sr['lift']}x and >= +10 points over that stock's own base rate, >= "
+                              f"{self.sr['min_bars']} bars, >= {self.sr['min_hits']} hits, positive net). 'Chance' = "
+                              "how many stocks would show it by luck at the overall pass rate. CONFIRM = the same rule "
+                              "on the same stocks' unseen bars (never shown to the LLM). Holds = share of those stocks "
+                              "whose CONFIRM hit rate beat their own TUNE base rate (>= 5 confirm bars).", ""], {}
         for v in probes:
             raw = res[v.vid].get("raw")
             if raw is None or "feat" not in raw:
@@ -75,10 +90,18 @@ class MoveDiscoverer(Discoverer):
             m = (day >= self.tune_day) & (day < self.confirm_day)
             if m.sum() < 1000:
                 continue
-            hit = (raw["reason"][m] == 1).astype(float)  # TARGET / TARGET_GAP = target reached before stop
+            hit = (raw["reason"][m] == 1).astype(float)  # target reached before stop
             net, feat = raw["net"][m].astype(float), raw["feat"][m].astype(float)
             w = te.weights(day[m], self.confirm_day - 1, float(self.t["decay"]))
-            L += self._move_facts(v.vid.split("~")[1], hit, net, feat, w, names)
+            label = v.vid.split("~")[1]
+            L += self._move_facts(label, hit, net, feat, w, names)
+            facts_lines, rep_lines, js = self._stock_rules(label, raw, m, day >= self.confirm_day, names)
+            L += facts_lines + [""]
+            report += rep_lines
+            rules_json[label] = js
+        (self.root / "STOCK_RULES.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+        (self.root / "stock_rules.json").write_text(json.dumps(rules_json, indent=1), encoding="utf-8")
+        self.log(f"per-stock rules: {self.root / 'STOCK_RULES.md'}")
         txt = "\n".join(L)
         self.state["facts"] = txt
         self.save()
@@ -134,8 +157,100 @@ class MoveDiscoverer(Discoverer):
                 out.append(f"Best {k}-condition combinations (>= {min_n:,} bars): hit rate / lift / net / share")
                 out += [f"+ {c[4]}: {c[0]:.0%} / x{c[0] / p0:.1f} / {100 * c[1]:+.2f}% / {c[2]:.1%}" for c in cells[:lim]]
         out += self._tree_rules(feat, hit, net, w, names, edges, p0, min_n)
-        out.append("")
+        self._edges = edges
         return out
+
+    def _cond(self, names: list[str], j: int, q: int) -> str:
+        """DSL-ready condition for quintile / yes-no bin q of feature j (bins: qs[q-1] <= x < qs[q])."""
+        qs, nm = self._edges[j], names[j]
+        if len(qs) == 1 and qs[0] == 0.5:
+            return nm if q == 1 else f"not {nm}"
+        parts = ([f"{nm} >= {_q(qs[q - 1])}"] if q > 0 else []) + ([f"{nm} < {_q(qs[q])}"] if q < len(qs) else [])
+        return " and ".join(parts)
+
+    def _stock_rules(self, label: str, raw: Mapping[str, np.ndarray], tune: np.ndarray, conf: np.ndarray,
+                     names: list[str]) -> tuple[list[str], list[str], dict]:
+        """Per-stock condition-pair rules, then how many stocks share each rule (vs chance) and how they did on
+        CONFIRM. Bins = the pooled TUNE quintiles, so a rule means the same thing on every stock."""
+        edges = self._edges
+        feat = raw["feat"].astype(float)
+        hit = (raw["reason"] == 1).astype(float)
+        net = raw["net"].astype(float)
+        st = raw["stock"].astype(np.int64)
+        S = int(st.max()) + 1 if len(st) else 0
+        bins = np.full(feat.shape, -1, dtype=np.int8)
+        for j, qs in edges.items():
+            ok = np.isfinite(feat[:, j])
+            bins[ok, j] = np.searchsorted(qs, feat[ok, j], side="right")
+        nb_t = np.bincount(st[tune], minlength=S)
+        base_t = np.bincount(st[tune], weights=hit[tune], minlength=S) / np.maximum(nb_t, 1)
+        mb, mh, lift = int(self.sr["min_bars"]), int(self.sr["min_hits"]), float(self.sr["lift"])
+        found, n_pass, n_elig = [], 0, 0
+        J = sorted(edges)
+        for ia, a in enumerate(J):
+            for b in J[ia + 1:]:
+                ok = (bins[:, a] >= 0) & (bins[:, b] >= 0)
+                key = st * 25 + bins[:, a].astype(np.int64) * 5 + bins[:, b]
+
+                def agg(sel: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+                    k = key[sel]
+                    return (np.bincount(k, minlength=S * 25).reshape(S, 25),
+                            np.bincount(k, weights=hit[sel], minlength=S * 25).reshape(S, 25),
+                            np.bincount(k, weights=net[sel], minlength=S * 25).reshape(S, 25))
+                n_t, h_t, s_t = agg(ok & tune)
+                hr_t = h_t / np.maximum(n_t, 1)
+                elig = n_t >= mb
+                ok_pass = (elig & (h_t >= mh) & (hr_t >= np.maximum(lift * base_t[:, None], base_t[:, None] + 0.10))
+                           & (s_t > 0))
+                n_pass += int(ok_pass.sum())
+                n_elig += int(elig.sum())
+                cnt = ok_pass.sum(axis=0)
+                cells = np.flatnonzero(cnt >= int(self.sr["min_stocks"]))
+                if not len(cells):
+                    continue
+                n_c, h_c, s_c = agg(ok & conf)
+                for c in cells:
+                    stocks = np.flatnonzero(ok_pass[:, c])
+                    found.append({"a": a, "b": b, "qa": int(c) // 5, "qb": int(c) % 5, "stocks": stocks,
+                                  "elig": int(elig[:, c].sum()), "n_t": int(n_t[stocks, c].sum()),
+                                  "h_t": float(h_t[stocks, c].sum()), "base_t": float(base_t[stocks].mean()),
+                                  "n_c": n_c[stocks, c], "h_c": h_c[stocks, c], "s_c": s_c[stocks, c]})
+        p_pass = n_pass / n_elig if n_elig else 0.0
+        for f in found:
+            f["chance"] = p_pass * f["elig"]
+            f["ratio"] = len(f["stocks"]) / max(f["chance"], 0.5)
+        keep = [f for f in found if len(f["stocks"]) >= max(int(self.sr["min_stocks"]), 3 * f["chance"])]
+        keep.sort(key=lambda f: (-f["ratio"], -len(f["stocks"])))
+        side = label.split("-")[0]
+        facts = [f"Rules that RECUR across stocks ({side} move {label}; found separately on each stock; overall per-stock "
+                 f"pass rate {p_pass:.2%}):"]
+        rep_lines = [f"## {label}: {len(keep)} recurring rules (of {len(found)} shared by >= {self.sr['min_stocks']} "
+                     f"stocks; per-stock pass rate {p_pass:.2%})", "",
+                     "| Rule (DSL) | Stocks | Chance | TUNE hit / their base | CONFIRM bars / hit / avg net | Holds |",
+                     "|---|---|---|---|---|---|"]
+        js = []
+        for f in keep[:25]:
+            rule = f"{self._cond(names, f['a'], f['qa'])} and {self._cond(names, f['b'], f['qb'])}"
+            ns, ht = len(f["stocks"]), f["h_t"] / max(f["n_t"], 1)
+            nc, hc, sc = int(f["n_c"].sum()), float(f["h_c"].sum()), float(f["s_c"].sum())
+            okc = f["n_c"] >= 5
+            holds = (f["h_c"][okc] / f["n_c"][okc] > base_t[f["stocks"][okc]]).mean() if okc.any() else float("nan")
+            syms = [self.stocks[i] for i in f["stocks"] if i < len(self.stocks)]
+            if len(facts) <= 8:
+                facts.append(f"+ {rule}: {ns} stocks (chance ~{f['chance']:.1f}), hit rate {ht:.0%} on them vs their "
+                             f"base {f['base_t']:.0%}")
+            rep_lines.append(f"| {rule} | {ns} | {f['chance']:.1f} | {ht:.0%} / {f['base_t']:.0%} | "
+                             f"{nc} / {(hc / nc if nc else float('nan')):.0%} / {(100 * sc / nc if nc else float('nan')):+.2f}% | "
+                             f"{holds:.0%} |")
+            js.append({"rule": rule, "stocks": syms, "chance": round(f["chance"], 2), "tune_hit": round(ht, 4),
+                       "tune_base": round(f["base_t"], 4), "confirm_bars": nc,
+                       "confirm_hit": round(hc / nc, 4) if nc else None,
+                       "confirm_avg_net": round(sc / nc, 5) if nc else None,
+                       "holds": None if np.isnan(holds) else round(float(holds), 3)})
+        if len(facts) == 1:
+            facts.append("- none beyond chance")
+        rep_lines.append("")
+        return facts, rep_lines, {"pass_rate": p_pass, "rules": js}
 
     def _combos(self, k: int, cols: list[int], bins: np.ndarray, edges: Mapping[int, np.ndarray], hit: np.ndarray,
                 net: np.ndarray, w: np.ndarray, names: list[str], min_n: int) -> list[tuple]:

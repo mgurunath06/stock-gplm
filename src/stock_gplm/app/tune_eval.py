@@ -81,10 +81,11 @@ class Variant:
     exit: dict[str, Any]  # full normalised exit dict (max_hold_bars, swing_stop, when, ...)
     direction: str = "long"
     features: bool = False
+    label: dict[str, Any] | None = None  # {"h", "t", "s"}: label EVERY entry bar (move-first discovery), no trades
 
     def payload(self) -> dict[str, Any]:
         return {"vid": self.vid, "tf": self.tf, "entry": self.entry, "exit": self.exit,
-                "direction": self.direction, "features": self.features}
+                "direction": self.direction, "features": self.features, "label": self.label}
 
 
 # ------------------------------------------------------------------ worker side
@@ -134,6 +135,52 @@ def _load(stock: str, config: str, tfs: Sequence[str], use_minute: bool) -> dict
     return out
 
 
+def _label_bars(m: Any, mask: np.ndarray, a0: int, n: int, lab: Mapping[str, Any], buy: float, sell: float,
+                short: bool) -> dict[str, np.ndarray] | None:
+    """Label every entry bar (owner 2026-11-22, move-first): enter at the next open, hit = price reaches
+    +t x ATR(14) before -s x ATR(14) within h bars (intraday: up to the 15:15 square-off bar). Same bar -> stop first
+    (conservative); gaps are not modelled. net = target / stop / horizon-close result after the lane costs."""
+    h, T, S = int(lab["h"]), float(lab["t"]), float(lab["s"])
+    t = np.flatnonzero(np.asarray(mask, dtype=bool))
+    t = t[(t >= a0) & (t + 1 < n)]
+    natr = np.asarray(m.natr, dtype=float)
+    t = t[np.isfinite(natr[t])]
+    if m.intraday:
+        end = np.minimum(t + h, np.asarray(m.exit_last)[t + 1].astype(np.int64))
+        keep = end >= t + 1
+    else:
+        end = t + h
+        keep = end <= n - 1
+    t, end = t[keep], end[keep]
+    if not len(t):
+        return None
+    o, hi, lo, cl = (np.asarray(x, dtype=float) for x in (m.open, m.high, m.low, m.close))
+    ent = o[t + 1]
+    atr = natr[t] * ent
+    sg = -1.0 if short else 1.0
+    tgt, stp = ent + sg * T * atr, ent - sg * S * atr
+    never = h + 10
+    ft = np.full(len(t), never)
+    fs = np.full(len(t), never)
+    for k in range(1, h + 1):
+        j = t + k
+        live = j <= end
+        if not live.any():
+            break
+        jj = np.minimum(j, n - 1)
+        th = live & ((lo[jj] <= tgt) if short else (hi[jj] >= tgt))
+        sh = live & ((hi[jj] >= stp) if short else (lo[jj] <= stp))
+        ft = np.where(th & (ft == never), k, ft)
+        fs = np.where(sh & (fs == never), k, fs)
+    hit = ft < fs
+    px = np.where(hit, tgt, np.where(fs < never, stp, cl[end]))
+    net = (ent * (1 - sell) - px * (1 + buy)) / ent if short else px * (1 - sell) / (ent * (1 + buy)) - 1
+    zeros = np.zeros(len(t), np.float32)
+    return {"t": t, "net": net.astype(np.float32), "mfe": zeros, "mae": zeros,
+            "held": np.minimum(np.minimum(ft, fs), end - t).astype(np.int32),
+            "reason": np.where(hit, 1, np.where(fs < never, 0, 2)).astype(np.int8)}
+
+
 def _evaluate_stock(si: int, lanes: Mapping[str, Any], variants: Sequence[Mapping[str, Any]], start: str,
                     acc: dict[str, list], errors: dict[str, int]) -> None:
     from . import strategy_dsl as dsl
@@ -159,23 +206,34 @@ def _evaluate_stock(si: int, lanes: Mapping[str, Any], variants: Sequence[Mappin
                 if v["entry"] not in masks:
                     masks[v["entry"]] = dsl.signal(v["entry"], ctx)
                 mask = masks[v["entry"]]
-                when = (v["exit"] or {}).get("when")
-                xm = dsl.signal(when, ctx) if when else None
-                trades = simulate(m, mask, (a0, n), Exit.of(v["exit"]), L["buy"], L["sell"],
-                                  v["direction"] == "short", xm)
+                lab = None
+                trades: list = []
+                if v.get("label"):
+                    lab = _label_bars(m, mask, a0, n, v["label"], L["buy"], L["sell"], v["direction"] == "short")
+                else:
+                    when = (v["exit"] or {}).get("when")
+                    xm = dsl.signal(when, ctx) if when else None
+                    trades = simulate(m, mask, (a0, n), Exit.of(v["exit"]), L["buy"], L["sell"],
+                                      v["direction"] == "short", xm)
             except (dsl.MissingData, dsl.DSLError, ValueError, KeyError, ZeroDivisionError):
                 errors[v["vid"]] = errors.get(v["vid"], 0) + 1
                 continue
-            if not trades:
-                continue
-            t = np.fromiter((x["t"] for x in trades), np.int64, len(trades))
-            rec = {"stock": np.full(len(t), si, np.int32), "day": L["days"][t],
-                   "net": np.fromiter((x["net_return"] for x in trades), np.float32, len(t)),
-                   "mfe": np.fromiter((x["mfe"] for x in trades), np.float32, len(t)),
-                   "mae": np.fromiter((x["mae"] for x in trades), np.float32, len(t)),
-                   "held": np.fromiter((x["bars_held"] for x in trades), np.int32, len(t)),
-                   "reason": np.fromiter((EXIT_CODES.get(str(x["exit_reason"]).upper(), 9) for x in trades),
-                                         np.int8, len(t))}
+            if v.get("label"):
+                if lab is None:
+                    continue
+                t = lab.pop("t")
+                rec = {"stock": np.full(len(t), si, np.int32), "day": L["days"][t], **lab}
+            else:
+                if not trades:
+                    continue
+                t = np.fromiter((x["t"] for x in trades), np.int64, len(trades))
+                rec = {"stock": np.full(len(t), si, np.int32), "day": L["days"][t],
+                       "net": np.fromiter((x["net_return"] for x in trades), np.float32, len(t)),
+                       "mfe": np.fromiter((x["mfe"] for x in trades), np.float32, len(t)),
+                       "mae": np.fromiter((x["mae"] for x in trades), np.float32, len(t)),
+                       "held": np.fromiter((x["bars_held"] for x in trades), np.int32, len(t)),
+                       "reason": np.fromiter((EXIT_CODES.get(str(x["exit_reason"]).upper(), 9) for x in trades),
+                                             np.int8, len(t))}
             if v.get("features"):
                 if feats is None:
                     feats = {}
