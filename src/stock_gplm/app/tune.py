@@ -118,11 +118,16 @@ class Tuner:
             out[key]["stocks"] = int(len(np.unique(r["stock"][mask])))
         return out
 
-    def score(self, s: Mapping[str, Any], parent_trades: int) -> float:
+    def score(self, s: Mapping[str, Any], parent_trades: int, objective: str = "win") -> float:
+        """TUNE-window ranking. win: win rate first (bucket A); profit: recency-weighted expectancy (bucket B)."""
         sel = self.cfg["selection"]
         if (s.get("trades", 0) < self.t["min_tune_trades"] or s.get("n_eff", 0) < sel["min_tune_neff"]
                 or s.get("trades", 0) < sel["min_retained"] * max(parent_trades, 1)):
             return -1000.0 + s.get("trades", 0) / 1e4
+        if objective == "profit":
+            v = 100 * s["avg_w"] + 0.5 * min(s["pf_w"], 3.0)
+            v -= 10 if s["pf_w"] < sel["target_pf"] else 0
+            return round(v, 4)
         v = 100 * s["win_w"] + 10 * min(s["pf_w"], 3.0)
         v -= 20 if s["pf_w"] < sel["target_pf"] else 0
         v -= 20 if s["avg_w"] <= 0 else 0
@@ -225,26 +230,29 @@ class Tuner:
         q.sort(key=lambda s: -st[s]["base"]["tune"]["win_w"])  # owner: highest win rate first
         return q[: self.limit] if self.limit else q
 
-    def best(self, sid: str, top: int = 1) -> list[dict[str, Any]]:
+    def best(self, sid: str, top: int = 1, objective: str = "win") -> list[dict[str, Any]]:
         st = self.state["strategies"][sid]
         ptr = st["base"]["tune"]["trades"]
         base = {"tag": "orig", "label": "original", "change": "none", "entry": self.strategies[sid]["entry"],
                 "exit": self.strategies[sid]["exit"], "tune": st["base"]["tune"], "confirm": st["base"]["confirm"]}
         allv = [base, *st["history"]]
-        for h in allv:
-            h["score"] = self.score(h["tune"], ptr)
-        return sorted(allv, key=lambda h: -h["score"])[:top]
+        scored = [{**h, "score": self.score(h["tune"], ptr, objective)} for h in allv]
+        return sorted(scored, key=lambda h: -h["score"])[:top]
 
     def ask(self, sid: str, phase: str, rnd: int, providers: list[str], model: str, k: int, temp: float
             ) -> list[te.Variant]:
         st = self.state["strategies"][sid]
         d = self.strategies[sid]
         b = self.best(sid)[0]
+        bp = self.best(sid, 1, "profit")[0]
         hist = [{"label": h["label"], "change": h["change"], "tune": h["tune"]} for h in st["history"]]
         hist += [{"label": x["label"], "change": f"REJECTED ({x['reason']}): {x['change']}", "tune": {}}
                  for x in st["rejected"][-8:]]
-        stage = (f"{phase} round {rnd}; current best so far: [{b['label']}] {b['change']}"
-                 if b["tag"] != "orig" else f"{phase} round {rnd}")
+        stage = f"{phase} round {rnd}"
+        if b["tag"] != "orig":
+            stage += f"; best for win rate so far: [{b['label']}] {b['change']}"
+        if bp["tag"] != "orig":
+            stage += f"; best for profit so far: [{bp['label']}] {bp['change']}"
         prompt = tl.build_prompt(d, self.tf, st["base"]["tune"], st["analysis"], hist, k,
                                  tl.dsl_help(self.tf != "1d"), stage)
         reply, used = None, None
@@ -348,7 +356,14 @@ class Tuner:
         for sid in todo:
             st = self.state["strategies"][sid]
             seen = {h["entry"] + json.dumps(h["exit"], sort_keys=True) for h in st["history"]}
-            for bi, b in enumerate(self.best(sid, int(es["top"]))):
+            tops, keys = [], set()
+            for obj in ("win", "profit"):
+                for b in self.best(sid, int(es["top"]), obj):
+                    kk = b["entry"] + json.dumps(b["exit"], sort_keys=True)
+                    if kk not in keys:
+                        keys.add(kk)
+                        tops.append(b)
+            for bi, b in enumerate(tops):
                 for rr in es["rr"]:
                     for mx in es["max_swing_pct"]:
                         ex = json.loads(json.dumps(b["exit"]))
@@ -379,36 +394,50 @@ class Tuner:
         for sid in batch:
             st = self.state["strategies"][sid]
             b = self.best(sid)[0]
-            self.log(f"  {what} | {st['name'][:34]:<34} orig win {st['base']['tune']['win_w']:.0%} PF "
-                     f"{min(st['base']['tune']['pf_w'], 99):.2f} -> best win {b['tune']['win_w']:.0%} PF "
-                     f"{min(b['tune']['pf_w'], 99):.2f} ({b['tune']['trades']} tr) [{b['label']}]")
+            bp = self.best(sid, 1, "profit")[0]
+            self.log(f"  {what} | {st['name'][:30]:<30} {sid:<12} orig win {st['base']['tune']['win_w']:.0%} PF "
+                     f"{min(st['base']['tune']['pf_w'], 99):.2f} | best-win {b['tune']['win_w']:.0%} PF "
+                     f"{min(b['tune']['pf_w'], 99):.2f} ({b['tune']['trades']} tr) | best-profit avg "
+                     f"{100 * bp['tune']['avg_w']:+.2f}% PF {min(bp['tune']['pf_w'], 99):.2f}")
 
     # -------------------------------------------------------------- gate + reports
+    def _fails(self, c: Mapping[str, Any], pc: Mapping[str, Any], rule: Mapping[str, Any], beat: bool) -> list[str]:
+        why: list[str] = []
+        if c["trades"] < self.t["min_confirm_trades"]:
+            why.append(f"only {c['trades']} confirm trades")
+        if c["n_eff"] < rule["n_eff"]:
+            why.append(f"effective trades {c['n_eff']:.0f} < {rule['n_eff']}")
+        if rule.get("win_w") and c["win_w"] < rule["win_w"]:
+            why.append(f"win {c['win_w']:.0%} < {rule['win_w']:.0%}")
+        if c["pf_w"] < rule["pf_w"]:
+            why.append(f"PF {c['pf_w']:.2f} < {rule['pf_w']}")
+        if c["avg_w"] <= 0:
+            why.append("avg <= 0")
+        if beat and pc.get("trades") and c["avg_w"] <= pc["avg_w"]:
+            why.append("not better than original")
+        return why
+
     def gate(self, sid: str) -> dict[str, Any]:
+        """Buckets on the CONFIRM window (owner 2026-11-22): A high win, B profitable at any win rate,
+        B (original) = the untouched strategy already qualifies for B. Candidates are ranked on TUNE only."""
         g = self.cfg["gate"]
         st = self.state["strategies"][sid]
         pc = st["base"]["confirm"]
-        last_why = "no variant beat the original on TUNE"
-        for rank, b in enumerate(self.best(sid, int(g["check_top"])), 1):
-            if b["tag"] == "orig" or b["score"] <= -999:
-                continue
-            c = b["confirm"]
-            why: list[str] = []
-            if c["trades"] < self.t["min_confirm_trades"]:
-                why.append(f"only {c['trades']} confirm trades")
-            if c["n_eff"] < g["n_eff"]:
-                why.append(f"effective trades {c['n_eff']:.0f} < {g['n_eff']}")
-            if c["win_w"] < g["win_w"]:
-                why.append(f"win {c['win_w']:.0%} < {g['win_w']:.0%}")
-            if c["pf_w"] < g["pf_w"]:
-                why.append(f"PF {c['pf_w']:.2f} < {g['pf_w']}")
-            if g.get("beat_parent") and pc.get("trades") and c["avg_w"] <= pc["avg_w"]:
-                why.append("not better than original on confirm")
-            if not why:
-                return {"accepted": True, "rank": rank, "variant": b}
-            if rank == 1 or last_why.startswith("no variant"):
-                last_why = "; ".join(why)
-        return {"accepted": False, "variant": self.best(sid)[0], "why": last_why}
+        notes = []
+        for bucket, obj, rule in (("A high win", "win", g), ("B profitable", "profit", g["profitable"])):
+            for rank, b in enumerate(self.best(sid, int(g["check_top"]), obj), 1):
+                if b["tag"] == "orig" or b["score"] <= -999:
+                    continue
+                why = self._fails(b["confirm"], pc, rule, bool(g.get("beat_parent")))
+                if not why:
+                    return {"accepted": True, "bucket": bucket, "rank": rank, "variant": b}
+                if len(notes) < 2 and not any(n.startswith(bucket[0]) for n in notes):
+                    notes.append(f"{bucket[0]}: " + "; ".join(why))
+        if pc.get("trades") and not self._fails(pc, pc, g["profitable"], False):
+            orig = next(h for h in self.best(sid, 10 ** 6) if h["tag"] == "orig")
+            return {"accepted": True, "bucket": "B (original)", "rank": 0, "variant": orig}
+        return {"accepted": False, "bucket": "-", "rank": 0, "variant": self.best(sid)[0],
+                "why": " / ".join(notes) or "no variant beat the original on TUNE"}
 
     def write_baseline(self) -> None:
         st = self.state["strategies"]
@@ -424,7 +453,7 @@ class Tuner:
              "| # | Strategy | Tune trades | Win | Avg | PF | n_eff | Confirm trades | Win | Avg | PF | n_eff |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for i, sid in enumerate(rows, 1):
-            L.append(f"| {i} | {st[sid]['name']} | {cell(st[sid]['base']['tune'])} | {cell(st[sid]['base']['confirm'])} |")
+            L.append(f"| {i} | {st[sid]['name']} ({sid}) | {cell(st[sid]['base']['tune'])} | {cell(st[sid]['base']['confirm'])} |")
         (self.root / "BASELINE.md").write_text("\n".join(L) + "\n", encoding="utf-8")
         self.log(f"baseline written: {self.root / 'BASELINE.md'}")
 
@@ -435,23 +464,29 @@ class Tuner:
              f"Stocks {len(self.stocks)}; TUNE {self.t['tune_start']} .. {self.t['confirm_start']}, CONFIRM "
              f"{self.t['confirm_start']} .. latest (never shown to any LLM). Gate on CONFIRM: recency-weighted win >= "
              f"{self.cfg['gate']['win_w']:.0%}, PF >= {self.cfg['gate']['pf_w']}, effective trades >= "
-             f"{self.cfg['gate']['n_eff']}, better than the original. API spend so far ${self.state['usd']:.2f}.", "",
-             "| Strategy | Original tune win / PF | Best variant | Change | Tune win / PF / trades | "
-             "Confirm orig win / PF | Confirm variant win / PF / trades | Trials | Verdict |",
+             f"{self.cfg['gate']['n_eff']}, better than the original = bucket A; PF >= {self.cfg['gate']['profitable']['pf_w']}, "
+             "avg > 0, better than the original at any win rate = bucket B; B (original) = untouched strategy already "
+             f"qualifies. API spend so far ${self.state['usd']:.2f}.", "",
+             "| Strategy | Original tune win / PF | Variant | Change | Tune win / PF / avg / trades | "
+             "Confirm orig win / PF / avg | Confirm variant win / PF / avg / trades | Trials | Bucket |",
              "|---|---|---|---|---|---|---|---|---|"]
-        cands = []
+        cands, keep = [], []
         for sid in q:
             s = st[sid]
             g = self.gate(sid)
             b = g["variant"]
             bt, bc, pt, pc = b["tune"], b["confirm"], s["base"]["tune"], s["base"]["confirm"]
-            verdict = f"ACCEPTED (rank {g['rank']})" if g["accepted"] else f"no: {g['why']}"
+            verdict = ((f"**{g['bucket']}**" + (f" (rank {g['rank']})" if g["rank"] else "")) if g["accepted"]
+                       else f"rejected: {g['why']}")
             lab, chg = str(b["label"]).replace("|", "/"), str(b["change"]).replace("|", "/")
-            L.append(f"| {s['name']} | {pt['win_w']:.0%} / {min(pt['pf_w'], 99):.2f} | {lab} | {chg} | "
-                     f"{bt['win_w']:.0%} / {min(bt['pf_w'], 99):.2f} / {bt['trades']} | "
-                     f"{pc['win_w']:.0%} / {min(pc['pf_w'], 99):.2f} | "
-                     f"{bc['win_w']:.0%} / {min(bc['pf_w'], 99):.2f} / {bc['trades']} | {s['trials']} | {verdict} |")
-            if g["accepted"]:
+            L.append(f"| {s['name']} ({sid}) | {pt['win_w']:.0%} / {min(pt['pf_w'], 99):.2f} | {lab} | {chg} | "
+                     f"{bt['win_w']:.0%} / {min(bt['pf_w'], 99):.2f} / {100 * bt['avg_w']:+.2f}% / {bt['trades']} | "
+                     f"{pc['win_w']:.0%} / {min(pc['pf_w'], 99):.2f} / {100 * pc['avg_w']:+.2f}% | "
+                     f"{bc['win_w']:.0%} / {min(bc['pf_w'], 99):.2f} / {100 * bc['avg_w']:+.2f}% / {bc['trades']} | "
+                     f"{s['trials']} | {verdict} |")
+            if g["accepted"] and g["bucket"] == "B (original)":
+                keep.append({"id": sid, "name": s["name"], "confirm": pc})
+            elif g["accepted"]:
                 d = self.strategies[sid]
                 n = sum(1 for c in cands if c["id"].startswith(sid)) + 1
                 cands.append({**{k: d[k] for k in d if k not in ("entry", "exit")},
@@ -460,14 +495,19 @@ class Tuner:
                                              f"{b['change']}",
                               "entry": b["entry"], "exit": b["exit"],
                               "applicability": {**(d.get("applicability") or {}), "timeframes": [self.tf]},
-                              "tags": [*(d.get("tags") or []), "tuned", f"tuned-from:{sid}"],
-                              "evidence_tuning": {"tune": bt, "confirm": bc, "trials": s["trials"],
+                              "tags": [*(d.get("tags") or []), "tuned", f"tuned-from:{sid}",
+                                       "bucket:" + g["bucket"].split()[0]],
+                              "evidence_tuning": {"bucket": g["bucket"], "tune": bt, "confirm": bc,
+                                                  "trials": s["trials"],
                                                   "source": b.get("source", "")}})
         (self.root / "candidates.json").write_text(json.dumps({"contract": "stock-gplm.tuning-candidates.v1",
-                                                                "timeframe": self.tf, "strategies": cands}, indent=1),
+                                                                "timeframe": self.tf, "strategies": cands,
+                                                                "keep_original": keep}, indent=1),
                                                     encoding="utf-8")
-        L += ["", f"Accepted: {len(cands)} of {len(q)}. Candidates in candidates.json - not in the library until the "
-                  "owner approves."]
+        nA = sum(1 for c in cands if c["evidence_tuning"]["bucket"].startswith("A"))
+        L += ["", f"Bucket A (high win): {nA}; bucket B (profitable, tuned): {len(cands) - nA}; B (original, keep as "
+                  f"is): {len(keep)}; of {len(q)} tuned strategies. Tuned versions are in candidates.json - not in the "
+                  "library until the owner approves."]
         p = self.root / "TUNING.md"
         p.write_text("\n".join(L) + "\n", encoding="utf-8")
         self.log(f"report: {p}")

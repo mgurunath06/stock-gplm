@@ -96,14 +96,14 @@ def parse_json(text: str) -> dict[str, Any]:
 # ------------------------------------------------------------------ prompts
 SYSTEM = (
     "You are a careful quantitative trading researcher fine-tuning an EXISTING rule-based NSE cash-equity strategy. "
-    "Goal: raise the recency-weighted WIN RATE towards 70-80% while keeping profit factor >= 1.3 after costs and "
-    "keeping enough trades. Recent trades matter most. Make SMALL, plausible, economically sensible edits - never "
+    "Goals: mainly raise the recency-weighted WIN RATE towards 70-80% with profit factor >= 1.3 after costs; "
+    "secondly find more PROFITABLE versions at any win rate. Keep enough trades. Recent trades matter most. Make SMALL, plausible, economically sensible edits - never "
     "replace the strategy's idea. Prefer filters that remove the losing contexts shown in the loser analysis, and "
     "exit changes (lower rr = closer target = higher win rate, but watch profit factor). Avoid thresholds that keep "
     "only a tiny fraction of trades (overfitting). Reply with ONE JSON object only, no prose outside it.")
 
 OUTPUT_SCHEMA = (
-    '{"variants": [{"label": "<= 6 words, readable", "rationale": "one sentence", '
+    '{"variants": [{"label": "<= 6 words, readable", "aim": "win" or "profit", "rationale": "one sentence", '
     '"add_filter": "<DSL boolean condition, ANDed onto the entry>" or null, '
     '"entry": "<full lightly edited entry>" or null, '
     '"exit": {"rr": number, "max_swing_pct": number|null, "lookback": int, "max_hold_bars": int} or null}]}')
@@ -138,7 +138,8 @@ LOSER ANALYSIS (tuning window; feature value at the signal bar; buckets are quin
 ALREADY TRIED (tuning-window results; do not repeat, learn from them):
 {hist}
 
-TASK ({stage}): propose {k} DIFFERENT variants. Each variant may make at most {MAX_EDITS} edits in total
+TASK ({stage}): propose {k} DIFFERENT variants: about two thirds aiming at a HIGHER WIN RATE (target 70-80%,
+PF >= 1.3) and the rest aiming at HIGHER PROFIT per trade (higher average / PF, any win rate). Set "aim" on each. Each variant may make at most {MAX_EDITS} edits in total
 (each extra AND condition = 1 edit, an exit change = 1 edit, a light entry rewrite = 1 edit).
 Use EITHER add_filter (preferred: only the new condition) OR entry (a light rewrite), never the same change in both.
 Price-unit values (atr, stdev, macd, distances between averages) must be divided by close so one threshold fits
