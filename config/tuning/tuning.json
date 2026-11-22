@@ -146,6 +146,57 @@
       ]
     },
     "min_cell_share": 0.01,
-    "min_cell_trades": 300
+    "min_cell_trades": 300,
+    "moves": {
+      "note": "Move-first discovery (owner 2026-11-22): a MOVE = +t x ATR(14) before -s x ATR(14) within h bars. python -m stock_gplm.app.discover --tf 1d --mode moves",
+      "1d": [
+        {
+          "h": 10,
+          "t": 2.5,
+          "s": 1.5
+        },
+        {
+          "h": 20,
+          "t": 4.0,
+          "s": 2.0
+        }
+      ],
+      "15m": [
+        {
+          "h": 8,
+          "t": 3.0,
+          "s": 1.5
+        },
+        {
+          "h": 16,
+          "t": 5.0,
+          "s": 2.0
+        }
+      ],
+      "5m": [
+        {
+          "h": 24,
+          "t": 4.0,
+          "s": 2.0
+        },
+        {
+          "h": 36,
+          "t": 6.0,
+          "s": 2.5
+        }
+      ],
+      "60m": [
+        {
+          "h": 6,
+          "t": 2.5,
+          "s": 1.25
+        },
+        {
+          "h": 12,
+          "t": 4.0,
+          "s": 2.0
+        }
+      ]
+    }
   }
 }

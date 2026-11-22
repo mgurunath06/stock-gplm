@@ -69,6 +69,7 @@ class Discoverer(Tuner):
         self.strategies = {}
         self.intraday = tf != "1d"
         self.floor = FLOOR_INTRADAY if self.intraday else FLOOR_DAILY
+        self.prefix = "DISC"
         for k, v in (("ideas", []), ("rejected", []), ("rounds_done", 0), ("swept", False), ("facts", None)):
             self.state.setdefault(k, v)
 
@@ -218,11 +219,8 @@ class Discoverer(Tuner):
         rank = sorted(ideas, key=lambda i: -self.score(i["tune"], 0, "profit"))
         lines = []
         for i in rank[:10]:
-            ex = i["exit"].get("swing_stop") or {}
-            lines.append(f"- {i['id']} [{i['name']}] {i['direction']}: {i['core']} | exit rr {ex.get('rr')}, max swing "
-                         f"{ex.get('max_swing_pct')}, hold {i['exit'].get('max_hold_bars')}"
-                         + (f", when {i['exit']['when']}" if i["exit"].get("when") else "")
-                         + f" -> {tl._fmt_stats(i['tune'])}")
+            lines.append(f"- {i['id']} [{i['name']}] {i['direction']}: {i['core']} | {self.exit_desc(i['exit'])}"
+                         f" -> {tl._fmt_stats(i['tune'])}")
         lines += [f"- {i['id']} [{i['name']}] -> {tl._fmt_stats(i['tune'])}" for i in rank[10:20]]
         lines += [f"- REJECTED [{r['name']}]: {r['reason']}" for r in self.state["rejected"][-6:]]
         return "\n".join(lines)
@@ -241,11 +239,9 @@ Aim: average net per trade clearly above the probe average and above zero, profi
 >= 60%; at least {self.t['min_tune_trades']} trades over all stocks in the tuning window. Prefer conditions from the
 best combinations, avoid the worst ones. You may use the fact-sheet feature names directly (e.g. atr_pct > 0.006);
 they are replaced by their DSL formulas. Price-unit values must be divided by close (atr(14) / close < 0.03).
-Exit = stop 0.2% beyond the last swing, target rr x risk{', square-off 15:15, no entries after 14:45' if self.intraday else ''};
-ranges rr 0.3-4, max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120; optional "when" exit rule;
-optional trail_atr 1-6 = trailing stop that many ATR(14) below the highest price since entry (keeps part of big moves).
+{self.exit_text()}
 Do NOT include the liquidity floor (added automatically). No ref_symbol(), feature(){', no bench() (daily only)' if self.intraday else '; bench(x) = x on Nifty 50 (data from 2024 only)'}.
-Output JSON exactly like: {SCHEMA}
+Output JSON exactly like: {self.schema()}
 
 {tl.dsl_help(self.intraday)}
 """
@@ -286,7 +282,7 @@ Output JSON exactly like: {SCHEMA}
             if key in seen:
                 continue
             seen.add(key)
-            base = f"DISC-{self.tf}-{_camel(nm)}"
+            base = f"{self.prefix}-{self.tf}-{_camel(nm)}"
             sid, n = base, 2
             while sid in ids:
                 sid, n = f"{base}-{n}", n + 1
@@ -327,6 +323,44 @@ Output JSON exactly like: {SCHEMA}
         if bad:
             return None, f"uses unavailable functions {sorted(bad)}"
         e = v.get("exit") or {}
+        ex, err = self.build_exit(e)
+        if ex is None:
+            return None, err
+        when = self.expand(tl.repair_dsl(str(e.get("when") or "").strip()))
+        if when and when.lower() not in ("null", "none"):
+            try:
+                dsl.parse(when)
+                ex["when"] = when
+            except dsl.DSLError as exc:
+                return None, f"exit rule does not parse: {exc}"
+        entry = f"{self.floor} and ({core})"
+        doc = {**{k: self.template[k] for k in self.template
+                  if k not in ("id", "name", "description", "entry", "exit", "direction")},
+               "id": "DISC-CHECK", "name": "check", "entry": entry, "exit": ex, "direction": direction,
+               "applicability": {**(self.template.get("applicability") or {}), "timeframes": [self.tf]}}
+        try:
+            validate(doc)
+        except StrategyConfigError as exc:
+            return None, f"invalid: {exc}"
+        return {"entry": entry, "core": core, "exit": ex, "direction": direction}, ""
+
+    def exit_text(self) -> str:
+        return (f"Exit = stop 0.2% beyond the last swing, target rr x risk"
+                f"{', square-off 15:15, no entries after 14:45' if self.intraday else ''};\n"
+                "ranges rr 0.3-4, max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120; optional "
+                '"when" exit rule;\noptional trail_atr 1-6 = trailing stop that many ATR(14) below the highest price '
+                "since entry (keeps part of big moves).")
+
+    def schema(self) -> str:
+        return SCHEMA
+
+    def exit_desc(self, ex: Mapping[str, Any]) -> str:
+        sw = ex.get("swing_stop") or {}
+        return (f"exit rr {sw.get('rr')}, max swing {sw.get('max_swing_pct')}, hold {ex.get('max_hold_bars')}"
+                + (f", trail {ex['trail_atr']} ATR" if ex.get("trail_atr") else "")
+                + (f", when {ex['when']}" if ex.get("when") else ""))
+
+    def build_exit(self, e: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str]:
         sw: dict[str, Any] = {"buffer": 0.002}
         for key, dflt in (("rr", 2.0), ("lookback", 20)):
             lo, hi = tl.EXIT_RANGES[key]
@@ -353,23 +387,24 @@ Output JSON exactly like: {SCHEMA}
                 ex["trail_atr"] = round(min(max(float(e["trail_atr"]), lo), hi), 2)
             except (TypeError, ValueError):
                 pass
-        when = self.expand(tl.repair_dsl(str(e.get("when") or "").strip()))
-        if when and when.lower() not in ("null", "none"):
-            try:
-                dsl.parse(when)
-                ex["when"] = when
-            except dsl.DSLError as exc:
-                return None, f"exit rule does not parse: {exc}"
-        entry = f"{self.floor} and ({core})"
-        doc = {**{k: self.template[k] for k in self.template
-                  if k not in ("id", "name", "description", "entry", "exit", "direction")},
-               "id": "DISC-CHECK", "name": "check", "entry": entry, "exit": ex, "direction": direction,
-               "applicability": {**(self.template.get("applicability") or {}), "timeframes": [self.tf]}}
-        try:
-            validate(doc)
-        except StrategyConfigError as exc:
-            return None, f"invalid: {exc}"
-        return {"entry": entry, "core": core, "exit": ex, "direction": direction}, ""
+        return ex, ""
+
+    def sweep_exits(self, i: Mapping[str, Any], es: Mapping[str, Any]):
+        """(exit dict, id tag, label tag) variants for the exit sweep."""
+        for rr in es["rr"]:
+            for mx in es["max_swing_pct"]:
+                for tr in es.get("trail_atr", [None]):
+                    ex = json.loads(json.dumps(i["exit"]))
+                    ex["swing_stop"]["rr"] = rr
+                    ex["swing_stop"].pop("max_swing_pct", None)
+                    if mx is not None:
+                        ex["swing_stop"]["max_swing_pct"] = mx
+                    if tr is None:
+                        ex.pop("trail_atr", None)
+                    else:
+                        ex["trail_atr"] = tr
+                    yield (ex, f"X{rr:g}-{mx or 'none'}" + (f"-T{tr:g}" if tr else ""),
+                           f"exit rr {rr:g}, swing {mx or 'none'}" + (f", trail {tr:g} ATR" if tr else ""))
 
     def record_ideas(self, vs: list[te.Variant], res: Mapping[str, Mapping[str, Any]]) -> None:
         for v in vs:
@@ -401,29 +436,16 @@ Output JSON exactly like: {SCHEMA}
         seen = {i["entry"] + json.dumps(i["exit"], sort_keys=True) for i in self.state["ideas"]}
         vs = []
         for i in tops.values():
-            for rr in es["rr"]:
-                for mx in es["max_swing_pct"]:
-                    for tr in es.get("trail_atr", [None]):
-                        ex = json.loads(json.dumps(i["exit"]))
-                        ex["swing_stop"]["rr"] = rr
-                        ex["swing_stop"].pop("max_swing_pct", None)
-                        if mx is not None:
-                            ex["swing_stop"]["max_swing_pct"] = mx
-                        if tr is None:
-                            ex.pop("trail_atr", None)
-                        else:
-                            ex["trail_atr"] = tr
-                        key = i["entry"] + json.dumps(ex, sort_keys=True)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        sid = f"{i['id']}-X{rr:g}-{mx or 'none'}" + (f"-T{tr:g}" if tr else "")
-                        v = te.Variant(f"{sid}~X", self.tf, i["entry"], ex, i["direction"])
-                        v.meta = {"id": sid, "name": f"{i['name']} (exit rr {rr:g}, swing {mx or 'none'}"
-                                                     + (f", trail {tr:g} ATR)" if tr else ")"),
-                                  "idea": i.get("idea", ""), "core": i["core"], "from": i["id"], "round": "sweep",
-                                  "source": "exit-sweep"}
-                        vs.append(v)
+            for ex, tag, lab in self.sweep_exits(i, es):
+                key = i["entry"] + json.dumps(ex, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sid = f"{i['id']}-{tag}"
+                v = te.Variant(f"{sid}~X", self.tf, i["entry"], ex, i["direction"])
+                v.meta = {"id": sid, "name": f"{i['name']} ({lab})", "idea": i.get("idea", ""), "core": i["core"],
+                          "from": i["id"], "round": "sweep", "source": "exit-sweep"}
+                vs.append(v)
         if vs:
             self.log(f"exit sweep: {len(vs)} variants of {len(tops)} best ideas")
             self.record_ideas(vs, self.evaluate(vs))
@@ -501,6 +523,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tf", required=True, help="1d, 5m, 15m or 60m")
     ap.add_argument("--name", help="output folder name (default discover-<tf>)")
     ap.add_argument("--phase", choices=["all", "facts", "report"], default="all")
+    ap.add_argument("--mode", choices=["probe", "moves"], default="probe",
+                    help="probe = facts from every-bar probes; moves = start from the big moves (discover_moves)")
     ap.add_argument("--stocks", help="number of universe stocks (default from config) or @file")
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--rounds", type=int, help="LLM rounds (default config discover.rounds)")
@@ -516,7 +540,11 @@ def main(argv: list[str] | None = None) -> int:
         dc["rounds"] = a.rounds
     if a.ideas:
         dc["ideas"] = a.ideas
-    du = Discoverer(a.tf, a.name or f"discover-{a.tf}", cfg, a.stocks, a.workers)
+    if a.mode == "moves":
+        from .discover_moves import MoveDiscoverer
+        du = MoveDiscoverer(a.tf, a.name or f"moves-{a.tf}", cfg, a.stocks, a.workers)
+    else:
+        du = Discoverer(a.tf, a.name or f"discover-{a.tf}", cfg, a.stocks, a.workers)
     model = a.model or du.d.get("model") or cfg["local"]["model"]
     try:
         if a.phase == "report":
