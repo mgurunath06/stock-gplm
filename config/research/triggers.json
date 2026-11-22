@@ -1,0 +1,33 @@
+{
+  "_doc": "Owner 2026-11-22: 'all kinds of triggers' with structure exits. Example: RELIANCE 15m 13 Oct 2026 14:00 EMA13 crosses above EMA20, stop below the last swing low (13 Oct 11:45), target EMA 200. Each trigger = DSL event (liquidity floor added automatically). Each exit = stop + target; 'ema200' = EMA 200 value at the signal candle (trade skipped when price is already above it), 'swing_low' = last confirmed swing low before the signal minus buffer (same rule as the engine), 'rrN' = N x risk, 'pctN' = N%. Trades are held until stop or target (overnight on intraday), one position at a time per trigger x exit.",
+  "swing": {"buffer": 0.002, "lookback": 20, "strength": 2},
+  "swing_major": {"_doc": "bigger swing: low is the lowest of `strength` candles on each side, searched further back (owner examples: 13 Oct 11:45, 1 Oct 14:00)", "buffer": 0.002, "lookback": 150, "strength": 5},
+  "triggers": {
+    "EMA13x20": "cross_above(ema(close, 13), ema(close, 20))",
+    "EMA9x20": "cross_above(ema(close, 9), ema(close, 20))",
+    "EMA20x50": "cross_above(ema(close, 20), ema(close, 50))",
+    "EMA13x20_below200": "cross_above(ema(close, 13), ema(close, 20)) and close < ema(close, 200)",
+    "Close_x_EMA200": "cross_above(close, ema(close, 200))",
+    "Close_x_EMA50": "cross_above(close, ema(close, 50))",
+    "MACD_x_signal": "cross_above(macd(close), macd_signal(close))",
+    "MACD_x_signal_below0": "cross_above(macd(close), macd_signal(close)) and macd(close) < 0",
+    "MACD_x_zero": "cross_above(macd(close), 0)",
+    "RSI3_x_60": "cross_above(rsi(close, 3), 60)",
+    "RSI14_x_50": "cross_above(rsi(close, 14), 50)",
+    "Supertrend_flip_up": "supertrend_dir(10, 3) > 0 and supertrend_dir(10, 3)[1] < 0",
+    "VWAP_reclaim": "cross_above(close, vwap)",
+    "Breakout_20": "close > highest(high, 20)[1]",
+    "Volume_spike_green": "volume > 2 * sma(volume, 20) and close > open",
+    "EMA_stack_turns_bull": "ema(close, 9) > ema(close, 13) and ema(close, 13) > ema(close, 20) and ema(close, 20) > ema(close, 50) and not (ema(close, 9)[1] > ema(close, 13)[1] and ema(close, 13)[1] > ema(close, 20)[1] and ema(close, 20)[1] > ema(close, 50)[1])"
+  },
+  "exits": {
+    "SwingLow_to_EMA200": {"stop": "swing_low", "target": "ema200"},
+    "SwingLow_RR2": {"stop": "swing_low", "target": "rr2"},
+    "SwingLow_RR3": {"stop": "swing_low", "target": "rr3"},
+    "MajorSwing_to_EMA200": {"stop": "swing_major", "target": "ema200"},
+    "MajorSwing_RR2": {"stop": "swing_major", "target": "rr2"},
+    "Pct1_Pct2": {"stop": "pct1", "target": "pct2"}
+  },
+  "min_rr": 1.0,
+  "max_hold_days": 10
+}
