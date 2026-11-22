@@ -52,23 +52,38 @@ def research_bars(data: SymbolData, today: str | None = None) -> dict[str, Bars]
     """Research/backtest lanes (owner 2026-11-22). No registered calendar covers 2010+, so strict
     :func:`all_bars` leaves every weekly/monthly bar "not final" and their strategies never fire. Here a
     week (month) whose calendar period has ended before ``today`` is final; the running one stays
-    incomplete. Live alerts keep using strict :func:`all_bars` with the registered calendar."""
+    incomplete. With data/reference/nse_trading_calendar.csv (trading_calendar.py) the running week/month is
+    also final as soon as its last expected session's candle is loaded (Friday evening, not Monday).
+    Live alerts keep using strict :func:`all_bars` with the registered calendar."""
     from datetime import date, timedelta
+    from .trading_calendar import load as load_calendar
     bars = all_bars(data)
     t = date.fromisoformat(today) if today else date.today()
+    cal = load_calendar()
+    last_of: dict[str, dict[str, str]] = {"1w": {}, "1mo": {}}
+    for x in cal:
+        y, w, _ = date.fromisoformat(x).isocalendar()
+        last_of["1w"][f"{y}-W{w:02d}"] = x
+        last_of["1mo"][x[:7]] = x
     for tf in ("1w", "1mo"):
         b = bars.get(tf)
         if b is None or not len(b):
             continue
         f = b.frame.copy()
-        ends = []
+        flags = []
         for s in f["session"].astype(str):
-            d = date.fromisoformat(s[:10])
+            s = s[:10]
+            d = date.fromisoformat(s)
             if tf == "1w":
-                ends.append(d + timedelta(days=6 - d.weekday()))
+                end = d + timedelta(days=6 - d.weekday())
+                y, w, _ = d.isocalendar()
+                key = f"{y}-W{w:02d}"
             else:
-                ends.append(date(d.year + (d.month == 12), 1 if d.month == 12 else d.month + 1, 1) - timedelta(days=1))
-        f["incomplete"] = np.array([e >= t for e in ends], dtype=bool)
+                end = date(d.year + (d.month == 12), 1 if d.month == 12 else d.month + 1, 1) - timedelta(days=1)
+                key = s[:7]
+            exp = last_of[tf].get(key)
+            flags.append(not (end < t or (exp is not None and s >= exp)))
+        f["incomplete"] = np.array(flags, dtype=bool)
         bars[tf] = Bars(tf, f, f"{b.source}; research: ended periods final")
     return bars
 
