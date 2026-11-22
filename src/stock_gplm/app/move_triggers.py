@@ -10,7 +10,10 @@
    A trigger fires on the first candle its condition becomes true.
 3. EXITS: structure exits - stop below the last minor / major swing low, target EMA 50/100/200 or 2R/3R, held until
    stop or target (overnight on intraday); real trade engine, costs, one position at a time.
-4. FILTER: per trigger x exit, the one indicator condition that best separates its winners from its losers.
+4. FILTER: per trigger x exit, the best of a SHORT list of trader conditions (phase, above/below EMA 200, EMA 200
+   rising, day up, daily / hourly trend, volume, RSI) - kept only if it improves the trigger's own label.
+   TREND GUARD: no longs while below a falling hourly EMA 200 (trigger_set.json -> trend_guard).
+   SAME MOVE ONCE: strategies whose wins came from the same moves are listed once ('similar' count).
 5. LABELS (recent trades weigh more - owner's most important rule): HC high confidence, HCLT high confidence but low
    trades, MC medium, LC low/avoid (trigger_set.json -> labels).
 6. CATCH: for every move, which triggers fired in the 10 candles before it; per trigger how many moves it caught and
@@ -130,25 +133,35 @@ class MoveTriggers:
                 return i
         return None
 
-    def cond_text(self, cond: tuple | None) -> str:
-        if cond is None:
-            return ""
-        j, kind, lv = cond
-        nm = self.f.names[j]
-        return {"ge": f"{nm} >= {lv:g}", "lt": f"{nm} < {lv:g}", "yes": nm, "no": f"not {nm}"}[kind]
+    def cond_text(self, cond: str | None) -> str:
+        return cond or ""
 
-    def cond_dsl(self, cond: tuple) -> str:
+    def cond_dsl(self, cond: str) -> str:
+        return f"({self.filters[cond][0]})"
+
+    def distinct(self, cands: list[dict[str, Any]], top: int) -> list[dict[str, Any]]:
+        """Owner 2026-11-22: count a big move once - skip a strategy whose winning trades closed in the same
+        sessions as an already listed one (overlap > same_move_overlap). Returns (strategy, similar-count) order."""
+        lim = float(self.spec.get("same_move_overlap", 0.6))
         f = self.f
-        j, kind, lv = cond
-        nm = f.names[j]
-        if j < f.base_n:
-            ex = f.exprs[nm]
-        else:
-            base, lb = nm.rsplit("_chg", 1)
-            e = f.exprs[base]
-            ex = f"(({e}) - ({e})[{lb}])"
-        return {"ge": f"({ex}) >= {lv!r}", "lt": f"({ex}) < {lv!r}", "yes": f"({ex}) > 0.5",
-                "no": f"({ex}) <= 0.5"}[kind]
+        shown: list[tuple[dict[str, Any], set]] = []
+        for c in cands:
+            kn = self.closed(self.trades(c["key"], c["mask"], c["exit"]), f.cut)
+            wins = {int(f.sid[t["exit_index"]]) for t in kn if t["net_return"] > 0}
+            ids = wins or {int(f.sid[t["t"]]) for t in kn}
+            dup = None
+            for s, sset in shown:
+                if ids and sset and len(ids & sset) / min(len(ids), len(sset)) > lim:
+                    dup = s
+                    break
+            if dup is not None:
+                dup["similar"] = dup.get("similar", 0) + 1
+                continue
+            c["similar"] = 0
+            shown.append((c, ids))
+            if len(shown) >= top:
+                break
+        return [s for s, _ in shown]
 
     def label(self, s: dict[str, Any]) -> str:
         L = self.spec["labels"]
@@ -177,14 +190,38 @@ class MoveTriggers:
         self.exprs: dict[str, str] = {}
         self.events: dict[str, np.ndarray] = {}
         ctx = f.L["ctx"]
+
+        def state(expr: str) -> np.ndarray | None:
+            try:
+                return np.asarray(dsl.signal(expr, ctx), bool)
+            except Exception:  # noqa: BLE001 - not computable on this stock / timeframe
+                return None
+
+        # trend guard (owner 2026-11-22): no longs while below a falling EMA 200 (hourly)
+        g = self.spec.get("trend_guard") or {}
+        self.guard_expr, block = None, np.zeros(f.n, bool)
+        if g.get("enabled", False):
+            for ex in g.get("block_when", []):
+                b = state(ex)
+                if b is not None:
+                    self.guard_expr, block = ex, b
+                    break
+            self.log(f"trend guard: {'blocks ' + format(int(block[f.a0:].sum()), ',') + ' candles: ' + self.guard_expr if self.guard_expr else 'not computable - off'}")
+        self.block = block
+        # short-list filters (owner 2026-11-22)
+        self.filters: dict[str, tuple[str, np.ndarray]] = {}
+        for name, ex in ((self.spec.get("filter") or {}).get("conditions") or {}).items():
+            fm = state(ex)
+            if fm is not None:
+                self.filters[name] = (ex, fm)
+        self.log(f"filters: {', '.join(self.filters) or 'none'}")
         bad = 0
         for name, expr in trig.items():
-            try:
-                mk = np.asarray(dsl.signal(f"{f.du.floor} and ({expr})", ctx), bool)
-            except Exception:  # noqa: BLE001 - a trigger the data cannot compute is skipped
+            mk = state(f"{f.du.floor} and ({expr})")
+            if mk is None:
                 bad += 1
                 continue
-            ev = mk & ~np.r_[False, mk[:-1]]
+            ev = mk & ~np.r_[False, mk[:-1]] & ~block
             ev[:f.a0] = False
             if ev.any():
                 self.exprs[name], self.events[name] = expr, ev
@@ -230,10 +267,13 @@ class MoveTriggers:
         known = self.closed(self.trades(c["name"], c["mask"], c["exit"]), cut)
         if len(known) < 5:
             return None
+        if not self.filters:
+            return None
         ts = np.array([t["t"] for t in known], dtype=np.int64)
         net = np.array([t["net_return"] for t in known], dtype=float)
         w = f.wt(ts)
-        Mt = f.M[:, ts].astype(float)
+        names = list(self.filters)
+        Mt = np.stack([self.filters[nm][1][ts] for nm in names]).astype(float)
         k = Mt.sum(1)
         sw = Mt @ w
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -243,25 +283,25 @@ class MoveTriggers:
         ok = (k >= int(self.spec["filter"].get("min_keep", 3))) & (k < len(ts)) & np.isfinite(score) & (avg_w > 0)
         if not ok.any():
             return None
-        ci = int(np.argmax(np.where(ok, score, -np.inf)))
-        cond = f.conds[ci]
-        mask2 = c["mask"] & f.M[ci]
+        cond = names[int(np.argmax(np.where(ok, score, -np.inf)))]
+        mask2 = c["mask"] & self.filters[cond][1]
         key = (c["name"], cond)
         s2 = self.stats(self.closed(self.trades(key, mask2, c["exit"]), cut))
         if (s2["rank"], s2["score"]) <= (c["stats"]["rank"], c["stats"]["score"]):
             return None
-        return {"name": c["name"], "exit": c["exit"], "cond": cond, "key": key, "mask": mask2, "stats": s2}
+        return {"name": c["name"], "exit": c["exit"], "cond": cond, "key": key, "mask": mask2, "stats": s2,
+                "alone": c["stats"]}
 
     def evaluate(self, cut: int) -> list[dict[str, Any]]:
         f = self.f
         f.set_cut(cut)
-        f.build_conditions()
         cands = []
         for name, ev in self.events.items():
             for en in self.exits:
                 s = self.stats(self.closed(self.trades(name, ev, en), cut))
                 if s["trades"]:
-                    cands.append({"name": name, "exit": en, "cond": None, "key": name, "mask": ev, "stats": s})
+                    cands.append({"name": name, "exit": en, "cond": None, "key": name, "mask": ev, "stats": s,
+                                  "alone": s})
         pool = sorted([c for c in cands if c["stats"]["trades"] >= 5], key=lambda c: -c["stats"]["score"])
         for c in pool[:int(self.spec["filter"].get("top_combos", 250))]:
             fc = self.best_filter(c, cut)
@@ -294,7 +334,7 @@ class MoveTriggers:
         for k in range(len(cuts) - 1):
             c, nc = cuts[k], cuts[k + 1]
             t0 = time.monotonic()
-            picks = [x for x in self.evaluate(c) if x["stats"]["rank"] >= RANK["HCLT"]][:top]
+            picks = self.distinct([x for x in self.evaluate(c) if x["stats"]["rank"] >= RANK["HCLT"]], top)
             notes.append(f"{self.tv(c - 1)}: " + ("; ".join(f"{x['stats']['label']} {self.text(x)} [{x['exit']}]"
                                                               for x in picks) or "no HC/HCLT strategy"))
             sig = sorted((int(t), i) for i, x in enumerate(picks) for t in np.flatnonzero(x["mask"][c:nc]) + c)
@@ -351,12 +391,18 @@ class MoveTriggers:
         md += ([f"- **{c['stats']['label']}** {self.text(c)} [{c['exit']}]: {self.fmt(c['stats'])}" for c in today[:20]]
                or ["None of the HC / HCLT / MC strategies fired on the last candle."])
         # strategies
-        md += ["", "## 2. Best strategies (trigger [+ filter] x exit)", "",
-               "| Label | Trigger [+ filter] | Exit | Closed trades | Last trade |", "|---|---|---|---|---|"]
-        for c in final[:40]:
+        guard = (f"Trend guard on: no longs while `{self.guard_expr}`." if self.guard_expr else "Trend guard off.")
+        md += ["", "## 2. Best strategies (trigger [+ short-list filter] x exit)", "",
+               f"{guard} Strategies that caught the same moves are listed once ('similar' = how many more caught "
+               "mostly the same moves). 'Trigger alone' = the label without any filter.", "",
+               "| Label | Trigger alone | Trigger [+ filter] | Exit | Closed trades | Similar | Last trade |",
+               "|---|---|---|---|---|---|---|"]
+        top_distinct = self.distinct(final, 40)
+        for c in top_distinct:
             kn = self.closed(self.trades(c["key"], c["mask"], c["exit"]), f.n)
             last = f"{self.tv(kn[-1]['t'])} {100 * kn[-1]['net_return']:+.1f}%" if kn else "-"
-            md.append(f"| **{c['stats']['label']}** | {self.text(c)} | {c['exit']} | {self.fmt(c['stats'])} | {last} |")
+            md.append(f"| **{c['stats']['label']}** | {c['alone']['label']} | {self.text(c)} | {c['exit']} | "
+                      f"{self.fmt(c['stats'])} | {c.get('similar', 0)} | {last} |")
         # catch
         W = int(self.spec.get("catch_window", 10))
         md += ["", f"## 3. Which triggers catch the moves ({len(legs)} moves; trigger within {W} candles before a move "
@@ -428,7 +474,6 @@ class MoveTriggers:
         (root / "REPORT.md").write_text("\n".join(md) + "\n", encoding="utf-8")
         # all strategies + candidates
         f.set_cut(f.n)
-        f.build_conditions()
         with (root / "strategies.csv").open("w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
             w.writerow(["label", "trigger", "filter", "exit", "trades", "won", "avg_pct", "pf", "total_pct", "win_w",
@@ -439,15 +484,14 @@ class MoveTriggers:
                             s["trades"] - s["losses"], round(100 * s["avg"], 3), round(min(s["pf"], 99), 3),
                             round(100 * s["total"], 2), round(s["win_w"], 3), round(100 * s["avg_w"], 3)])
         cands = []
-        for c in final:
-            if c["stats"]["rank"] < RANK["HCLT"]:
-                break
+        for c in self.distinct([c for c in final if c["stats"]["rank"] >= RANK["HCLT"]], 10 ** 6):
             x = self.exprs[c["name"]]
             core = f"(({x}) and not (({x})[1]))"
-            entry = f"{f.du.floor} and {core}" + (f" and {self.cond_dsl(c['cond'])}" if c["cond"] is not None else "")
+            entry = (f"{f.du.floor} and {core}" + (f" and {self.cond_dsl(c['cond'])}" if c["cond"] is not None else "")
+                     + (f" and not ({self.guard_expr})" if self.guard_expr else ""))
             sid = f"{self.sym}-{self.tf}-{c['stats']['label']}-{c['name'].replace(':', '_')}-{c['exit']}"
             if c["cond"] is not None:
-                sid += "-F" + self.f.names[c["cond"][0]].replace("_", "")[:14]
+                sid += "-" + c["cond"]
             cands.append({"id": sid, "name": f"{self.sym} {self.tf}: {self.text(c)} [{c['exit']}]", "direction": "long",
                           "description": f"move_triggers {date.today()}: {c['stats']['label']} - {self.fmt(c['stats'])}",
                           "entry": entry, "exit": self.exits[c["exit"]], "enabled": True,

@@ -15,6 +15,7 @@
   },
   "extra": {},
   "include_library": true,
+  "_labels_note": "labels are judged on each trigger's own record first (column 'Trigger alone'); a filtered version is shown only when one of the short-list filters improves it",
   "exits": {
     "MinorSwing-EMA50": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2}, "target_ema": 50, "min_rr": 1.0, "overnight": true},
     "MinorSwing-EMA100": {"max_hold_bars": 2000, "swing_stop": {"buffer": 0.002, "lookback": 20, "strength": 2}, "target_ema": 100, "min_rr": 1.0, "overnight": true},
@@ -35,6 +36,32 @@
   },
   "recency": {"decay_sessions": 100, "power": 2},
   "catch_window": 10,
-  "filter": {"_doc": "per trigger x exit: the one condition (indicator level or change) that best separates its winners from losers on closed trades; kept only if it improves the label/score", "min_keep": 3, "top_combos": 250},
+  "filter": {
+    "_doc": "owner 2026-11-22: a filter may only come from this SHORT list of conditions a trader uses (not ~1400 machine conditions - that made 3/3 appear by luck). Per trigger x exit the program tries each and keeps the best only if it improves the label/score. Conditions the data cannot compute are skipped.",
+    "min_keep": 3,
+    "top_combos": 400,
+    "conditions": {
+      "BullPhase": "ema(close, 9) > ema(close, 13) and ema(close, 13) > ema(close, 20) and ema(close, 20) > ema(close, 50)",
+      "NotBearPhase": "not (ema(close, 9) < ema(close, 13) and ema(close, 13) < ema(close, 20) and ema(close, 20) < ema(close, 50))",
+      "AboveEMA200": "close > ema(close, 200)",
+      "BelowEMA200": "close < ema(close, 200)",
+      "EMA200Rising": "ema(close, 200) > ema(close, 200)[10]",
+      "AboveEMA50": "close > ema(close, 50)",
+      "DayUp": "close > session_open",
+      "DailyUptrend": "htf(close > ema(close, 20), \"1d\")",
+      "HourlyAboveEMA50": "htf(close > ema(close, 50), \"60m\")",
+      "VolumeAboveAvg": "volume > sma(volume, 20)",
+      "RSI14Above50": "rsi(close, 14) > 50"
+    }
+  },
+  "trend_guard": {
+    "_doc": "owner 2026-11-22: no longs while the stock is below a FALLING EMA 200 on the hourly chart (Sep 2026 RELIANCE: dip buys kept failing). The first expression the data can compute is used (1d has no hourly -> own timeframe).",
+    "enabled": true,
+    "block_when": [
+      "htf(close < ema(close, 200) and ema(close, 200) < ema(close, 200)[10], \"60m\")",
+      "close < ema(close, 200) and ema(close, 200) < ema(close, 200)[40]"
+    ]
+  },
+  "same_move_overlap": 0.6,
   "replay": {"_doc": "causal, no split date: every refit_sessions of the last months, stand at that moment (closed trades only, recency-weighted), take signals of the top HC/HCLT strategies until the next refit, one position at a time", "months": 3, "refit_sessions": 10, "top": 5}
 }
