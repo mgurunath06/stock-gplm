@@ -98,6 +98,10 @@ class OwnerStrategy:
     def exit_doc(self, side: str, variant: dict[str, Any] | None = None) -> dict[str, Any]:
         d = json.loads(json.dumps(self.spec["exit"][side]))
         d.pop("_doc", None)
+        if variant:  # a version is complete on its own: start from the neutral rule, not from the default exit
+            d["pullback_stop"] = {k: d["pullback_stop"][k] for k in ("fast", "slow", "buffer", "lookback")
+                                  if k in d["pullback_stop"]}
+            d["ema_regime"] = {k: d["ema_regime"][k] for k in ("anchor", "trail") if k in d["ema_regime"]}
         for k, v in (variant or {}).items():  # a version overrides parts of pullback_stop / ema_regime
             if isinstance(v, dict) and isinstance(d.get(k), dict):
                 d[k] = {**d[k], **v}
