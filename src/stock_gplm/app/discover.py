@@ -170,6 +170,17 @@ class Discoverer(Tuner):
         hi = "max" if q == len(qs) else _q(qs[q])
         return f"[{lo}..{hi}]"
 
+    def expand(self, text: str) -> str:
+        """The LLM often writes fact-sheet names (atr_pct, dist_ema50) instead of DSL: substitute the expression
+        (only names that are not already DSL series / functions, e.g. gap and minute_of_session stay)."""
+        from .strategy_dsl import FUNCTIONS, SERIES
+        exprs = {**te.FEATURES, **(te.INTRADAY_FEATURES if self.intraday else {})}
+        for name in sorted(exprs, key=len, reverse=True):
+            if name in SERIES or name in FUNCTIONS:
+                continue
+            text = re.sub(rf"\b{name}\b(?!\s*\()", f"({exprs[name]})", text)
+        return text
+
     # -------------------------------------------------------------- 2. LLM rounds
     def results_text(self) -> str:
         ideas = self.state["ideas"]
@@ -199,7 +210,8 @@ TASK (round {rnd}): propose {k} strategies for the {self.tf} timeframe, directio
 {'All NEW ideas built from the facts.' if rnd == 1 else 'About half NEW ideas from the facts, half IMPROVEMENTS of the best tried ones (set "from").'}
 Aim: average net per trade clearly above the probe average and above zero, profit factor >= 1.3, ideally win rate
 >= 60%; at least {self.t['min_tune_trades']} trades over all stocks in the tuning window. Prefer conditions from the
-best combinations, avoid the worst ones. Price-unit values must be divided by close (atr(14) / close < 0.03).
+best combinations, avoid the worst ones. You may use the fact-sheet feature names directly (e.g. atr_pct > 0.006);
+they are replaced by their DSL formulas. Price-unit values must be divided by close (atr(14) / close < 0.03).
 Exit = stop 0.2% beyond the last swing, target rr x risk{', square-off 15:15, no entries after 14:45' if self.intraday else ''};
 ranges rr 0.3-4, max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120; optional "when" exit rule.
 Do NOT include the liquidity floor (added automatically). No ref_symbol(), feature(){', no bench() (daily only)' if self.intraday else '; bench(x) = x on Nifty 50 (data from 2024 only)'}.
@@ -269,7 +281,7 @@ Output JSON exactly like: {SCHEMA}
             return None, f"direction {direction}"
         if direction == "short" and not self.intraday:
             return None, "daily short not executable in a cash account"
-        core = tl.repair_dsl(str(v.get("entry") or "").strip().rstrip(";"))
+        core = self.expand(tl.repair_dsl(str(v.get("entry") or "").strip().rstrip(";")))
         if core.startswith(self.floor):
             core = core[len(self.floor):].strip()
             core = core[4:].strip() if core.lower().startswith("and ") else core
@@ -305,7 +317,7 @@ Output JSON exactly like: {SCHEMA}
         except (TypeError, ValueError):
             hold = 25
         ex: dict[str, Any] = {"max_hold_bars": hold, "swing_stop": sw}
-        when = tl.repair_dsl(str(e.get("when") or "").strip())
+        when = self.expand(tl.repair_dsl(str(e.get("when") or "").strip()))
         if when and when.lower() not in ("null", "none"):
             try:
                 dsl.parse(when)
