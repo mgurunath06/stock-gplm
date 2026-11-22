@@ -150,3 +150,16 @@ API phase paused; NSE filings download (resumable); session-7 TO DO (fundamental
 * NEXT: `app/owner_ml.py` built (commit dd33097), NOT yet run: YOU model (would owner take this cross), WIN model,
   walk-forward by month, exit model per candle, explanations. Command:
   `& $py -m stock_gplm.app.owner_ml --symbol RELIANCE` -> owner-strategy-15m-RELIANCE/ML_REPORT.md
+
+### Session 10 end state (2026-11-23 00:00) - resume here
+* ML results: RELIANCE-only YOU model AUC 0.69 (28/51 of owner takes called). Pooled 198 stocks 15m (owner_ml --pool 200):
+  WIN classifier picked small winners (60-64% won but avg -0.17%/trade, picks crosses just under EMA200); switched to
+  EXPECTED-PROFIT regressor -> no skill (rank corr 0.018), every filter loses. Conclusion: on 15m with V2 exit the cross
+  has no edge these inputs find. Far-from-EMA13 crosses win MORE (24% -> 43%) but every band loses on average.
+* Owner chose: replay mode (built, commit 225cbaf) so marks are honest (no hindsight); owner_ml weights replay marks 1.0,
+  hindsight 0.6. Chart now also shows volume + RSI(3) (157f88b fixed NaN volume crash).
+* NOT yet run: pooled model on 60m and 1d (free, commands below) - RELIANCE looked better there.
+  `& $py -m stock_gplm.app.owner_ml --symbol RELIANCE --pool 200 --workers 20 --tf 60m` (and --tf 1d)
+* Owner next: regenerate chart (`owner_chart --symbol RELIANCE --tf 15m`), mark 30-50 crosses in REPLAY (takes AND
+  skips), Export CSV -> config/research/owner_trades-RELIANCE-15m.csv, then `owner_ml --symbol RELIANCE`.
+* Open question to owner: what "far from EMA13" really means (distance alone contradicts 33/77 of his entries).
