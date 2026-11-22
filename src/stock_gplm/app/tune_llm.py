@@ -48,8 +48,9 @@ def call(p: Provider, model: str, system: str, prompt: str, *, max_tokens: int =
         body: dict[str, Any] = {"model": model, "stream": False, "format": "json", "keep_alive": "30m",
                                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
                                 "options": {"num_ctx": 16384, "temperature": temperature, "num_predict": max_tokens}}
-        if model.startswith("qwen3:") or model.startswith("qwen3-14b"):
-            body["think"] = False
+        # Always off: qwen3.6 (and other thinking models) otherwise spend the whole num_predict on thinking and
+        # return empty content (2026-11-22: 23 of 24 calls empty). Models without the flag answer 400 -> retried.
+        body["think"] = False
         code, r = _request("POST", p.base_url.rstrip("/") + "/api/chat", {}, body, max(p.timeout_seconds, 600))
         if code == 400 and "think" in str(r):
             body.pop("think", None)
