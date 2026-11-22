@@ -13,7 +13,7 @@ Pooled (owner 2026-11-22, small recent samples): the same strategy on ALL stocks
                trades can count, at an honest level.
 ACTIVE when trades >= min_trades, Confidence >= min_confidence, conf_low >= min_conf_low, Edge >= min_edge and the
 pooled strategy passes min_pool_edge / min_pool_trades. Thresholds live in config/strategies/confidence.json
-(default < stocks.SYM."*" < stocks.SYM.<tf>), so they can be set per stock x TF. Check settings causally with
+(default < timeframes.<tf> < stocks.SYM."*" < stocks.SYM.<tf>), so they can be set per TF and per stock x TF. Check settings causally with
 ``python -m stock_gplm.app.rolling_check <run>``.
 """
 from __future__ import annotations
@@ -40,7 +40,7 @@ def load(path: Path | None = None) -> dict[str, Any]:
 def thresholds(doc: dict[str, Any], stock: str, tf: str) -> dict[str, float]:
     st = (doc.get("stocks") or {}).get(stock.upper().removesuffix("-EQ")) or {}
     out = {**DEFAULTS, **(doc.get("default") or {})}
-    for part in (st.get("*"), st.get(tf)):
+    for part in ((doc.get("timeframes") or {}).get(tf), st.get("*"), st.get(tf)):
         if part:
             out.update({k: v for k, v in part.items() if k in DEFAULTS})
     return out

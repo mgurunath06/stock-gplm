@@ -8,5 +8,30 @@
     "prior": 5,
     "decay_sessions": 100
   },
-  "stocks": {}
+  "stocks": {},
+  "timeframes": {
+    "5m": {
+      "min_trades": 0,
+      "min_confidence": 0.0,
+      "min_conf_low": 0.0,
+      "min_edge": -1000000000.0,
+      "min_pool_edge": 0.05,
+      "min_pool_trades": 30
+    },
+    "60m": {
+      "min_trades": 0,
+      "min_confidence": 0.0,
+      "min_conf_low": 0.0,
+      "min_edge": -1000000000.0,
+      "min_pool_edge": 0.05,
+      "min_pool_trades": 30
+    },
+    "15m": {
+      "min_pool_edge": 1000000000.0
+    },
+    "1d": {
+      "min_pool_edge": 1000000000.0
+    }
+  },
+  "timeframes_note": "Owner 2026-11-22 (rolling_check, causal month-by-month): 5m/60m = universe-level 'pool' rule (strategy edge on ALL stocks >= 0.05, >= 30 trades, no per-stock filter): 5m +0.05%/trade PF 1.13 6 of 7 months, 60m +0.03% PF 1.08 7 of 9 months. Per-stock selection lost on every TF. 15m and 1d: no selection rule was profitable -> nothing ACTIVE (min_pool_edge 1e9) until new strategies pass (e.g. DISC-1d-Ret20BreakoutHighVol after approval). Other TFs keep 'default'."
 }

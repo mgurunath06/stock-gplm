@@ -77,7 +77,7 @@ def run(trades: pd.DataFrame, settings: dict[str, dict[str, Any]], lookbacks: li
                 if len(train) < min_train:
                     continue
                 for name, ov in settings.items():
-                    doc = {**base, "default": {**(base.get("default") or {}), **ov}}
+                    doc = {**base, "default": {**(base.get("default") or {}), **ov}, "timeframes": {}}
                     sc = score(train, doc, explain=False)
                     act = sc.loc[sc["status"] == "ACTIVE", KEY]
                     sel = test.merge(act, on=KEY, how="inner")
