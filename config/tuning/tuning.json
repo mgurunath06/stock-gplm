@@ -199,11 +199,11 @@
       ]
     },
     "stock_rules": {
-      "note": "Per-stock rules then combined across stocks (owner 2026-11-22)",
-      "min_bars": 40,
-      "min_hits": 8,
+      "note": "Per-stock rules then combined across stocks (owner 2026-11-22). Counts are EPISODES: a stock's bars inside one non-overlapping window of H bars count once (labels overlap, so bars overstate evidence).",
       "lift": 1.5,
-      "min_stocks": 5
+      "min_stocks": 5,
+      "min_episodes": 12,
+      "min_hit_episodes": 5
     }
   }
 }

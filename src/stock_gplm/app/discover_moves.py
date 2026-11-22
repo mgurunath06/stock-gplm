@@ -113,16 +113,27 @@ def _stock_chunk(task: tuple) -> dict[str, Any]:
     pairs, mb, mh, lift, min_stocks = task
     bins, hit, net, st = _G["bins"], _G["hit"], _G["net"], _G["st"]
     tune, conf, per, S, P, base_t = _G["tune"], _G["conf"], _G["per"], _G["S"], _G["P"], _G["base_t"]
+    blk, B = _G["blk"], _G["B"]
     res: dict[str, Any] = {"n_pass": 0, "n_elig": 0, "elig_s": np.zeros(S, np.int64), "per_stock": [], "found": []}
     for a, b in pairs:
         ok = (bins[:, a] >= 0) & (bins[:, b] >= 0)
         key = st * 25 + bins[:, a].astype(np.int64) * 5 + bins[:, b]
 
         def agg(sel: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            """EPISODES per stock x cell (owner fix 2026-11-22): bars of the same stock inside one non-overlapping
+            window of H bars are one episode (their labels overlap); hit / net = the episode's mean."""
             k = key[sel]
-            return (np.bincount(k, minlength=S * 25).reshape(S, 25),
-                    np.bincount(k, weights=hit[sel], minlength=S * 25).reshape(S, 25),
-                    np.bincount(k, weights=net[sel], minlength=S * 25).reshape(S, 25))
+            if not len(k):
+                z = np.zeros((S, 25))
+                return z.astype(np.int64), z, z
+            u, inv = np.unique(k * B + blk[sel], return_inverse=True)
+            c = np.bincount(inv)
+            hm = np.bincount(inv, weights=hit[sel]) / c
+            nm = np.bincount(inv, weights=net[sel]) / c
+            uk = u // B
+            return (np.bincount(uk, minlength=S * 25).reshape(S, 25),
+                    np.bincount(uk, weights=hm, minlength=S * 25).reshape(S, 25),
+                    np.bincount(uk, weights=nm, minlength=S * 25).reshape(S, 25))
         n_t, h_t, s_t = agg(ok & tune)
         hr_t = h_t / np.maximum(n_t, 1)
         elig = n_t >= mb
@@ -160,7 +171,7 @@ class MoveDiscoverer(Discoverer):
         super().__init__(tf, name, cfg, stocks_arg, workers)
         self.prefix = "MOVE"
         self.moves = ((cfg.get("discover") or {}).get("moves") or MOVES_DEFAULT).get(tf) or MOVES_DEFAULT[tf]
-        self.sr = {"min_bars": 40, "min_hits": 8, "lift": 1.5, "min_stocks": 5,
+        self.sr = {"min_episodes": 12, "min_hit_episodes": 5, "lift": 1.5, "min_stocks": 5,
                    **((cfg.get("discover") or {}).get("stock_rules") or {})}
         self._edges: dict[int, np.ndarray] = {}
 
@@ -190,7 +201,9 @@ class MoveDiscoverer(Discoverer):
         report, rules_json = [f"# Per-stock move rules {self.tf} ({self.name})", "",
                               "Each rule was found SEPARATELY on each stock (TUNE window: hit rate >= "
                               f"{self.sr['lift']}x and >= +10 points over that stock's own base rate, >= "
-                              f"{self.sr['min_bars']} bars, >= {self.sr['min_hits']} hits, positive net). 'Chance' = "
+                              f"{self.sr['min_episodes']} episodes, >= {self.sr['min_hit_episodes']} hit episodes, "
+                              "positive net; an episode = the rule's bars inside one non-overlapping move window, "
+                              "counted once). 'Chance' = "
                               "how many stocks would show it by luck at the overall pass rate. CONFIRM = the same rule "
                               "on the same stocks' unseen bars (never shown to the LLM). Holds = share of those stocks "
                               "whose CONFIRM hit rate beat their own TUNE base rate (>= 5 confirm bars).", ""], {}
@@ -303,13 +316,19 @@ class MoveDiscoverer(Discoverer):
         P = int(per.max()) + 1 if len(per) else 1
         per_stock: dict[int, list[tuple]] = {}
         elig_s = np.zeros(S, np.int64)
+        h_bars = int(label.split("-")[1])
+        first = np.zeros(S, np.int64)
+        su, si0 = np.unique(st, return_index=True)
+        first[su] = si0
+        blk = ((np.arange(len(st)) - first[st]) // max(h_bars, 1)).astype(np.int64)  # rows of a stock are in time order
+        B = int(blk.max()) + 1 if len(blk) else 1
         nb_t = np.bincount(st[tune], minlength=S)
         base_t = np.bincount(st[tune], weights=hit[tune], minlength=S) / np.maximum(nb_t, 1)
-        mb, mh, lift = int(self.sr["min_bars"]), int(self.sr["min_hits"]), float(self.sr["lift"])
+        mb, mh, lift = int(self.sr["min_episodes"]), int(self.sr["min_hit_episodes"]), float(self.sr["lift"])
         J = sorted(edges)
         pairs = [(a, b) for ia, a in enumerate(J) for b in J[ia + 1:]]
         shared = {"bins": bins, "hit": hit, "net": net, "st": st, "tune": tune, "conf": conf, "per": per, "S": S, "P": P,
-                  "base_t": base_t}
+                  "base_t": base_t, "blk": blk, "B": B}
         tasks = [(ch, mb, mh, lift, int(self.sr["min_stocks"]))
                  for ch in _chunks(pairs, 4 * max(1, min(20, (os.cpu_count() or 4) - 4)))]
         found, n_pass, n_elig = [], 0, 0
@@ -325,20 +344,20 @@ class MoveDiscoverer(Discoverer):
             f["chance"] = p_pass * f["elig"]
             f["ratio"] = len(f["stocks"]) / max(f["chance"], 0.5)
         keep = [f for f in found if len(f["stocks"]) >= max(int(self.sr["min_stocks"]), 3 * f["chance"])]
-        keep.sort(key=lambda f: (-f["ratio"], -len(f["stocks"])))
+        keep.sort(key=lambda f: (-len(f["stocks"]), -f["ratio"]))
         side = label.split("-")[0]
         facts = [f"Rules that RECUR across stocks ({side} move {label}; found separately on each stock; overall per-stock "
                  f"pass rate {p_pass:.2%}):"]
         rep_lines = [f"## {label}: {len(keep)} recurring rules (of {len(found)} shared by >= {self.sr['min_stocks']} "
                      f"stocks; per-stock pass rate {p_pass:.2%})", "",
-                     "| Rule (DSL) | Stocks | Chance | TUNE hit / their base | CONFIRM bars / hit / avg net | Holds |",
+                     "| Rule (DSL) | Stocks | Chance | TUNE hit / their base | CONFIRM episodes / hit / avg net | Holds |",
                      "|---|---|---|---|---|---|"]
         js = []
         for f in keep[:25]:
             rule = f"{self._cond(names, f['a'], f['qa'])} and {self._cond(names, f['b'], f['qb'])}"
             ns, ht = len(f["stocks"]), f["h_t"] / max(f["n_t"], 1)
             nc, hc, sc = int(f["n_c"].sum()), float(f["h_c"].sum()), float(f["s_c"].sum())
-            okc = f["n_c"] >= 5
+            okc = f["n_c"] >= 3
             holds = (f["h_c"][okc] / f["n_c"][okc] > base_t[f["stocks"][okc]]).mean() if okc.any() else float("nan")
             syms = [self.stocks[i] for i in f["stocks"] if i < len(self.stocks)]
             if len(facts) <= 8:
@@ -380,14 +399,15 @@ class MoveDiscoverer(Discoverer):
         ranked.sort(key=lambda r: -r[0])
         per = "year" if not self.intraday else "month"
         L = [f"## {label}", "", f"Per stock, best first. Rules ranked by CAUTIOUS extra hit rate (lower 20% estimate "
-             f"minus the stock's own base rate). Consistent = {per}s (with >= 3 bars) in which the rule beat the base. "
+             f"minus the stock's own base rate; counts are EPISODES - overlapping bars of one move window count once). "
+             f"Consistent = {per}s (with >= 3 bars) in which the rule beat the base. "
              "Also on = other stocks where the same rule passed (a bonus, not required). Luck = rules this stock would "
              "pass by chance at the overall pass rate - if 'rules passed' is not well above it, treat its list as noise. "
              "CONFIRM = the stock's unseen bars.", ""]
         js = {}
         for best, sym, base, npass, luck, rows in ranked:
             L += [f"### {sym}: base hit rate {base:.0%}, {npass} rules passed (luck ~{luck:.0f})", "",
-                  f"| Rule | Bars | Hit | Lift | Cautious hit | Consistent | Also on | CONFIRM bars / hit / avg net |",
+                  f"| Rule | Episodes | Hit | Lift | Cautious hit | Consistent | Also on | CONFIRM episodes / hit / avg net |",
                   "|---|---|---|---|---|---|---|---|"]
             for r in rows[:5]:
                 cf = (f"{r['confirm_bars']} / {r['confirm_hit']:.0%} / {100 * r['confirm_avg_net']:+.2f}%"
