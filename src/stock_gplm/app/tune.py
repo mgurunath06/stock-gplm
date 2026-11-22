@@ -209,12 +209,14 @@ class Tuner:
                           features)
 
     def baseline(self) -> None:
-        if self.state.get("baseline_done"):
+        todo = {sid: d for sid, d in self.strategies.items() if sid not in self.state["strategies"]}
+        if not todo:
             return
-        self.log(f"baseline: {len(self.strategies)} strategies on {self.tf}")
-        vs = [self.variant(sid, "orig", d["entry"], d["exit"], features=True) for sid, d in self.strategies.items()]
+        self.log(f"baseline: {len(todo)} strategies on {self.tf}"
+                 + (" (new since the last baseline)" if self.state.get("baseline_done") else ""))
+        vs = [self.variant(sid, "orig", d["entry"], d["exit"], features=True) for sid, d in todo.items()]
         res = self.evaluate(vs)
-        for sid, d in self.strategies.items():
+        for sid, d in todo.items():
             r = res[f"{sid}~orig"]
             self.state["strategies"][sid] = {
                 "name": d.get("name", sid), "base": {"tune": r["tune"], "confirm": r["confirm"]},
@@ -224,10 +226,16 @@ class Tuner:
         self.save()
         self.write_baseline()
 
+    def research_only(self, sid: str) -> bool:
+        """Owner 2026-11-22: overnight shorts are not executable in an NSE cash account (the engine simulates a
+        futures-like short) - daily/weekly/monthly shorts are tuned for research but can never reach a bucket."""
+        return self.tf in ("1d", "1w", "1mo") and self.strategies[sid].get("direction", "long") == "short"
+
     def queue(self) -> list[str]:
         st = self.state["strategies"]
         q = [sid for sid in self.strategies if sid in st and st[sid]["base"]["tune"]["trades"] >= self.t["min_tune_trades"]]
-        q.sort(key=lambda s: -st[s]["base"]["tune"]["win_w"])  # owner: highest win rate first
+        q.sort(key=lambda s: (self.research_only(s), -st[s]["base"]["tune"]["win_w"]))  # highest win first;
+        # research-only (overnight shorts) go last
         return q[: self.limit] if self.limit else q
 
     def best(self, sid: str, top: int = 1, objective: str = "win") -> list[dict[str, Any]]:
@@ -423,6 +431,9 @@ class Tuner:
         g = self.cfg["gate"]
         st = self.state["strategies"][sid]
         pc = st["base"]["confirm"]
+        if self.research_only(sid):
+            return {"accepted": False, "bucket": "research only", "rank": 0, "variant": self.best(sid)[0],
+                    "why": "overnight short - not executable in a cash account (research only)"}
         notes = []
         for bucket, obj, rule in (("A high win", "win", g), ("B profitable", "profit", g["profitable"])):
             for rank, b in enumerate(self.best(sid, int(g["check_top"]), obj), 1):

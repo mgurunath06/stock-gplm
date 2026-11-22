@@ -1,0 +1,81 @@
+{
+  "contract": "stock-gplm.strategy-bundle.v1",
+  "source": "Owner 2026-11-22: web strategy specs (RS breakout, ORB 30m, 52-week high, NR7, VWAP reclaim, volume dry-up pullback, gap-and-go). Same ideas as the GeminiNeon bundle but with the spec's volume confirmation, time windows, trend filters and exit conditions. Liquidity floor on every entry (owner: Rs 15 Cr median turnover, close >= 50, both from yesterday).",
+  "defaults": {
+    "origin": "USER_DEFINED",
+    "category": "18: Owner web candidates",
+    "style": "MOMENTUM",
+    "fidelity": "APPROXIMATION",
+    "exit": "trend",
+    "applicability": {"symbols": "*", "timeframes": ["1d"]}
+  },
+  "exit_profiles": {
+    "trend": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}},
+    "intraday": {"max_hold_bars": 25, "swing_stop": {"buffer": 0.002, "rr": 2.0, "lookback": 20}}
+  },
+  "exit_note": "Owner rule 2026-11-20 kept: stop 0.2% beyond the last swing, target 2x risk (tuning sweeps rr), intraday square-off 15:15 / no entry after 14:45. The spec's ATR stops/targets are not used; its trend exits are kept as exit conditions ('when'). Opening-range / first-bar lows as stops are not supported by the engine.",
+  "strategies": [
+    {
+      "id": "WEB-RSBreakout",
+      "name": "Web-RS Breakout",
+      "description": "Relative strength: Nifty 50 flat/down over 5 days while the stock is up, close above the 20-day high on 1.5x volume. Exit also when close < EMA 20.",
+      "entry": "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50 and (bench(close / close[5] - 1) <= 0 and close / close[5] - 1 > 0 and close > highest(high, 20)[1] and volume >= 1.5 * sma(volume, 20))",
+      "exit": {"profile": "trend", "when": "close < ema(close, 20)"},
+      "requires": ["OHLCV", "INDEX_HISTORY"],
+      "assumptions": ["Official Nifty 50 history from 2024-01-01 only (NSE MCP); earlier years produce no signals."],
+      "tags": ["web-candidate", "execution:cash-long"]
+    },
+    {
+      "id": "WEB-ORB30",
+      "name": "Web-Opening Range Breakout 30m",
+      "description": "First 15m close above the 09:15-09:45 range high between 09:45 and 14:15, volume 1.5x the same time slot's usual volume.",
+      "entry": "avg_day_volume(20) * prev_day_close() >= 150000000 and prev_day_close() >= 50 and (minute_of_session >= 45 and minute_of_session <= 300 and cross_above(close, or_high(30)) and slot_rvol(20) >= 1.5)",
+      "applicability": {"timeframes": ["15m"]},
+      "exit": "intraday",
+      "tags": ["web-candidate", "execution:intraday-long"]
+    },
+    {
+      "id": "WEB-High52W",
+      "name": "Web-52 Week High Breakout",
+      "description": "Close above the highest close of the last 250 sessions on 1.5x volume while above EMA 50. Exit also when close < EMA 50.",
+      "entry": "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50 and (close > highest(close, 250)[1] and volume >= 1.5 * sma(volume, 20) and close > ema(close, 50))",
+      "exit": {"profile": "trend", "when": "close < ema(close, 50)"},
+      "tags": ["web-candidate", "execution:cash-long"]
+    },
+    {
+      "id": "WEB-NR7",
+      "name": "Web-NR7 Breakout",
+      "description": "Yesterday was the narrowest range of 7 days above EMA 50; today closes above yesterday's high (engine enters next open - the spec's intraday stop-entry is approximated). 5-bar time stop.",
+      "entry": "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50 and ((high[1] - low[1]) <= lowest(high - low, 7)[1] and close[1] > ema(close, 50)[1] and close > high[1])",
+      "exit": {"profile": "trend", "max_hold_bars": 5},
+      "tags": ["web-candidate", "execution:cash-long"]
+    },
+    {
+      "id": "WEB-VWAPReclaim",
+      "name": "Web-VWAP Reclaim",
+      "description": "Stock above yesterday's close; previous bar at or below VWAP, this bar closes back above VWAP as a green bar on 1.2x slot volume, before 14:30.",
+      "entry": "avg_day_volume(20) * prev_day_close() >= 150000000 and prev_day_close() >= 50 and (close > prev_day_close() and (low[1] <= vwap[1] or close[1] < vwap[1]) and close > vwap and close > open and slot_rvol(20) >= 1.2 and minute_of_session <= 315)",
+      "applicability": {"timeframes": ["5m", "15m"]},
+      "exit": "intraday",
+      "tags": ["web-candidate", "execution:intraday-long"]
+    },
+    {
+      "id": "WEB-VDUPullback",
+      "name": "Web-Volume Dry-Up Pullback",
+      "description": "Uptrend (close > EMA 20 > EMA 50, +10% in 20 days) followed by 2-4 down days on volume below half the 20-day average, then a green bar closing above the previous high on average volume.",
+      "entry": "median(volume * close, 20)[1] >= 150000000 and close[1] >= 50 and (any_of(close > ema(close, 20) and ema(close, 20) > ema(close, 50) and close / close[20] - 1 >= 0.10, 6)[2] and count(close < close[1] and volume < 0.5 * sma(volume, 20), 4)[1] >= 2 and close[1] < close[2] and volume[1] < 0.5 * sma(volume, 20)[1] and close > open and close > high[1] and volume >= sma(volume, 20))",
+      "style": "MEAN_REVERSION",
+      "exit": "trend",
+      "tags": ["web-candidate", "execution:cash-long"]
+    },
+    {
+      "id": "WEB-GapAndGo",
+      "name": "Web-Gap and Go",
+      "description": "Open 2% above yesterday's high but at most 8% above yesterday's close; after 09:30 and before 13:00 the first close above the first 15m bar's high while the day never broke that bar's low, on 1.5x slot volume.",
+      "entry": "avg_day_volume(20) * prev_day_close() >= 150000000 and prev_day_close() >= 50 and (session_open >= 1.02 * prev_day_high() and session_open <= 1.08 * prev_day_close() and minute_of_session > 15 and minute_of_session <= 225 and cross_above(close, or_high(15)) and session_low >= or_low(15) and slot_rvol(20) >= 1.5)",
+      "applicability": {"timeframes": ["15m"]},
+      "exit": "intraday",
+      "tags": ["web-candidate", "execution:intraday-long"]
+    }
+  ]
+}

@@ -73,6 +73,23 @@ class Variant:
 
 # ------------------------------------------------------------------ worker side
 _APP: dict[str, Any] = {}
+_REFS: dict[str, Any] = {}
+REF_SYMBOLS = ("IDX_NIFTY_50-EQ",)  # official Nifty 50 (data.index_root, NSE MCP history from 2024) for bench()
+
+
+def _refs(app: Any) -> dict[str, Any]:
+    """Official index series for bench(); loaded once per worker. Missing index data -> bench() has no data."""
+    if not _REFS:
+        from .ingest import ingest_many
+        for sym in REF_SYMBOLS:
+            try:
+                d = next(iter(ingest_many(app.s, app.db, [sym], use_minute=False).values()), None)
+                if d is not None:
+                    _REFS[sym] = d
+            except Exception:  # noqa: BLE001 - strategies using bench() simply get no signals
+                pass
+        _REFS.setdefault("_loaded", True)
+    return {k: v for k, v in _REFS.items() if k != "_loaded"}
 
 
 def _load(stock: str, config: str, tfs: Sequence[str], use_minute: bool) -> dict[str, Any]:
@@ -84,6 +101,7 @@ def _load(stock: str, config: str, tfs: Sequence[str], use_minute: bool) -> dict
     if config not in _APP:  # one App (settings + audit DB) per worker process, not per stock
         _APP[config] = App(config, None, quiet=True)
     app = _APP[config]
+    refs = _refs(app)
     data = next(iter(ingest_many(app.s, app.db, [stock], use_minute=use_minute).values()))
     bars = research_bars(data)
     costs = app.s.section("costs")
@@ -92,7 +110,7 @@ def _load(stock: str, config: str, tfs: Sequence[str], use_minute: bool) -> dict
         if tf not in bars or not len(bars[tf]):
             continue
         lane = build_lane(data, tf, costs, bars=bars)
-        ctx = _ctx_for(bars[tf], tf, lane, bars, {}, None)
+        ctx = _ctx_for(bars[tf], tf, lane, bars, refs, None)
         m = lane.market
         days = np.asarray(m.sessions).astype("datetime64[D]").astype(np.int64).astype(np.int32)
         out[tf] = {"m": m, "ctx": ctx, "buy": lane.costs.buy, "sell": lane.costs.sell,

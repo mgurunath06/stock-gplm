@@ -25,7 +25,7 @@ from ..llm.registry import Provider
 MAX_EDITS = 2
 MIN_SIMILARITY = 0.75
 MAX_FILTER_NODES = 30
-DENY_FUNCS = {"bench", "ref_symbol", "feature", "meta_prob", "knn_analogue", "hmm_bull_prob", "dtw_distance",
+DENY_FUNCS = {"ref_symbol", "feature", "meta_prob", "knn_analogue", "hmm_bull_prob", "dtw_distance",
               "adf_stat", "hurst"}  # unavailable data or too slow for pooled tuning
 EXIT_RANGES = {"rr": (0.3, 4.0), "max_swing_pct": (0.005, 0.08), "lookback": (3, 60), "max_hold_bars": (2, 120)}
 
@@ -144,7 +144,8 @@ PF >= 1.3) and the rest aiming at HIGHER PROFIT per trade (higher average / PF, 
 Use EITHER add_filter (preferred: only the new condition) OR entry (a light rewrite), never the same change in both.
 Price-unit values (atr, stdev, macd, distances between averages) must be divided by close so one threshold fits
 all stocks, e.g. atr(14) / close < 0.03 ; stdev(close, 20) / close < 0.02.
-Rules: keep the liquidity floor clause exactly; use only the DSL below; no bench(), ref_symbol(), feature();
+Rules: keep the liquidity floor clause exactly; use only the DSL below; no ref_symbol(), feature(); bench(x) = x on the
+official Nifty 50 (daily only, data from 2024 - avoid on intraday);
 filters must be causal expressions on this timeframe (x[1] = previous bar); exit ranges rr 0.3-4,
 max_swing_pct 0.005-0.08 or null, lookback 3-60, max_hold_bars 2-120.
 Output JSON exactly like: {OUTPUT_SCHEMA}

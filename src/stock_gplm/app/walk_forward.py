@@ -95,6 +95,13 @@ def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, na
     strategies = [s for s in lib.strategies.values() if s.doc.get("enabled", True) and not s.blocked]
     data = next(iter(ingest_many(app.s, app.db, [stock], use_minute=True).values()))
     bars = research_bars(data)
+    refs = {}  # official Nifty 50 for bench() (owner 2026-11-22: index history from 2024 via NSE MCP)
+    try:
+        idx = next(iter(ingest_many(app.s, app.db, ["IDX_NIFTY_50-EQ"], use_minute=False).values()), None)
+        if idx is not None:
+            refs["IDX_NIFTY_50-EQ"] = idx
+    except Exception:  # noqa: BLE001
+        pass
     costs = app.s.section("costs")
     rows: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
@@ -104,7 +111,7 @@ def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, na
             continue
         lane = build_lane(data, tf, costs, bars=bars)
         m = lane.market
-        ctx = _ctx_for(bars[tf], tf, lane, bars, {}, None)
+        ctx = _ctx_for(bars[tf], tf, lane, bars, refs, None)
         ses = np.asarray(m.sessions).astype(str)
         n = len(m)
         a0 = int(np.searchsorted(ses, start))
