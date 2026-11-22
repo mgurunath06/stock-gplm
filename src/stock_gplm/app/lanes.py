@@ -48,6 +48,31 @@ def all_bars(data: SymbolData, calendar: Any = None) -> dict[str, Bars]:
     return build_all(daily, minute, timeframes=APP_INTRADAY, calendar=calendar)
 
 
+def research_bars(data: SymbolData, today: str | None = None) -> dict[str, Bars]:
+    """Research/backtest lanes (owner 2026-11-22). No registered calendar covers 2010+, so strict
+    :func:`all_bars` leaves every weekly/monthly bar "not final" and their strategies never fire. Here a
+    week (month) whose calendar period has ended before ``today`` is final; the running one stays
+    incomplete. Live alerts keep using strict :func:`all_bars` with the registered calendar."""
+    from datetime import date, timedelta
+    bars = all_bars(data)
+    t = date.fromisoformat(today) if today else date.today()
+    for tf in ("1w", "1mo"):
+        b = bars.get(tf)
+        if b is None or not len(b):
+            continue
+        f = b.frame.copy()
+        ends = []
+        for s in f["session"].astype(str):
+            d = date.fromisoformat(s[:10])
+            if tf == "1w":
+                ends.append(d + timedelta(days=6 - d.weekday()))
+            else:
+                ends.append(date(d.year + (d.month == 12), 1 if d.month == 12 else d.month + 1, 1) - timedelta(days=1))
+        f["incomplete"] = np.array([e >= t for e in ends], dtype=bool)
+        bars[tf] = Bars(tf, f, f"{b.source}; research: ended periods final")
+    return bars
+
+
 def session_features(minute: pd.DataFrame) -> pd.DataFrame:
     """Per-session intraday summary features from 1-minute bars (known at the session close).
 

@@ -27,7 +27,7 @@ import numpy as np
 from . import strategy_dsl as dsl
 from .context import App
 from .ingest import ingest_many
-from .lanes import all_bars, build_lane
+from .lanes import build_lane, research_bars
 from .research import _ctx_for
 from .strategy_engine import EXITS_FILE, exit_for, simulate, swing_settings
 import json
@@ -49,7 +49,7 @@ def run(stock: str, start: str, end: str | None, tfs: list[str], config: str, na
     lib = StrategyLibrary([REPO / "config" / "strategies" / "library"], out / "_lib").load(record=False)
     strategies = [s for s in lib.strategies.values() if s.doc.get("enabled", True)]
     data = next(iter(ingest_many(app.s, app.db, [stock], use_minute=True).values()))
-    bars = all_bars(data)
+    bars = research_bars(data)
     costs = app.s.section("costs")
     trades: list[dict[str, Any]] = []
     learned: list[str] = []

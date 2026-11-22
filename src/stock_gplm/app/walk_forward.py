@@ -83,7 +83,7 @@ def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, na
     from .context import App
     from .forward_test import exit_grid, pick_exit, recency_weights, _fmt
     from .ingest import ingest_many
-    from .lanes import all_bars, build_lane
+    from .lanes import build_lane, research_bars
     from .research import _ctx_for
     from .strategy_engine import Exit, simulate, swing_settings
     from .strategy_library import StrategyLibrary
@@ -94,7 +94,7 @@ def run(stock: str, start: str, first_test: str, tfs: list[str], config: str, na
     lib = StrategyLibrary([REPO / "config" / "strategies" / "library"], out / "_lib").load(record=False)
     strategies = [s for s in lib.strategies.values() if s.doc.get("enabled", True) and not s.blocked]
     data = next(iter(ingest_many(app.s, app.db, [stock], use_minute=True).values()))
-    bars = all_bars(data)
+    bars = research_bars(data)
     costs = app.s.section("costs")
     rows: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
