@@ -48,6 +48,8 @@ def owner_rows(path: Path, sym: str, tf: str) -> list[dict[str, Any]]:
         x = (x or "").strip()
         if not x:
             return None
+        if len(x) <= 10:  # daily candle: date only
+            return datetime.strptime(x, "%d-%m-%Y").strftime("%Y-%m-%d")
         d = datetime.strptime(x, "%d-%m-%Y %H:%M")
         if d.hour < 9 or (d.hour == 9 and d.minute < 15):
             d = d.replace(hour=d.hour + 12)
@@ -67,6 +69,17 @@ def owner_rows(path: Path, sym: str, tf: str) -> list[dict[str, Any]]:
             out.append({"row": i, "side": r["side"].strip().lower(), "signal": when(r["signal_candle"]), "decision": dec,
                         "stop": when(r.get("stop_candle", "")), "exit": when(r.get("exit_candle", "")),
                         "reason": (r.get("exit_reason") or "").strip(), "why": (r.get("why") or "").strip()})
+    return out
+
+
+def all_owner_rows(path: Path, sym: str, tf: str) -> list[dict[str, Any]]:
+    """owner_trades.csv plus the chart exports owner_trades-<SYM>-<tf>.csv next to it (owner_chart.py Export)."""
+    out = owner_rows(path, sym, tf)
+    for p in sorted(path.parent.glob(f"{path.stem}-*.csv")):
+        rows = owner_rows(p, sym, tf)
+        for r in rows:
+            r["row"] = f"{p.stem.split('-', 1)[1]}:{r['row']}"
+        out += rows
     return out
 
 
@@ -192,7 +205,7 @@ class OwnerStrategy:
     # ------------------------------------------------------------------ check against the owner's trades
     def check(self, root: Path) -> list[str]:
         ck = self.spec["check"]
-        rows = owner_rows(REPO / ck["owner_trades"], self.sym, self.tf)
+        rows = all_owner_rows(REPO / ck["owner_trades"], self.sym, self.tf)
         if not rows:
             return ["", "## Check against your trades", "", f"No rows for {self.sym} {self.tf} in {ck['owner_trades']}."]
         W = int(ck.get("match_candles", 2))

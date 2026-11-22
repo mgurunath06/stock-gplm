@@ -5,8 +5,9 @@
 Writes <reports>/tuning/owner-strategy-<tf>-<SYM>/chart.html (open it in the browser; needs internet once for the
 chart library). Shows candles + EMA 13/20/200, every signal (small dots), every trade the program took with the default
 exit of config/research/owner_strategy.json (arrow at the entry, square at the exit with the result), and the owner's
-rows of owner_trades.csv. Click a candle -> "I'd go long / short here", "I'd skip this signal", "clear"; marks are kept
-in the browser and exported with the Export button as owner_marks-<SYM>-<tf>.csv (put it in config/research/).
+rows of owner_trades.csv. Your own trades: click a candle -> ENTRY long / short (or SKIP), then SL = the candle whose
+low (short: high) is your stop, then SQUARE OFF + reason. Kept in the browser; Export writes owner_trades-<SYM>-<tf>.csv
+in the owner_trades.csv format - put it in config/research/ and owner_strategy checks it trade by trade.
 Times = TradingView candle START (IST).
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .owner_strategy import REPO, SPEC, OwnerStrategy, owner_rows
+from .owner_strategy import REPO, SPEC, OwnerStrategy, owner_rows  # noqa: F401
 from .tune import CONFIG
 
 
@@ -51,7 +52,7 @@ def build(o: OwnerStrategy) -> dict:
                            "stop_txt": o.tv(st[1]) if st else "", "exit": T[e], "exit_txt": o.tv(e),
                            "exit_price": r2(x["exit_price"]), "how": x["exit_reason"],
                            "pct": round(100 * float(x["net_return"]), 2)})
-    rows = owner_rows(REPO / o.spec["check"]["owner_trades"], o.sym, o.tf)
+    rows = owner_rows(REPO / o.spec["check"]["owner_trades"], o.sym, o.tf)  # the original file only (chart shows your new trades itself)
     mine = []
     for r in rows:
         if r["signal"] and o.find(r["signal"]) is not None:
@@ -97,29 +98,38 @@ PAGE = r"""<!doctype html>
  <span><span class="dot" style="background:var(--long)"></span>our long</span>
  <span><span class="dot" style="background:var(--short)"></span>our short</span>
  <span><span class="dot" style="background:var(--mine)"></span>your trades file</span>
- <span><span class="dot" style="background:#ff9800"></span>your marks</span>
+ <span><span class="dot" style="background:#ff9800"></span>your entries / SL / square-offs</span>
  <span class="muted">EMA 13 / 20 / 200 = blue / orange / white</span></span>
  <span id="stats" class="muted"></span>
 </header>
 <div id="wrap"><div id="chart"></div>
 <aside>
- <div class="muted">Click a candle, then mark it. Scroll / drag to move, wheel to zoom.</div>
+ <div class="muted">1. Click the signal candle, press ENTRY. 2. Click the candle whose low (short: high) is your
+  stop, press SL. 3. Click the candle where you'd exit, pick the reason, press SQUARE OFF. Scroll / drag to move, wheel to zoom.</div>
  <h3>Selected candle</h3><div id="sel" class="box muted">none</div>
- <div><button class="l" onclick="mark('long')">I'd go LONG here</button><button class="s" onclick="mark('short')">I'd go SHORT here</button></div>
- <div><button class="k" onclick="mark('skip')">I'd SKIP this signal</button><button onclick="mark(null)">Clear mark</button></div>
- <textarea id="note" rows="2" placeholder="why (optional) - e.g. no PDH break, too far from EMA 200"></textarea>
- <h3>Your marks (<span id="nm">0</span>)</h3>
- <div><button onclick="exportCsv()">Export CSV</button><button onclick="if(confirm('Delete all marks?')){marks={};save();draw();}">Clear all</button></div>
+ <div><button class="l" onclick="newTrade('long')">ENTRY long</button><button class="s" onclick="newTrade('short')">ENTRY short</button>
+  <button class="k" onclick="newTrade('skip')">SKIP this signal</button></div>
+ <h3>Active trade</h3><div id="act" class="box muted">none - press ENTRY</div>
+ <div><button onclick="setSL()">SL = this candle</button>
+  <select id="reason" style="background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:5px">
+   <option>target EMA 200</option><option>EMA 20 breach</option><option>stop</option><option>trailing stop</option>
+   <option>end of day</option><option>other</option></select>
+  <button onclick="setExit()">SQUARE OFF here</button></div>
+ <textarea id="note" rows="2" placeholder="why (optional) - e.g. no PDH break, too far from EMA 200" onchange="setNote()"></textarea>
+ <div><button onclick="delTrade()">Delete active trade</button></div>
+ <h3>Your trades (<span id="nm">0</span>)</h3>
+ <div><button onclick="exportCsv()">Export CSV</button><button onclick="if(confirm('Delete ALL your trades?')){mine2=[];active=null;save();draw();}">Clear all</button></div>
  <table id="mk"></table>
  <h3>Our trades</h3><table id="tr"></table>
  <h3>Exit rules</h3><div id="rules" class="box muted"></div>
 </aside></div>
 <script>
 const D = __DATA__;
-const KEY = 'owner-marks-' + D.symbol + '-' + D.tf;
-let marks = {};
-try { marks = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { marks = {}; }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(marks)); } catch (e) {} }
+const KEY = 'owner-trades-v2-' + D.symbol + '-' + D.tf;
+let mine2 = [], active = null;  // your trades: {id, side: long|short|skip, signal, sl, exit, reason, note}
+try { mine2 = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { mine2 = []; }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(mine2)); } catch (e) {} }
+const cur = () => mine2.find(x => x.id === active);
 const fmt = t => new Date(t * 1000).toISOString().slice(0, D.tf === '1d' ? 10 : 16).replace('T', ' ');
 const chart = LightweightCharts.createChart(document.getElementById('chart'), {
   layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
@@ -151,15 +161,39 @@ function draw() {
   });
   D.mine.forEach(m => mk.push({ time: m.time, position: 'belowBar', color: m.decision === 'skip' ? '#9e9e9e' : '#2962ff',
     shape: m.decision === 'skip' ? 'circle' : 'arrowUp', text: m.decision === 'skip' ? 'you: skip' : 'you' }));
-  Object.entries(marks).forEach(([t, m]) => mk.push({ time: +t, position: m.mark === 'short' ? 'aboveBar' : 'belowBar',
-    color: '#ff9800', shape: m.mark === 'long' ? 'arrowUp' : m.mark === 'short' ? 'arrowDown' : 'circle',
-    text: m.mark === 'skip' ? 'skip' : m.mark }));
+  mine2.forEach(x => {
+    const S = x.side === 'short', on = x.id === active ? ' *' : '';
+    mk.push({ time: x.signal, position: S ? 'aboveBar' : 'belowBar', color: '#ff9800',
+      shape: x.side === 'skip' ? 'circle' : S ? 'arrowDown' : 'arrowUp', text: (x.side === 'skip' ? 'my skip' : 'MY ' + x.side) + on });
+    if (x.sl) mk.push({ time: x.sl, position: S ? 'aboveBar' : 'belowBar', color: '#ff9800', shape: 'circle', size: 0.6, text: 'my SL' + on });
+    if (x.exit) mk.push({ time: x.exit, position: S ? 'belowBar' : 'aboveBar', color: '#ff9800', shape: 'square', size: 0.7,
+      text: 'my sq off ' + (res(x) ?? '') + on });
+  });
   mk.sort((a, b) => a.time - b.time);
   cs.setMarkers(mk);
-  const keys = Object.keys(marks).map(Number).sort((a, b) => a - b);
-  document.getElementById('nm').textContent = keys.length;
-  document.getElementById('mk').innerHTML = keys.map(t => `<tr onclick="go(${t})"><td>${fmt(t)}</td><td>${marks[t].mark}</td>` +
-    `<td class="muted">${(marks[t].note || '').replace(/</g, '&lt;')}</td></tr>`).join('');
+  mine2.sort((a, b) => a.signal - b.signal);
+  document.getElementById('nm').textContent = mine2.length;
+  document.getElementById('mk').innerHTML = mine2.map(x => `<tr onclick="activate(${x.id})" style="${x.id === active ? 'background:#2a2e39' : ''}">` +
+    `<td>${fmt(x.signal)}</td><td>${x.side}</td><td>${x.sl ? 'SL ' + slPrice(x) : (x.side === 'skip' ? '' : '<span class=neg>no SL</span>')}</td>` +
+    `<td>${x.exit ? fmt(x.exit).slice(5) : (x.side === 'skip' ? '' : '<span class=neg>open</span>')}</td>` +
+    `<td class="${(res(x) || 0) > 0 ? 'pos' : 'neg'}">${res(x) != null ? res(x) + '%' : ''}</td></tr>`).join('');
+  const a = cur();
+  document.getElementById('act').innerHTML = a ? `<b>${a.side}</b> ${fmt(a.signal)}` + (a.side === 'skip' ? '' :
+    `<br>entry (next open) ${entryPx(a) ?? '-'}<br>SL ${a.sl ? fmt(a.sl) + ' @ ' + slPrice(a) : '<span class=neg>not set</span>'}` +
+    `<br>square off ${a.exit ? fmt(a.exit) + ' @ ' + byTime[a.exit][4] + ' (' + a.reason + ')' : '<span class=neg>not set</span>'}` +
+    (res(a) != null ? `<br>result <span class="${res(a) > 0 ? 'pos' : 'neg'}">${res(a)}%</span> (close of the square-off candle, before costs)` : ''))
+    : 'none - press ENTRY';
+  if (slLine) { cs.removePriceLine(slLine); slLine = null; }
+  if (a && a.sl) slLine = cs.createPriceLine({ price: slPrice(a), color: '#ff9800', lineStyle: 2, title: 'my SL' });
+}
+let slLine = null;
+const idx = {}; D.candles.forEach((c, i) => idx[c[0]] = i);
+function entryPx(x) { const i = idx[x.signal]; return i != null && i + 1 < D.candles.length ? D.candles[i + 1][1] : null; }
+function slPrice(x) { const c = byTime[x.sl]; return c ? (x.side === 'short' ? c[2] : c[3]) : null; }
+function res(x) {
+  if (!x.exit || x.side === 'skip') return null;
+  const e = entryPx(x), p = byTime[x.exit][4]; if (!e) return null;
+  return Math.round(10000 * (x.side === 'short' ? (e - p) / e : (p - e) / e)) / 100;
 }
 function select(t) {
   selected = t; const c = byTime[t]; if (!c) return;
@@ -168,9 +202,8 @@ function select(t) {
   (trAt[t] || []).forEach(x => h += `<br>our ${x.side}: entry ${x.entry}, stop ${x.stop} (${x.stop_txt}), exit ${x.exit_txt} ` +
     `${x.how} <span class="${x.pct > 0 ? 'pos' : 'neg'}">${x.pct}%</span>`);
   if (mineAt[t]) h += `<br>your file: ${mineAt[t].decision} - ${mineAt[t].why}`;
-  if (marks[t]) h += `<br>your mark: <b>${marks[t].mark}</b> ${marks[t].note || ''}`;
+  mine2.filter(x => x.signal === t).forEach(x => h += `<br>your ${x.side} entry ${x.note ? '- ' + x.note : ''}`);
   document.getElementById('sel').innerHTML = h;
-  document.getElementById('note').value = marks[t] ? (marks[t].note || '') : '';
   if (stopLine) { cs.removePriceLine(stopLine); stopLine = null; }
   const tr = (trAt[t] || [])[0];
   if (tr && tr.stop) stopLine = cs.createPriceLine({ price: tr.stop, color: '#ef5350', lineStyle: 2, title: 'our stop' });
@@ -178,21 +211,37 @@ function select(t) {
 function go(t) { const i = D.candles.findIndex(c => c[0] === t);
   chart.timeScale().setVisibleLogicalRange({ from: i - 80, to: i + 40 }); select(t); }
 chart.subscribeClick(p => { if (p.time) select(p.time); });
-function mark(kind) {
-  if (selected == null) return;
-  if (kind) marks[selected] = { mark: kind, note: document.getElementById('note').value.trim() };
-  else delete marks[selected];
-  save(); draw(); select(selected);
+function need(msg) { if (selected == null) { alertBox(msg); return false; } return true; }
+function alertBox(msg) { document.getElementById('sel').innerHTML = '<span class=neg>' + msg + '</span>'; }
+function newTrade(side) {
+  if (!need('click a candle first')) return;
+  const x = { id: Date.now(), side, signal: selected, sl: null, exit: null, reason: '', note: document.getElementById('note').value.trim() };
+  mine2.push(x); active = x.id; save(); draw(); select(selected);
 }
+function setSL() {
+  const a = cur(); if (!a || a.side === 'skip') return alertBox('press ENTRY long / short first');
+  if (!need('click the SL candle first')) return;
+  a.sl = selected; save(); draw();
+}
+function setExit() {
+  const a = cur(); if (!a || a.side === 'skip') return alertBox('press ENTRY long / short first');
+  if (!need('click the square-off candle first')) return;
+  if (selected <= a.signal) return alertBox('square off must be after the entry candle');
+  a.exit = selected; a.reason = document.getElementById('reason').value; save(); draw();
+}
+function setNote() { const a = cur(); if (a) { a.note = document.getElementById('note').value.trim(); save(); draw(); } }
+function delTrade() { mine2 = mine2.filter(x => x.id !== active); active = null; save(); draw(); }
+function activate(id) { active = id; const a = cur(); draw(); go(a.signal); document.getElementById('note').value = a.note || ''; }
 function exportCsv() {
+  // same format as config/research/owner_trades.csv (DD-MM-YYYY HH:MM) -> owner_strategy checks it trade by trade
   const q = s => '"' + String(s || '').replace(/"/g, '""') + '"';
-  const keys = Object.keys(marks).map(Number).sort((a, b) => a - b);
-  const lines = ['symbol,tf,candle,mark,signal_here,our_trade,note'].concat(keys.map(t => [D.symbol, D.tf, fmt(t), marks[t].mark,
-    (sigAt[t] || []).map(s => s[1] + ' ' + s[2]).join(' / '), (trAt[t] || []).map(x => x.side + ' ' + x.pct + '%').join(' / '),
-    q(marks[t].note)].join(',')));
+  const dt = t => { if (!t) return ''; const s = fmt(t); return s.slice(8, 10) + '-' + s.slice(5, 7) + '-' + s.slice(0, 4) + s.slice(10); };
+  const lines = ['symbol,tf,side,signal_candle,decision,stop_candle,exit_candle,exit_reason,why'].concat(mine2.map(x => [
+    D.symbol, D.tf, x.side === 'skip' ? ((sigAt[x.signal] || [])[0] || [0, 'long'])[1] : x.side, dt(x.signal),
+    x.side === 'skip' ? 'skip' : 'take', dt(x.sl), dt(x.exit), q(x.reason), q(x.note)].join(',')));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }));
-  a.download = `owner_marks-${D.symbol}-${D.tf}.csv`; a.click();
+  a.download = `owner_trades-${D.symbol}-${D.tf}.csv`; a.click();
 }
 document.getElementById('tr').innerHTML = D.trades.slice().sort((a, b) => b.signal - a.signal).map(t =>
   `<tr onclick="go(${t.signal})"><td>${t.signal_txt}</td><td>${t.side}</td><td class="${t.pct > 0 ? 'pos' : 'neg'}">${t.pct}%</td>` +
