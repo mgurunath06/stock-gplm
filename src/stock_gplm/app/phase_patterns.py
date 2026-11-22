@@ -43,6 +43,26 @@ def _date(d: int) -> str:
     return str(np.datetime64(int(d), "D"))
 
 
+def _one_at_a_time(s: np.ndarray, res: np.ndarray) -> np.ndarray:
+    """Times taken one trade at a time: a time counts only after the previous trade has closed (res = closing
+    candle), so each counted time's result was known before the next one - no open trades in a streak."""
+    out = np.empty(len(s), np.int64)
+    k, nxt = 0, -1
+    for i in range(len(s)):
+        if s[i] > nxt:
+            out[k] = s[i]
+            k += 1
+            nxt = res[s[i]]
+    return out[:k]
+
+
+try:
+    from numba import njit
+    _one_at_a_time = njit(cache=True)(_one_at_a_time)
+except ImportError:  # plain Python fallback (slower)
+    pass
+
+
 class Finder:
     def __init__(self, a: argparse.Namespace):
         cfg = json.loads(Path(a.config).read_text(encoding="utf-8"))
@@ -109,9 +129,11 @@ class Finder:
         self.net = np.full((E, n), np.nan)
         self.done = np.zeros((E, n), bool)
         self.peak = np.full((E, n), np.nan)
+        self.res = np.full((E, n), n + 1, np.int64)  # candle where the trade closed
         for k, h in enumerate(self.exits):
-            t, net, win, pk = self.label(m, n, h, L["buy"], L["sell"])
+            t, net, win, pk, rs = self.label(m, n, h, L["buy"], L["sell"])
             self.net[k, t], self.win[k, t], self.done[k, t], self.peak[k, t] = net, win, True, pk
+            self.res[k, t] = rs
         self.log(f"{n:,} bars {_date(self.days[0])} .. {_date(self.days[-1])}; {self.base_n} indicators + their "
                  f"changes over {self.pc.get('change_lookbacks')} candles = {len(names)} values per bar; phase today: "
                  f"{PHASES[int(self.phase[-1])]}")
@@ -159,7 +181,8 @@ class Finder:
         px = np.where(win, tgt, np.where(fs < never, stp, cl[end]))
         net = (ent * (1 - sell) - px * (1 + buy)) / ent if self.short else px * (1 - sell) / (ent * (1 + buy)) - 1
         pk = (ent / best - 1) if self.short else (best / ent - 1)
-        return t, net, win, pk
+        rs = t + np.minimum(np.minimum(ft, fs), end - t)
+        return t, net, win, pk, rs
 
     def build_conditions(self) -> None:
         conds: list[Cond] = []
@@ -207,6 +230,9 @@ class Finder:
         R = self.R
         for e in range(len(self.exits)):
             s = st[self.done[e, st]]
+            if len(s) < R:
+                continue
+            s = _one_at_a_time(s, self.res[e])
             if len(s) < R:
                 continue
             w = self.win[e, s]
