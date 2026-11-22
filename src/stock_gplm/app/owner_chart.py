@@ -1,12 +1,12 @@
-"""Interactive candle chart of one stock with the owner strategy's trades - for the owner to mark entries / skips.
+"""Interactive candle chart of one stock for the owner to mark their own trades (entry, SL, square-off, reason, comment).
 
     $env:PYTHONPATH="src"; python -m stock_gplm.app.owner_chart --symbol RELIANCE --tf 15m
 
 Writes <reports>/tuning/owner-strategy-<tf>-<SYM>/chart.html (open it in the browser; needs internet once for the
-chart library). Shows candles + EMA 13/20/200, every signal (small dots), every trade the program took with the default
-exit of config/research/owner_strategy.json (arrow at the entry, square at the exit with the result), and the owner's
-rows of owner_trades.csv. Your own trades: click a candle -> ENTRY long / short (or SKIP), then SL = the candle whose
-low (short: high) is your stop, then SQUARE OFF + reason. Kept in the browser; Export writes owner_trades-<SYM>-<tf>.csv
+chart library). Shows candles + EMA 13/20/200, the EMA crosses (small dots) and the owner's rows of owner_trades.csv -
+NOT the program's trades (owner 2026-11-22: mark without seeing them). Click a candle -> menu there: Buy / Short / Skip,
+then SL candle, then square off with reason buttons + comment; Undo / Redo (Ctrl+Z / Ctrl+Y); x deletes a trade.
+Kept in the browser; Export writes owner_trades-<SYM>-<tf>.csv
 in the owner_trades.csv format - put it in config/research/ and owner_strategy checks it trade by trade.
 Times = TradingView candle START (IST).
 """
@@ -41,18 +41,10 @@ def build(o: OwnerStrategy) -> dict:
     for p in (13, 20, 200):
         e = _ema_of(m, p)
         emas[str(p)] = [[T[i], r2(e[i])] for i in range(a, n) if np.isfinite(e[i])]
-    signals, trades = [], []
+    signals = []  # EMA crosses only - the program's trades are not shown (owner marks without seeing them)
     for side, arr in o.sig.items():
         signals += [[T[int(t)], side, o.kind[side].get(int(t), "")] for t in arr]
-        for x in o.sim(side, arr):
-            t, e = int(x["t"]), int(x["exit_index"])
-            st = o.stop_of(side, t)
-            trades.append({"side": side, "signal": T[t], "signal_txt": o.tv(t), "trigger": o.kind[side].get(t, ""),
-                           "entry": r2(x["entry_price"]), "stop": r2(st[0]) if st else None,
-                           "stop_txt": o.tv(st[1]) if st else "", "exit": T[e], "exit_txt": o.tv(e),
-                           "exit_price": r2(x["exit_price"]), "how": x["exit_reason"],
-                           "pct": round(100 * float(x["net_return"]), 2)})
-    rows = owner_rows(REPO / o.spec["check"]["owner_trades"], o.sym, o.tf)  # the original file only (chart shows your new trades itself)
+    rows = owner_rows(REPO / o.spec["check"]["owner_trades"], o.sym, o.tf)  # the original file only
     mine = []
     for r in rows:
         if r["signal"] and o.find(r["signal"]) is not None:
@@ -61,7 +53,7 @@ def build(o: OwnerStrategy) -> dict:
                          "why": r["why"]})
     from .strategy_engine import Exit
     rules = {side: Exit.of(o.exit_doc(side)).text(None, side == "short") for side in o.sig}
-    return {"symbol": o.sym, "tf": o.tf, "candles": candles, "emas": emas, "signals": signals, "trades": trades,
+    return {"symbol": o.sym, "tf": o.tf, "candles": candles, "emas": emas, "signals": signals,
             "mine": mine, "rules": rules}
 
 
@@ -70,68 +62,83 @@ PAGE = r"""<!doctype html>
 <title>__TITLE__</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
- :root { --bg:#131722; --panel:#1e222d; --text:#d1d4dc; --muted:#787b86; --line:#2a2e39; --long:#26a69a; --short:#ef5350;
-         --mine:#2962ff; --skip:#9e9e9e; }
+ :root { --bg:#131722; --panel:#1e222d; --text:#d1d4dc; --muted:#8a8e99; --line:#2a2e39; --long:#26a69a; --short:#ef5350;
+         --me:#ff9800; --file:#2962ff; }
  * { box-sizing:border-box; }
- body { margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui, Segoe UI, sans-serif; }
- header { padding:8px 14px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; border-bottom:1px solid var(--line); }
+ body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, Segoe UI, sans-serif; }
+ header { padding:8px 14px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; border-bottom:1px solid var(--line); }
  header b { font-size:15px; }
- .leg span { margin-right:12px; white-space:nowrap; }
- .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:middle; }
+ .leg span { margin-right:12px; white-space:nowrap; color:var(--muted); }
+ .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:middle; }
  #wrap { display:flex; height:calc(100vh - 46px); }
- #chart { flex:1; min-width:0; }
- aside { width:330px; background:var(--panel); border-left:1px solid var(--line); padding:12px; overflow:auto; }
- button { background:#2a2e39; color:var(--text); border:1px solid #363a45; border-radius:4px; padding:6px 9px;
-          cursor:pointer; margin:3px 3px 3px 0; font:inherit; }
- button:hover { background:#363a45; }
- button.l { border-color:var(--long); } button.s { border-color:var(--short); } button.k { border-color:var(--skip); }
- h3 { margin:14px 0 6px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
- .box { background:#131722; border:1px solid var(--line); border-radius:4px; padding:8px; margin:6px 0; }
- textarea { width:100%; background:#131722; color:var(--text); border:1px solid var(--line); border-radius:4px; }
- table { width:100%; border-collapse:collapse; font-size:12px; }
- td { padding:2px 4px; border-bottom:1px solid var(--line); cursor:pointer; }
- .pos { color:var(--long); } .neg { color:var(--short); } .muted { color:var(--muted); }
+ #chart { flex:1; min-width:0; position:relative; }
+ aside { width:360px; background:var(--panel); border-left:1px solid var(--line); padding:12px; overflow:auto; }
+ button { background:#2a2e39; color:var(--text); border:1px solid #3a3f4b; border-radius:6px; padding:7px 11px;
+          cursor:pointer; margin:3px 4px 3px 0; font:inherit; }
+ button:hover { background:#363a45; } button:disabled { opacity:.35; cursor:default; }
+ .big { font-size:15px; padding:9px 14px; }
+ .bl { background:#1b3d39; border-color:var(--long); } .bs { background:#4a2222; border-color:var(--short); }
+ .bm { background:#4a3415; border-color:var(--me); }
+ .chip { border-radius:16px; padding:5px 11px; font-size:13px; }
+ .chip.on { background:var(--me); color:#131722; border-color:var(--me); font-weight:600; }
+ input[type=text] { width:100%; background:#131722; color:var(--text); border:1px solid #3a3f4b; border-radius:6px;
+                    padding:7px 9px; font:inherit; }
+ h3 { margin:14px 0 6px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+ .muted { color:var(--muted); } .pos { color:var(--long); } .neg { color:var(--short); }
+ /* popup menu at the clicked candle */
+ #pop { position:absolute; z-index:10; display:none; width:300px; background:var(--panel); border:1px solid var(--me);
+        border-radius:10px; padding:12px; box-shadow:0 8px 28px rgba(0,0,0,.55); }
+ #pop .t { font-weight:600; margin-bottom:6px; }
+ #pop .x { position:absolute; right:8px; top:6px; background:none; border:none; font-size:18px; color:var(--muted); }
+ .card { background:#131722; border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; }
+ .card.open { border-color:var(--me); }
+ .card .row { display:flex; justify-content:space-between; gap:6px; align-items:center; }
+ .card .del { background:none; border:none; color:var(--muted); padding:2px 6px; font-size:16px; margin:0; }
+ .card .del:hover { color:var(--short); }
+ .card input { margin-top:5px; padding:5px 7px; font-size:13px; }
+ .lnk { color:#90caf9; cursor:pointer; text-decoration:underline; }
+ #toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#363a45; padding:8px 14px;
+          border-radius:6px; display:none; z-index:20; }
  @media (max-width: 800px) { #wrap { flex-direction:column; height:auto; } #chart { height:70vh; } aside { width:auto; } }
 </style></head><body>
 <header><b>__TITLE__</b>
- <span class="leg"><span><span class="dot" style="background:#f5c542"></span>signal</span>
- <span><span class="dot" style="background:var(--long)"></span>our long</span>
- <span><span class="dot" style="background:var(--short)"></span>our short</span>
- <span><span class="dot" style="background:var(--mine)"></span>your trades file</span>
- <span><span class="dot" style="background:#ff9800"></span>your entries / SL / square-offs</span>
- <span class="muted">EMA 13 / 20 / 200 = blue / orange / white</span></span>
- <span id="stats" class="muted"></span>
+ <span class="leg"><span><span class="dot" style="background:#f5c542"></span>EMA13 x EMA20 / EMA200 cross</span>
+ <span><span class="dot" style="background:var(--me)"></span>your trades</span>
+ <span><span class="dot" style="background:var(--file)"></span>your trades file</span>
+ <span>EMA 13 / 20 / 200 = blue / orange / white</span></span>
+ <label class="muted"><input type="checkbox" id="showSig" checked onchange="draw()"> show crosses</label>
 </header>
-<div id="wrap"><div id="chart"></div>
+<div id="wrap"><div id="chart"><div id="pop"></div></div>
 <aside>
- <div><button class="l" onclick="start('long')">LONG (L)</button><button class="s" onclick="start('short')">SHORT (S)</button>
-  <button class="k" onclick="start('skip')">SKIP (K)</button><button onclick="undo()">Undo (Z)</button></div>
- <div id="step" class="box" style="font-size:14px;border-color:#ff9800">Press LONG / SHORT / SKIP, then click candles.</div>
- <div class="muted">Long / short = 3 clicks: entry candle, SL candle, square-off candle (reason filled in automatically).
-  Skip = 1 click. Esc = cancel. Scroll / drag to move, wheel to zoom.</div>
- <h3>Active trade</h3><div id="act" class="box muted">none</div>
- <div>reason <select id="reason" onchange="setReason()" style="background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:5px">
-   <option>target EMA 200</option><option>EMA 20 breach</option><option>stop</option><option>trailing stop</option>
-   <option>end of day</option><option>other</option></select>
-  <button onclick="redo('sl')">re-click SL</button><button onclick="redo('exit')">re-click square off</button></div>
- <textarea id="note" rows="2" placeholder="why (optional) - e.g. no PDH break, too far from EMA 200" onchange="setNote()"></textarea>
- <div><button onclick="delTrade()">Delete active trade</button></div>
- <h3>Clicked candle</h3><div id="sel" class="box muted">none</div>
+ <div style="font-size:15px"><b>Click any candle</b> - a menu opens there.</div>
+ <div class="muted">Buy / Short at the entry candle, then click the candle for the SL, then the candle to square off.
+  Scroll / drag to move, mouse wheel to zoom.</div>
+ <div style="margin-top:8px"><button class="big" id="undoB" onclick="undo()">&#8630; Undo</button><button class="big" id="redoB" onclick="redo()">Redo &#8631;</button>
+  <span class="muted">Ctrl+Z / Ctrl+Y</span></div>
  <h3>Your trades (<span id="nm">0</span>)</h3>
- <div><button onclick="exportCsv()">Export CSV</button><button onclick="if(confirm('Delete ALL your trades?')){mine2=[];active=null;save();draw();}">Clear all</button></div>
- <table id="mk"></table>
- <h3>Our trades</h3><table id="tr"></table>
- <h3>Exit rules</h3><div id="rules" class="box muted"></div>
+ <div id="list"></div>
+ <div style="margin-top:8px"><button class="big bm" onclick="exportCsv()">Export CSV</button></div>
+ <div class="muted">Saved in this browser automatically. Export gives owner_trades-SYMBOL-TF.csv - put it in config\research.</div>
 </aside></div>
+<div id="toast"></div>
 <script>
 const D = __DATA__;
-const KEY = 'owner-trades-v2-' + D.symbol + '-' + D.tf;
-let mine2 = [], active = null;  // your trades: {id, side: long|short|skip, signal, sl, exit, reason, note}
-try { mine2 = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { mine2 = []; }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(mine2)); } catch (e) {} }
-const cur = () => mine2.find(x => x.id === active);
+const KEY = 'owner-trades-v3-' + D.symbol + '-' + D.tf;
+const REASONS = ['Target EMA 200', 'EMA 20 breach', 'Stop hit', 'Trailing stop', 'End of day', 'Gut feel', 'Other'];
+let T = [];  // your trades: {id, side: long|short|skip, entry, sl, exit, reason, why, exitWhy}
+try { T = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { T = []; }
+let past = [], future = [];
+function snap() { past.push(JSON.stringify(T)); if (past.length > 200) past.shift(); future = []; }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(T)); } catch (e) {} draw(); }
+function undo() { if (!past.length) return toast('Nothing to undo'); future.push(JSON.stringify(T)); T = JSON.parse(past.pop()); save(); closePop(); toast('Undone'); }
+function redo() { if (!future.length) return; past.push(JSON.stringify(T)); T = JSON.parse(future.pop()); save(); closePop(); }
+function toast(s) { const t = document.getElementById('toast'); t.textContent = s; t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', 1400); }
 const fmt = t => new Date(t * 1000).toISOString().slice(0, D.tf === '1d' ? 10 : 16).replace('T', ' ');
-const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+const esc = s => String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+const chartEl = document.getElementById('chart');
+const chart = LightweightCharts.createChart(chartEl, {
   layout: { background: { color: '#131722' }, textColor: '#d1d4dc' },
   grid: { vertLines: { color: '#1f2330' }, horzLines: { color: '#1f2330' } },
   timeScale: { timeVisible: D.tf !== '1d', secondsVisible: false, rightOffset: 5 },
@@ -142,151 +149,139 @@ cs.setData(D.candles.map(c => ({ time: c[0], open: c[1], high: c[2], low: c[3], 
 const EC = { '13': '#2962ff', '20': '#ff9800', '200': '#e0e0e0' };
 for (const p in D.emas) chart.addLineSeries({ color: EC[p], lineWidth: p === '200' ? 2 : 1, priceLineVisible: false,
   lastValueVisible: false, crosshairMarkerVisible: false }).setData(D.emas[p].map(x => ({ time: x[0], value: x[1] })));
-const byTime = {}; D.candles.forEach(c => byTime[c[0]] = c);
+const byTime = {}, idx = {}; D.candles.forEach((c, i) => { byTime[c[0]] = c; idx[c[0]] = i; });
+const e200 = {}, e20 = {}; D.emas['200'].forEach(x => e200[x[0]] = x[1]); D.emas['20'].forEach(x => e20[x[0]] = x[1]);
 const sigAt = {}; D.signals.forEach(s => (sigAt[s[0]] = sigAt[s[0]] || []).push(s));
-const trAt = {}; D.trades.forEach(t => (trAt[t.signal] = trAt[t.signal] || []).push(t));
-const mineAt = {}; D.mine.forEach(m => mineAt[m.time] = m);
-let selected = null, stopLine = null;
+
+const entryPx = x => { const i = idx[x.entry]; return i != null && i + 1 < D.candles.length ? D.candles[i + 1][1] : null; };
+const slPx = x => { const c = byTime[x.sl]; return c ? (x.side === 'short' ? c[2] : c[3]) : null; };
+function result(x) {
+  if (!x.exit || x.side === 'skip') return null;
+  const e = entryPx(x), c = byTime[x.exit]; if (!e || !c) return null;
+  let p = c[4];  // square-off price: the SL if it was hit on that candle, else the candle close
+  const s = slPx(x); if (x.reason === 'Stop hit' && s != null) p = s;
+  return Math.round(10000 * (x.side === 'short' ? (e - p) / e : (p - e) / e)) / 100;
+}
+const openTrade = () => T.find(x => x.side !== 'skip' && (!x.sl || !x.exit));
+function guessReason(x, t) {
+  const c = byTime[t], S = x.side === 'short', s = slPx(x), a = e200[t], b = e20[t], e = entryPx(x), ai = e200[x.entry];
+  if (s != null && (S ? c[2] >= s : c[3] <= s)) return 'Stop hit';
+  if (a && ai && e && (S ? e > ai : e < ai) && (S ? c[3] <= a * 1.001 : c[2] >= a * 0.999)) return 'Target EMA 200';
+  if (b && (S ? c[2] >= b : c[3] <= b)) return 'EMA 20 breach';
+  if (D.tf !== '1d' && fmt(t).slice(11) >= '15:00') return 'End of day';
+  return 'Other';
+}
+
+// ---------------------------------------------------------------- popup menu at the clicked candle
+const pop = document.getElementById('pop');
+let popT = null, popReason = null;
+function closePop() { pop.style.display = 'none'; popT = null; }
+chart.subscribeClick(p => {
+  if (!p.time || !p.point) return closePop();
+  popT = p.time;
+  const c = byTime[p.time], o = openTrade();
+  const sig = (sigAt[p.time] || []).map(s => `${s[1]} cross ${s[2].replace('-milestone', '')}`).join(', ');
+  let h = `<button class="x" onclick="closePop()">&times;</button><div class="t">${fmt(p.time)}</div>` +
+    `<div class="muted" style="font-size:12px">O ${c[1]} H ${c[2]} L ${c[3]} C ${c[4]}${sig ? '<br>' + sig : ''}</div>`;
+  const here = T.filter(x => [x.entry, x.sl, x.exit].includes(p.time));
+  if (o && !o.sl && p.time !== o.entry) {
+    h += `<div style="margin-top:8px">Your open <b>${o.side}</b> from ${fmt(o.entry)}:</div>` +
+      `<button class="big bm" onclick="setSL()">SL here (${o.side === 'short' ? 'high ' + c[2] : 'low ' + c[3]})</button>`;
+  } else if (o && o.sl && !o.exit && p.time > o.entry) {
+    popReason = guessReason(o, p.time);
+    h += `<div style="margin-top:8px">Square off your <b>${o.side}</b> from ${fmt(o.entry)} here - why?</div><div id="chips">` +
+      REASONS.map(r => `<button class="chip${r === popReason ? ' on' : ''}" onclick="pickReason(this,'${r}')">${r}</button>`).join('') +
+      `</div><input type="text" id="pw" placeholder="comment (optional)"><button class="big bm" style="margin-top:6px" onclick="setExit()">Square off here</button>`;
+  } else {
+    h += `<div style="margin-top:8px"><button class="big bl" onclick="newTrade('long')">Buy here</button>` +
+      `<button class="big bs" onclick="newTrade('short')">Short here</button><button class="big" onclick="newTrade('skip')">Skip</button></div>` +
+      `<input type="text" id="pw" placeholder="why? (optional) e.g. broke PDH, too far from EMA 200">`;
+  }
+  if (here.length) h += `<div style="margin-top:8px"><button onclick="removeHere()">Remove my mark on this candle</button></div>`;
+  if (o) h += `<div class="muted" style="margin-top:6px;font-size:12px">Esc = close. Undo = Ctrl+Z.</div>`;
+  pop.innerHTML = h;
+  pop.style.display = 'block';
+  const W = chartEl.clientWidth, H = chartEl.clientHeight;
+  pop.style.left = Math.min(Math.max(8, p.point.x + 14), W - 310) + 'px';
+  pop.style.top = Math.min(Math.max(8, p.point.y - 40), H - pop.offsetHeight - 8) + 'px';
+  const inp = document.getElementById('pw'); if (inp) { inp.focus(); inp.onkeydown = e => { if (e.key === 'Enter') { const b = pop.querySelector('.big.bm,.big.bl'); if (b) b.click(); } }; }
+});
+function pickReason(el, r) { popReason = r; document.querySelectorAll('#chips .chip').forEach(b => b.classList.remove('on')); el.classList.add('on'); }
+const pw = () => (document.getElementById('pw') || {}).value ? document.getElementById('pw').value.trim() : '';
+function newTrade(side) {
+  const o = openTrade();
+  if (o && side !== 'skip') { toast('Finish or remove your open trade first'); return; }
+  snap(); T.push({ id: Date.now(), side, entry: popT, sl: null, exit: null, reason: '', why: pw(), exitWhy: '' });
+  save(); closePop(); toast(side === 'skip' ? 'Skip saved' : 'Entry saved - now click the SL candle');
+}
+function setSL() { const o = openTrade(); snap(); o.sl = popT; save(); closePop(); toast('SL saved - now click the square-off candle'); }
+function setExit() { const o = openTrade(); snap(); o.exit = popT; o.reason = popReason || 'Other'; o.exitWhy = pw(); save(); closePop();
+  toast('Trade saved: ' + (result(o) ?? '') + '%'); }
+function removeHere() {
+  snap();
+  T.forEach(x => { if (x.exit === popT) { x.exit = null; x.reason = ''; x.exitWhy = ''; } else if (x.sl === popT) { x.sl = null; } });
+  T = T.filter(x => x.entry !== popT);
+  save(); closePop();
+}
+function delTrade(id) { snap(); T = T.filter(x => x.id !== id); save(); toast('Trade deleted (Undo to bring it back)'); }
+function editNote(id, field, v) { const x = T.find(y => y.id === id); if (!x || x[field] === v) return; snap(); x[field] = v; save(); }
+function go(t) { const i = idx[t]; chart.timeScale().setVisibleLogicalRange({ from: i - 80, to: i + 40 }); }
+
+// ---------------------------------------------------------------- drawing
+let slLine = null;
 function draw() {
   const mk = [];
-  const traded = new Set(D.trades.map(t => t.signal + t.side));
-  D.signals.forEach(s => { if (!traded.has(s[0] + s[1])) mk.push({ time: s[0], position: s[1] === 'long' ? 'belowBar' : 'aboveBar',
-    color: '#f5c542', shape: 'circle', size: 0.4 }); });
-  D.trades.forEach(t => {
-    const L = t.side === 'long';
-    mk.push({ time: t.signal, position: L ? 'belowBar' : 'aboveBar', color: L ? '#26a69a' : '#ef5350',
-      shape: L ? 'arrowUp' : 'arrowDown', text: (L ? 'L' : 'S') });
-    mk.push({ time: t.exit, position: L ? 'aboveBar' : 'belowBar', color: t.pct > 0 ? '#26a69a' : '#ef5350',
-      shape: 'square', size: 0.6, text: (t.pct > 0 ? '+' : '') + t.pct + '%' });
-  });
+  if (document.getElementById('showSig').checked)
+    D.signals.forEach(s => mk.push({ time: s[0], position: s[1] === 'long' ? 'belowBar' : 'aboveBar', color: '#f5c542', shape: 'circle', size: 0.4 }));
   D.mine.forEach(m => mk.push({ time: m.time, position: 'belowBar', color: m.decision === 'skip' ? '#9e9e9e' : '#2962ff',
-    shape: m.decision === 'skip' ? 'circle' : 'arrowUp', text: m.decision === 'skip' ? 'you: skip' : 'you' }));
-  mine2.forEach(x => {
-    const S = x.side === 'short', on = x.id === active ? ' *' : '';
-    mk.push({ time: x.signal, position: S ? 'aboveBar' : 'belowBar', color: '#ff9800',
-      shape: x.side === 'skip' ? 'circle' : S ? 'arrowDown' : 'arrowUp', text: (x.side === 'skip' ? 'my skip' : 'MY ' + x.side) + on });
-    if (x.sl) mk.push({ time: x.sl, position: S ? 'aboveBar' : 'belowBar', color: '#ff9800', shape: 'circle', size: 0.6, text: 'my SL' + on });
-    if (x.exit) mk.push({ time: x.exit, position: S ? 'belowBar' : 'aboveBar', color: '#ff9800', shape: 'square', size: 0.7,
-      text: 'my sq off ' + (res(x) ?? '') + on });
+    shape: m.decision === 'skip' ? 'circle' : 'arrowUp', text: m.decision === 'skip' ? 'file: skip' : 'file' }));
+  T.forEach(x => {
+    const S = x.side === 'short';
+    if (x.side === 'skip') { mk.push({ time: x.entry, position: 'belowBar', color: '#9e9e9e', shape: 'circle', text: 'skip' }); return; }
+    mk.push({ time: x.entry, position: S ? 'aboveBar' : 'belowBar', color: '#ff9800', shape: S ? 'arrowDown' : 'arrowUp', text: S ? 'SHORT' : 'BUY' });
+    if (x.sl) mk.push({ time: x.sl, position: S ? 'aboveBar' : 'belowBar', color: '#ef5350', shape: 'circle', size: 0.7, text: 'SL' });
+    if (x.exit) { const r = result(x); mk.push({ time: x.exit, position: S ? 'belowBar' : 'aboveBar', color: (r || 0) > 0 ? '#26a69a' : '#ef5350',
+      shape: 'square', size: 0.8, text: 'OUT ' + (r != null ? (r > 0 ? '+' : '') + r + '%' : '') }); }
   });
   mk.sort((a, b) => a.time - b.time);
   cs.setMarkers(mk);
-  mine2.sort((a, b) => a.signal - b.signal);
-  document.getElementById('nm').textContent = mine2.length;
-  document.getElementById('mk').innerHTML = mine2.map(x => `<tr onclick="activate(${x.id})" style="${x.id === active ? 'background:#2a2e39' : ''}">` +
-    `<td>${fmt(x.signal)}</td><td>${x.side}</td><td>${x.sl ? 'SL ' + slPrice(x) : (x.side === 'skip' ? '' : '<span class=neg>no SL</span>')}</td>` +
-    `<td>${x.exit ? fmt(x.exit).slice(5) : (x.side === 'skip' ? '' : '<span class=neg>open</span>')}</td>` +
-    `<td class="${(res(x) || 0) > 0 ? 'pos' : 'neg'}">${res(x) != null ? res(x) + '%' : ''}</td></tr>`).join('');
-  const a = cur();
-  document.getElementById('act').innerHTML = a ? `<b>${a.side}</b> ${fmt(a.signal)}` + (a.side === 'skip' ? '' :
-    `<br>entry (next open) ${entryPx(a) ?? '-'}<br>SL ${a.sl ? fmt(a.sl) + ' @ ' + slPrice(a) : '<span class=neg>not set</span>'}` +
-    `<br>square off ${a.exit ? fmt(a.exit) + ' @ ' + byTime[a.exit][4] + ' (' + a.reason + ')' : '<span class=neg>not set</span>'}` +
-    (res(a) != null ? `<br>result <span class="${res(a) > 0 ? 'pos' : 'neg'}">${res(a)}%</span> (close of the square-off candle, before costs)` : ''))
-    : 'none - press ENTRY';
+  const o = openTrade();
   if (slLine) { cs.removePriceLine(slLine); slLine = null; }
-  if (a && a.sl) slLine = cs.createPriceLine({ price: slPrice(a), color: '#ff9800', lineStyle: 2, title: 'my SL' });
+  if (o && o.sl) slLine = cs.createPriceLine({ price: slPx(o), color: '#ef5350', lineStyle: 2, title: 'your SL' });
+  document.getElementById('undoB').disabled = !past.length;
+  document.getElementById('redoB').disabled = !future.length;
+  const L = T.slice().sort((a, b) => b.entry - a.entry);
+  document.getElementById('nm').textContent = L.length;
+  document.getElementById('list').innerHTML = L.map(x => {
+    const r = result(x), open = x.side !== 'skip' && (!x.sl || !x.exit);
+    const next = !x.sl ? 'click the SL candle' : 'click the square-off candle';
+    return `<div class="card${open ? ' open' : ''}"><div class="row"><span><span class="lnk" onclick="go(${x.entry})">${fmt(x.entry)}</span> ` +
+      `<b class="${x.side === 'long' ? 'pos' : x.side === 'short' ? 'neg' : 'muted'}">${x.side === 'long' ? 'BUY' : x.side.toUpperCase()}</b></span>` +
+      `<span>${r != null ? `<b class="${r > 0 ? 'pos' : 'neg'}">${r > 0 ? '+' : ''}${r}%</b>` : ''}` +
+      `<button class="del" title="delete" onclick="delTrade(${x.id})">&times;</button></span></div>` +
+      (x.side === 'skip' ? '' : `<div class="muted" style="font-size:12px">SL ${x.sl ? fmt(x.sl).slice(5) + ' @ ' + slPx(x) : '-'} &middot; ` +
+        `out ${x.exit ? fmt(x.exit).slice(5) + ' (' + esc(x.reason) + ')' : '-'}${open ? ` &middot; <span style="color:#ff9800">next: ${next}</span>` : ''}</div>`) +
+      `<input type="text" value="${esc(x.why)}" placeholder="why you ${x.side === 'skip' ? 'skip' : 'enter'}..." onchange="editNote(${x.id},'why',this.value)">` +
+      (x.exit ? `<input type="text" value="${esc(x.exitWhy)}" placeholder="why you exit..." onchange="editNote(${x.id},'exitWhy',this.value)">` : '') +
+      `</div>`;
+  }).join('') || '<div class="muted">None yet.</div>';
 }
-let slLine = null;
-const idx = {}; D.candles.forEach((c, i) => idx[c[0]] = i);
-function entryPx(x) { const i = idx[x.signal]; return i != null && i + 1 < D.candles.length ? D.candles[i + 1][1] : null; }
-function slPrice(x) { const c = byTime[x.sl]; return c ? (x.side === 'short' ? c[2] : c[3]) : null; }
-function res(x) {
-  if (!x.exit || x.side === 'skip') return null;
-  const e = entryPx(x), p = byTime[x.exit][4]; if (!e) return null;
-  return Math.round(10000 * (x.side === 'short' ? (e - p) / e : (p - e) / e)) / 100;
-}
-function select(t) {
-  selected = t; const c = byTime[t]; if (!c) return;
-  let h = `<b>${fmt(t)}</b><br>O ${c[1]} H ${c[2]} L ${c[3]} C ${c[4]}`;
-  (sigAt[t] || []).forEach(s => h += `<br>signal: <b>${s[1]}</b> ${s[2]}`);
-  (trAt[t] || []).forEach(x => h += `<br>our ${x.side}: entry ${x.entry}, stop ${x.stop} (${x.stop_txt}), exit ${x.exit_txt} ` +
-    `${x.how} <span class="${x.pct > 0 ? 'pos' : 'neg'}">${x.pct}%</span>`);
-  if (mineAt[t]) h += `<br>your file: ${mineAt[t].decision} - ${mineAt[t].why}`;
-  mine2.filter(x => x.signal === t).forEach(x => h += `<br>your ${x.side} entry ${x.note ? '- ' + x.note : ''}`);
-  document.getElementById('sel').innerHTML = h;
-  if (stopLine) { cs.removePriceLine(stopLine); stopLine = null; }
-  const tr = (trAt[t] || [])[0];
-  if (tr && tr.stop) stopLine = cs.createPriceLine({ price: tr.stop, color: '#ef5350', lineStyle: 2, title: 'our stop' });
-}
-function go(t) { const i = D.candles.findIndex(c => c[0] === t);
-  chart.timeScale().setVisibleLogicalRange({ from: i - 80, to: i + 40 }); select(t); }
-// click flow: press LONG / SHORT / SKIP once, then click entry -> SL -> square off
-let step = null, pend = null;
-const STEP_TXT = { entry: 'Click the ENTRY (signal) candle', sl: 'Click the SL candle (its low; short: its high)',
-  exit: 'Click the SQUARE-OFF candle' };
-function showStep() {
-  document.getElementById('step').innerHTML = step ? `<b>${pend === 'skip' ? 'SKIP' : pend.toUpperCase()}</b>: ${STEP_TXT[step]}` +
-    ' <span class=muted>(Esc = cancel)</span>' : 'Press LONG / SHORT / SKIP, then click candles.';
-}
-function start(side) { pend = side; step = 'entry'; showStep(); }
-function redo(what) { const a = cur(); if (!a || a.side === 'skip') return; pend = a.side; step = what; showStep(); }
-const e200 = {}, e20 = {};
-D.emas['200'].forEach(x => e200[x[0]] = x[1]); D.emas['20'].forEach(x => e20[x[0]] = x[1]);
-function autoReason(x) {  // guess the exit reason from the square-off candle; changeable in the list
-  const c = byTime[x.exit], S = x.side === 'short', sl = slPrice(x), a = e200[x.exit], b = e20[x.exit];
-  if (sl != null && (S ? c[2] >= sl : c[3] <= sl)) return 'stop';
-  const e = entryPx(x), ai = e200[x.signal];
-  if (a && ai && (S ? e > ai : e < ai) && (S ? c[3] <= a * 1.001 : c[2] >= a * 0.999)) return 'target EMA 200';
-  if (b && (S ? c[2] >= b : c[3] <= b)) return 'EMA 20 breach';
-  if (D.tf !== '1d' && fmt(x.exit).slice(11) >= '15:00') return 'end of day';
-  return 'other';
-}
-chart.subscribeClick(p => {
-  if (!p.time) return;
-  select(p.time);
-  if (!step) return;
-  const t = p.time;
-  if (step === 'entry') {
-    const x = { id: Date.now(), side: pend, signal: t, sl: null, exit: null, reason: '', note: '' };
-    mine2.push(x); active = x.id; step = pend === 'skip' ? null : 'sl';
-  } else if (step === 'sl') {
-    cur().sl = t; step = cur().exit ? null : 'exit';
-  } else if (step === 'exit') {
-    const a = cur();
-    if (t <= a.signal) { document.getElementById('step').innerHTML = '<span class=neg>Square off must be after the entry - click again</span>'; return; }
-    a.exit = t; a.reason = autoReason(a); step = null;
-    document.getElementById('reason').value = a.reason;
-  }
-  document.getElementById('note').value = cur() ? cur().note || '' : '';
-  save(); draw(); showStep();
-});
-function setReason() { const a = cur(); if (a) { a.reason = document.getElementById('reason').value; save(); draw(); } }
-function undo() {  // remove the last click of the active trade
-  const a = cur(); if (!a) return;
-  if (a.exit) { a.exit = null; a.reason = ''; step = 'exit'; pend = a.side; }
-  else if (a.sl) { a.sl = null; step = 'sl'; pend = a.side; }
-  else { delTrade(); step = null; }
-  save(); draw(); showStep();
-}
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
-  const k = e.key.toLowerCase();
-  if (k === 'l') start('long'); else if (k === 's') start('short'); else if (k === 'k') start('skip');
-  else if (k === 'z') undo(); else if (k === 'escape') { step = null; showStep(); }
-  else if (k === 'delete') delTrade();
-});
-function setNote() { const a = cur(); if (a) { a.note = document.getElementById('note').value.trim(); save(); draw(); } }
-function delTrade() { mine2 = mine2.filter(x => x.id !== active); active = null; save(); draw(); }
-function activate(id) { active = id; const a = cur(); draw(); go(a.signal); document.getElementById('note').value = a.note || '';
-  if (a.reason) document.getElementById('reason').value = a.reason; }
 function exportCsv() {
-  // same format as config/research/owner_trades.csv (DD-MM-YYYY HH:MM) -> owner_strategy checks it trade by trade
   const q = s => '"' + String(s || '').replace(/"/g, '""') + '"';
   const dt = t => { if (!t) return ''; const s = fmt(t); return s.slice(8, 10) + '-' + s.slice(5, 7) + '-' + s.slice(0, 4) + s.slice(10); };
-  const lines = ['symbol,tf,side,signal_candle,decision,stop_candle,exit_candle,exit_reason,why'].concat(mine2.map(x => [
-    D.symbol, D.tf, x.side === 'skip' ? ((sigAt[x.signal] || [])[0] || [0, 'long'])[1] : x.side, dt(x.signal),
-    x.side === 'skip' ? 'skip' : 'take', dt(x.sl), dt(x.exit), q(x.reason), q(x.note)].join(',')));
+  const rows = T.slice().sort((a, b) => a.entry - b.entry).map(x => [D.symbol, D.tf,
+    x.side === 'skip' ? (((sigAt[x.entry] || [])[0] || [0, 'long'])[1]) : x.side, dt(x.entry), x.side === 'skip' ? 'skip' : 'take',
+    dt(x.sl), dt(x.exit), q(x.reason), q([x.why, x.exitWhy].filter(Boolean).join(' | exit: '))].join(','));
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }));
+  a.href = URL.createObjectURL(new Blob([['symbol,tf,side,signal_candle,decision,stop_candle,exit_candle,exit_reason,why'].concat(rows).join('\n') + '\n'], { type: 'text/csv' }));
   a.download = `owner_trades-${D.symbol}-${D.tf}.csv`; a.click();
 }
-document.getElementById('tr').innerHTML = D.trades.slice().sort((a, b) => b.signal - a.signal).map(t =>
-  `<tr onclick="go(${t.signal})"><td>${t.signal_txt}</td><td>${t.side}</td><td class="${t.pct > 0 ? 'pos' : 'neg'}">${t.pct}%</td>` +
-  `<td class="muted">${t.how}</td></tr>`).join('');
-document.getElementById('rules').innerHTML = Object.entries(D.rules).map(([s, r]) => `<b>${s}</b>: ${r}`).join('<br><br>');
-const w = D.trades.filter(t => t.pct > 0).length;
-document.getElementById('stats').textContent = `${D.trades.length} trades, ${w} won (${Math.round(100 * w / Math.max(1, D.trades.length))}%), ` +
-  `total ${D.trades.reduce((s, t) => s + t.pct, 0).toFixed(1)}%`;
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+  else if ((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); redo(); }
+  else if (k === 'escape') closePop();
+});
 draw();
 const n = D.candles.length; chart.timeScale().setVisibleLogicalRange({ from: n - 300, to: n + 5 });
 </script></body></html>
@@ -306,12 +301,12 @@ def main(argv: list[str] | None = None) -> int:
         if not o.load():
             return 1
         data = build(o)
-        title = f"{o.sym} {o.tf} - owner strategy trades"
+        title = f"{o.sym} {o.tf} - mark your trades"
         out = o.du.root / "chart.html"
         out.write_text(PAGE.replace("__TITLE__", title).replace("__DATA__", json.dumps(data, separators=(",", ":"))),
                        encoding="utf-8")
-        o.log(f"{len(data['candles']):,} candles, {len(data['trades'])} trades, {len(data['mine'])} of your rows -> {out}")
-        o.log("open it in the browser: click candles to mark long / short / skip, then Export CSV")
+        o.log(f"{len(data['candles']):,} candles, {len(data['mine'])} rows of your trades file -> {out}")
+        o.log("open it in the browser: click a candle -> Buy / Short / Skip, then the SL candle, then square off; Export CSV")
         return 0
     finally:
         o.du.close()
