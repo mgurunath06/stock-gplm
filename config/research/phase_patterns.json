@@ -1,24 +1,25 @@
 {
-  "_doc": "Phase patterns (owner 2026-11-22). Phase per bar from the EMA stack on the stock's own TF; a pattern = 1-3 feature conditions; a 'time' = first bar of a new run of signal bars inside the phase; worked = trade reached +worked_net_pct after costs (target hit before the stop / time exit). Qualifies = its last recent_wins_needed times in that phase all worked -> base confidence; older times in the same phase raise or lower it (ladder, first match wins).",
+  "_doc": "Phase patterns (owner 2026-11-22). Phase per bar from the EMA stack on the stock's own TF; a pattern = 1-3 feature conditions; a 'time' = first bar of a new run of signal bars inside the phase; worked = trade reached +worked_net_pct after costs before the stop (-stop_net_pct after costs) / time exit. Counted BACKWARDS from today: streak = consecutive worked times from the most recent one back to the first failure. Streak >= recent_wins_needed -> base confidence; longer streaks climb the ladder (first match wins).",
   "phase": {
     "bullish": "ema(close, 9) > ema(close, 13) and ema(close, 13) > ema(close, 20) and ema(close, 20) > ema(close, 50)",
     "bearish": "ema(close, 9) < ema(close, 13) and ema(close, 13) < ema(close, 20) and ema(close, 20) < ema(close, 50)"
   },
   "worked_net_pct": 1.0,
+  "stop_net_pct": 0.5,
   "recent_wins_needed": 3,
   "base_confidence": "Medium",
   "confidence_ladder": [
-    {"label": "Very high", "older_min": 20, "older_win_min": 0.65},
-    {"label": "High", "older_min": 10, "older_win_min": 0.60},
-    {"label": "Medium-high", "older_min": 5, "older_win_min": 0.60}
+    {"label": "Very high", "streak_min": 12},
+    {"label": "High", "streak_min": 8},
+    {"label": "Medium-high", "streak_min": 5}
   ],
-  "low_confidence": {"label": "Low (recent luck)", "older_min": 5, "older_win_below": 0.40},
   "exits": {
-    "1d": {"holds": [3, 5, 10], "stops_atr": [1.0, 1.5, 2.0]},
-    "60m": {"holds": [3, 6, 12], "stops_atr": [1.0, 1.5, 2.0]},
-    "15m": {"holds": [4, 8, 16], "stops_atr": [1.0, 1.5, 2.0]},
-    "5m": {"holds": [6, 12, 24], "stops_atr": [1.0, 1.5, 2.0]}
+    "1d": {"holds": [3, 5, 10]},
+    "60m": {"holds": [3, 6, 12]},
+    "15m": {"holds": [4, 8, 16]},
+    "5m": {"holds": [6, 12, 24]}
   },
+  "dedupe_overlap": 0.6,
   "levels": [0.2, 0.4, 0.6, 0.8],
   "triples_from_best_pairs": 200,
   "report_top": 20,

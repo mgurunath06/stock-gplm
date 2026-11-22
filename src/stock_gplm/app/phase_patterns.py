@@ -7,10 +7,12 @@
 * PATTERN = 1-3 conditions on indicator values (MACD below 0, close above VWAP, RSI(3) 55-70, volume 2x previous bar,
   volume slowly falling, ... = config/research/move_features.json + extra_features), levels at the 20/40/60/80% points.
 * A TIME = the first bar of a new run of signal bars while the stock is in that phase (enter next open).
-* WORKED = the trade reached +1% after costs (brokerage/STT/charges of the lane) before the stop (S x ATR) or the time
-  exit (H bars); each pattern uses the exit (H, S) from the grid that suits it best.
-* QUALIFIES = its last 3 times in that phase all worked -> Medium confidence. Older times in the same phase move it:
-  Medium-high / High / Very high with more older times that also worked, or "Low (recent luck)" when they mostly failed.
+* WORKED = the trade reached +1% after costs (brokerage/STT/charges of the lane) before the stop (-0.5% after costs)
+  or the time exit (H bars); each pattern uses the hold H from the grid that suits it best.
+* Counted BACKWARDS FROM TODAY: streak = consecutive worked times from the pattern's most recent time back to its
+  first failure. Streak >= 3 -> Medium; 5 / 8 / 12 -> Medium-high / High / Very high (config ladder).
+* Shown with the phase BASE RATE (how often any bar in the phase reached +1% first) and a METHOD CHECK: in each
+  pattern's history before its current streak, how often did the next time work right after 3 wins in a row?
 * Output <reports>/tuning/phase-patterns-<tf>-<SYMBOL>-<side>/: PATTERNS.md (today's phase, patterns active today, best
   patterns per phase), patterns.csv (every qualifying pattern). All history from 2010 is used; no date split.
 """
@@ -51,9 +53,10 @@ class Finder:
         self.du = Discoverer(a.tf, f"phase-patterns-{a.tf}-{self.sym}-{a.side}", cfg, "@" + str(tmp), 1)
         self.tf, self.short, self.side, self.log = a.tf, a.side == "short", a.side, self.du.log
         ex = self.pc["exits"].get(a.tf) or self.pc["exits"]["1d"]
-        self.exits = [(int(h), float(s)) for h in ex["holds"] for s in ex["stops_atr"]]
+        self.exits = [int(h) for h in ex["holds"]]
         self.R = int(self.pc["recent_wins_needed"])
         self.gain = float(self.pc["worked_net_pct"]) / 100.0
+        self.loss = float(self.pc["stop_net_pct"]) / 100.0
 
     # ------------------------------------------------------------------ data
     def load(self) -> bool:
@@ -88,15 +91,15 @@ class Finder:
         self.win = np.zeros((E, n), bool)
         self.net = np.full((E, n), np.nan)
         self.done = np.zeros((E, n), bool)
-        for k, (h, s) in enumerate(self.exits):
-            t, net, win = self.label(m, n, h, s, L["buy"], L["sell"])
+        for k, h in enumerate(self.exits):
+            t, net, win = self.label(m, n, h, L["buy"], L["sell"])
             self.net[k, t], self.win[k, t], self.done[k, t] = net, win, True
         self.log(f"{n:,} bars {_date(self.days[0])} .. {_date(self.days[-1])}; {len(names)} indicators; phase today: "
                  f"{PHASES[int(self.phase[-1])]}")
         return True
 
-    def label(self, m: Any, n: int, h: int, S: float, buy: float, sell: float):
-        """Every bar: enter next open; worked = +gain net (after costs) reached before the stop / time exit."""
+    def label(self, m: Any, n: int, h: int, buy: float, sell: float):
+        """Every bar: enter next open; worked = +gain net (after costs) reached before -loss net / time exit."""
         natr = np.asarray(m.natr, dtype=float)
         t = np.arange(n - 1)
         t = t[np.isfinite(natr[t])]
@@ -109,12 +112,11 @@ class Finder:
         t, end = t[keep], end[keep]
         o, hi, lo, cl = (np.asarray(x, dtype=float) for x in (m.open, m.high, m.low, m.close))
         ent = o[t + 1]
-        atr = natr[t] * ent
-        g = self.gain
+        g, lz = self.gain, self.loss
         if self.short:
-            tgt, stp = ent * (1 - sell - g) / (1 + buy), ent + S * atr
+            tgt, stp = ent * (1 - sell - g) / (1 + buy), ent * (1 - sell + lz) / (1 + buy)
         else:
-            tgt, stp = ent * (1 + g) * (1 + buy) / (1 - sell), ent - S * atr
+            tgt, stp = ent * (1 + g) * (1 + buy) / (1 - sell), ent * (1 - lz) * (1 + buy) / (1 - sell)
         never = h + 10
         ft, fs = np.full(len(t), never), np.full(len(t), never)
         for k in range(1, h + 1):
@@ -160,37 +162,44 @@ class Finder:
         self.log(f"{len(conds)} conditions")
 
     # ------------------------------------------------------------------ judging
-    def confidence(self, older: int, rate: float) -> tuple[str, int]:
+    def confidence(self, streak: int) -> tuple[str, int]:
         lad = self.pc["confidence_ladder"]
         for i, r in enumerate(lad):
-            if older >= r["older_min"] and rate >= r["older_win_min"]:
+            if streak >= r["streak_min"]:
                 return r["label"], len(lad) - i
-        lo = self.pc.get("low_confidence") or {}
-        if lo and older >= lo["older_min"] and rate < lo["older_win_below"]:
-            return lo["label"], -1
         return self.pc["base_confidence"], 0
 
     def judge(self, sig: np.ndarray) -> dict[str, Any] | None:
-        """Best exit for which the last R times in phase all worked; None if no exit qualifies."""
+        """Best hold for which the streak (worked times counted back from the latest) is >= R; None otherwise.
+        Also the method check: in the history BEFORE the streak (and before the failure that ends it), each time
+        that came right after R wins in a row -> did it work?"""
         st = np.flatnonzero(sig & ~np.r_[False, sig[:-1]])
         if len(st) < self.R:
             return None
         best = None
+        R = self.R
         for e in range(len(self.exits)):
             s = st[self.done[e, st]]
-            if len(s) < self.R:
+            if len(s) < R:
                 continue
             w = self.win[e, s]
-            if not w[-self.R:].all():
+            if not w[-R:].all():
                 continue
-            ow = w[:-self.R]
-            no = len(ow)
-            rate = float(ow.mean()) if no else 0.0
-            label, rank = self.confidence(no, rate)
-            key = (rank, te.win_low(rate, no) if no else 0.0, no)
+            fails = np.flatnonzero(~w)
+            streak = len(w) - (int(fails[-1]) + 1 if len(fails) else 0)
+            before = w[:max(len(w) - streak - 1, 0)]
+            ck_n = ck_w = 0
+            if len(before) > R:
+                c = np.convolve(before.astype(int), np.ones(R, int), "valid")[:-1]  # wins in each R-window
+                nxt = before[R:]
+                hit = c == R
+                ck_n, ck_w = int(hit.sum()), int(nxt[hit].sum())
+            label, rank = self.confidence(streak)
+            key = (rank, streak, float(np.mean(self.net[e, s])))
             if best is None or key > best["key"]:
-                best = {"key": key, "e": e, "times": s, "older": no, "older_won": int(ow.sum()), "rate": rate,
-                        "conf": label, "rank": rank, "avg": float(np.mean(self.net[e, s]))}
+                best = {"key": key, "e": e, "times": s, "streak": streak, "all_won": int(w.sum()),
+                        "conf": label, "rank": rank, "avg": float(np.mean(self.net[e, s])), "ck_n": ck_n,
+                        "ck_w": ck_w}
         return best
 
     def search(self, P: int) -> list[tuple[tuple[int, ...], dict]]:
@@ -249,12 +258,41 @@ class Finder:
     def rtext(self, rule: tuple[int, ...]) -> str:
         return " AND ".join(self.ctext(self.conds[c]) for c in rule)
 
-    def row(self, rule: tuple[int, ...], r: dict) -> str:
-        h, s = self.exits[r["e"]]
-        last = ", ".join(_date(self.days[t]) for t in r["times"][-self.R:])
-        older = f"{r['older_won']} of {r['older']} ({r['rate']:.0%})" if r["older"] else "none"
-        return (f"| {self.rtext(rule)} | stop {s:g} ATR, max {h} bars | **{r['conf']}** | {last} | {older} | "
-                f"{100 * r['avg']:+.2f}% |")
+    def row(self, rule: tuple[int, ...], r: dict, P: int) -> str:
+        h = self.exits[r["e"]]
+        last = ", ".join(_date(self.days[t]) for t in r["times"][-self.R:][::-1])
+        n = len(r["times"])
+        rate = r["all_won"] / n
+        base = self.base[P][r["e"]]
+        return (f"| {self.rtext(rule)} | max {h} bars | **{r['conf']}** | {r['streak']} | {last} | "
+                f"{r['all_won']} of {n} ({rate:.0%}, x{rate / base:.1f} base) | {100 * r['avg']:+.2f}% |"
+                if base > 0 else f"| {self.rtext(rule)} | max {h} bars | **{r['conf']}** | {r['streak']} | {last} | "
+                f"{r['all_won']} of {n} | {100 * r['avg']:+.2f}% |")
+
+    def distinct(self, lst: list[tuple[tuple[int, ...], dict]], top: int) -> list[tuple[tuple[int, ...], dict]]:
+        """Skip patterns whose times overlap an already shown pattern by more than dedupe_overlap (same idea)."""
+        lim = float(self.pc.get("dedupe_overlap", 0.6))
+        shown: list[tuple[tuple[int, ...], dict, set]] = []
+        for r, x in lst:
+            ts = set(x["times"].tolist())
+            if any(len(ts & s) / max(min(len(ts), len(s)), 1) > lim for _, _, s in shown):
+                continue
+            shown.append((r, x, ts))
+            if len(shown) >= top:
+                break
+        return [(r, x) for r, x, _ in shown]
+
+    def method_check(self, lst: list[tuple[tuple[int, ...], dict]], P: int) -> str:
+        n = sum(x["ck_n"] for _, x in lst)
+        w = sum(x["ck_w"] for _, x in lst)
+        if not n:
+            return "Method check: no earlier 3-in-a-row cases to test."
+        base = float(np.mean(self.base[P]))
+        verdict = ("better than the base rate - '3 in a row' does carry information" if w / n > base + 0.05 else
+                   "about the base rate - '3 in a row' alone predicts little here; prefer long streaks"
+                   if w / n > base - 0.05 else "below the base rate - streaks tend to break here")
+        return (f"Method check (history before each pattern's current streak): right after 3 wins in a row, the next "
+                f"time worked **{w / n:.0%}** of {n:,} cases vs base {base:.0%} -> {verdict}.")
 
     # ------------------------------------------------------------------ run
     def run(self) -> int:
@@ -266,46 +304,54 @@ class Finder:
         k = now
         while k > 0 and self.phase[k - 1] == P:
             k -= 1
+        self.base = {}
+        for q in (1, 0, -1):
+            sel = self.ok & (self.phase == q)
+            self.base[q] = [float(self.win[e, sel & self.done[e]].mean()) if (sel & self.done[e]).any() else 0.0
+                            for e in range(len(self.exits))]
         res = {p: self.search(p) for p in (P, *[q for q in (1, 0, -1) if q != P])}
         top = int(self.pc["report_top"])
-        head = ["| Pattern | Exit | Confidence | Last 3 times (all worked) | Older times in phase that worked | "
-                "Avg net, all times |", "|---|---|---|---|---|---|"]
+        head = ["| Pattern | Exit | Confidence | Streak (back from today) | Last 3 times, newest first | "
+                "All times in phase that worked | Avg net, all times |", "|---|---|---|---|---|---|---|"]
         md = [f"# Phase patterns - {self.sym} {self.tf} {self.side}", "",
               f"Last bar {_date(self.days[now])}: phase **{PHASES[P]}** since {_date(self.days[k])} "
               f"({now - k + 1} bars). Phase: bullish = EMA9 > EMA13 > EMA20 > EMA50, bearish = the reverse, "
               "sideways = anything else.",
-              f"A pattern qualifies when its last {self.R} times in the phase all reached +{100 * self.gain:g}% after "
-              "costs before the stop / time exit (Medium). Older times in the same phase raise the confidence when "
-              "they also worked, or mark it 'Low (recent luck)' when they mostly failed. With thousands of "
-              "combinations some 3-in-a-row are luck - trust patterns with many older times behind them.", ""]
+              f"Trade: enter next open; worked = +{100 * self.gain:g}% after costs before -{100 * self.loss:g}% after "
+              f"costs or the time exit. Streak = worked times in a row counted back from the pattern's most recent "
+              f"time; >= {self.R} = Medium, longer = higher (" + ", ".join(
+                  f"{r['label']} >= {r['streak_min']}" for r in self.pc["confidence_ladder"]) + "). "
+              "Near-duplicate patterns (same signals) are shown once.", ""]
         for q in (1, 0, -1):
             lst = res[q]
             n_conf: dict[str, int] = {}
             for _, x in lst:
                 n_conf[x["conf"]] = n_conf.get(x["conf"], 0) + 1
             md += [f"## {PHASES[q]}" + (" - CURRENT PHASE" if q == P else ""), "",
+                   "Base rate (any bar in this phase reached +1% first): " + ", ".join(
+                       f"{b:.0%} within {h} bars" for h, b in zip(self.exits, self.base[q])) + ".",
                    f"{len(lst):,} qualifying patterns: " + (", ".join(f"{v} {k}" for k, v in sorted(
-                       n_conf.items(), key=lambda kv: -kv[1])) or "none") + ".", ""]
+                       n_conf.items(), key=lambda kv: -kv[1])) or "none") + ".", "", self.method_check(lst, q), ""]
             if q == P:
                 active = [(r, x) for r, x in lst if np.logical_and.reduce(self.M[list(r), now]) and self.ok[now]]
                 md += ["### Active today (pattern true on the last bar)", ""]
-                md += (head + [self.row(r, x) for r, x in active[:top]]) if active else [
+                md += (head + [self.row(r, x, q) for r, x in self.distinct(active, top)]) if active else [
                     "None of the qualifying patterns is true on the last bar."]
                 md += ["", "### Best patterns in this phase (watch list)", ""]
-            md += (head + [self.row(r, x) for r, x in lst[:top]]) if lst else ["No pattern qualified."]
+            md += (head + [self.row(r, x, q) for r, x in self.distinct(lst, top)]) if lst else ["No pattern qualified."]
             md.append("")
         root = self.du.root
         (root / "PATTERNS.md").write_text("\n".join(md) + "\n", encoding="utf-8")
         with (root / "patterns.csv").open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["phase", "pattern", "hold_bars", "stop_atr", "confidence", "times", "older", "older_won",
-                        "avg_net_pct", "last_time", "active_today"])
+            w.writerow(["phase", "pattern", "hold_bars", "confidence", "streak", "times", "times_won",
+                        "avg_net_pct", "last_time", "active_today", "check_cases", "check_won"])
             for q, lst in res.items():
                 for r, x in lst:
-                    h, s = self.exits[x["e"]]
                     act = q == P and bool(np.logical_and.reduce(self.M[list(r), now]))
-                    w.writerow([PHASES[q], self.rtext(r), h, s, x["conf"], len(x["times"]), x["older"],
-                                x["older_won"], round(100 * x["avg"], 3), _date(self.days[x["times"][-1]]), act])
+                    w.writerow([PHASES[q], self.rtext(r), self.exits[x["e"]], x["conf"], x["streak"],
+                                len(x["times"]), x["all_won"], round(100 * x["avg"], 3),
+                                _date(self.days[x["times"][-1]]), act, x["ck_n"], x["ck_w"]])
         self.log(f"report: {root / 'PATTERNS.md'}")
         return 0
 
