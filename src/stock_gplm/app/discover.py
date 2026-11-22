@@ -162,6 +162,32 @@ class Discoverer(Tuner):
         out += [f"+ {c[3]}: {100 * c[0]:+.2f}% / {c[1]:.0%} / {c[2]:.1%}" for c in cells[:10]]
         out.append("Worst combinations (avoid):")
         out += [f"- {c[3]}: {100 * c[0]:+.2f}% / {c[1]:.0%} / {c[2]:.1%}" for c in cells[-3:][::-1]]
+        # 3-condition combinations (owner 2026-11-22: behaviour comes in combinations) - only the 12 features with
+        # the largest quintile spread, and the same minimum trade count, to keep it fast and not chase luck
+        top = [j for j in J if names[j] in {s[1].split(":")[0][2:] for s in spreads[:12]}]
+        tri = []
+        for ia in range(len(top)):
+            for ib in range(ia + 1, len(top)):
+                for ic in range(ib + 1, len(top)):
+                    a, b, c3 = top[ia], top[ib], top[ic]
+                    ok = (bins[:, a] >= 0) & (bins[:, b] >= 0) & (bins[:, c3] >= 0)
+                    idx = (bins[ok, a].astype(np.int32) * 25 + bins[ok, b].astype(np.int32) * 5 + bins[ok, c3])
+                    cnt = np.bincount(idx, minlength=125)
+                    sw_ = np.bincount(idx, weights=w[ok], minlength=125)
+                    sn = np.bincount(idx, weights=w[ok] * net[ok], minlength=125)
+                    swin = np.bincount(idx, weights=w[ok] * (net[ok] > 0), minlength=125)
+                    for c in np.flatnonzero(cnt >= min_n):
+                        if sw_[c] <= 0:
+                            continue
+                        qa, rest = divmod(int(c), 25)
+                        qb, qc = divmod(rest, 5)
+                        tri.append((sn[c] / sw_[c], swin[c] / sw_[c], cnt[c] / N,
+                                    f"{names[a]} {self._rng(edges[a], qa)} AND {names[b]} {self._rng(edges[b], qb)} "
+                                    f"AND {names[c3]} {self._rng(edges[c3], qc)}"))
+        tri.sort(key=lambda r: -r[0])
+        if tri:
+            out.append(f"Best 3-condition combinations (>= {min_n:,} trades): avg net / win / share of bars")
+            out += [f"+ {c[3]}: {100 * c[0]:+.2f}% / {c[1]:.0%} / {c[2]:.1%}" for c in tri[:8]]
         out.append("")
         return out
 
@@ -228,7 +254,7 @@ Output JSON exactly like: {SCHEMA}
             if p is None:
                 continue
             try:
-                reply = tl.call(p, model, SYSTEM, prompt, max_tokens=5000, temperature=temp)
+                reply = tl.call(p, model, SYSTEM, prompt, max_tokens=3500, temperature=temp)
                 used = pname
                 break
             except (tl.LLMError, OSError, TimeoutError) as exc:
