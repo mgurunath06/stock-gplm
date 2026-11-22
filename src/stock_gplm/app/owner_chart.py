@@ -104,19 +104,19 @@ PAGE = r"""<!doctype html>
 </header>
 <div id="wrap"><div id="chart"></div>
 <aside>
- <div class="muted">1. Click the signal candle, press ENTRY. 2. Click the candle whose low (short: high) is your
-  stop, press SL. 3. Click the candle where you'd exit, pick the reason, press SQUARE OFF. Scroll / drag to move, wheel to zoom.</div>
- <h3>Selected candle</h3><div id="sel" class="box muted">none</div>
- <div><button class="l" onclick="newTrade('long')">ENTRY long</button><button class="s" onclick="newTrade('short')">ENTRY short</button>
-  <button class="k" onclick="newTrade('skip')">SKIP this signal</button></div>
- <h3>Active trade</h3><div id="act" class="box muted">none - press ENTRY</div>
- <div><button onclick="setSL()">SL = this candle</button>
-  <select id="reason" style="background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:5px">
+ <div><button class="l" onclick="start('long')">LONG (L)</button><button class="s" onclick="start('short')">SHORT (S)</button>
+  <button class="k" onclick="start('skip')">SKIP (K)</button><button onclick="undo()">Undo (Z)</button></div>
+ <div id="step" class="box" style="font-size:14px;border-color:#ff9800">Press LONG / SHORT / SKIP, then click candles.</div>
+ <div class="muted">Long / short = 3 clicks: entry candle, SL candle, square-off candle (reason filled in automatically).
+  Skip = 1 click. Esc = cancel. Scroll / drag to move, wheel to zoom.</div>
+ <h3>Active trade</h3><div id="act" class="box muted">none</div>
+ <div>reason <select id="reason" onchange="setReason()" style="background:#131722;color:#d1d4dc;border:1px solid #363a45;border-radius:4px;padding:5px">
    <option>target EMA 200</option><option>EMA 20 breach</option><option>stop</option><option>trailing stop</option>
    <option>end of day</option><option>other</option></select>
-  <button onclick="setExit()">SQUARE OFF here</button></div>
+  <button onclick="redo('sl')">re-click SL</button><button onclick="redo('exit')">re-click square off</button></div>
  <textarea id="note" rows="2" placeholder="why (optional) - e.g. no PDH break, too far from EMA 200" onchange="setNote()"></textarea>
  <div><button onclick="delTrade()">Delete active trade</button></div>
+ <h3>Clicked candle</h3><div id="sel" class="box muted">none</div>
  <h3>Your trades (<span id="nm">0</span>)</h3>
  <div><button onclick="exportCsv()">Export CSV</button><button onclick="if(confirm('Delete ALL your trades?')){mine2=[];active=null;save();draw();}">Clear all</button></div>
  <table id="mk"></table>
@@ -210,28 +210,65 @@ function select(t) {
 }
 function go(t) { const i = D.candles.findIndex(c => c[0] === t);
   chart.timeScale().setVisibleLogicalRange({ from: i - 80, to: i + 40 }); select(t); }
-chart.subscribeClick(p => { if (p.time) select(p.time); });
-function need(msg) { if (selected == null) { alertBox(msg); return false; } return true; }
-function alertBox(msg) { document.getElementById('sel').innerHTML = '<span class=neg>' + msg + '</span>'; }
-function newTrade(side) {
-  if (!need('click a candle first')) return;
-  const x = { id: Date.now(), side, signal: selected, sl: null, exit: null, reason: '', note: document.getElementById('note').value.trim() };
-  mine2.push(x); active = x.id; save(); draw(); select(selected);
+// click flow: press LONG / SHORT / SKIP once, then click entry -> SL -> square off
+let step = null, pend = null;
+const STEP_TXT = { entry: 'Click the ENTRY (signal) candle', sl: 'Click the SL candle (its low; short: its high)',
+  exit: 'Click the SQUARE-OFF candle' };
+function showStep() {
+  document.getElementById('step').innerHTML = step ? `<b>${pend === 'skip' ? 'SKIP' : pend.toUpperCase()}</b>: ${STEP_TXT[step]}` +
+    ' <span class=muted>(Esc = cancel)</span>' : 'Press LONG / SHORT / SKIP, then click candles.';
 }
-function setSL() {
-  const a = cur(); if (!a || a.side === 'skip') return alertBox('press ENTRY long / short first');
-  if (!need('click the SL candle first')) return;
-  a.sl = selected; save(); draw();
+function start(side) { pend = side; step = 'entry'; showStep(); }
+function redo(what) { const a = cur(); if (!a || a.side === 'skip') return; pend = a.side; step = what; showStep(); }
+const e200 = {}, e20 = {};
+D.emas['200'].forEach(x => e200[x[0]] = x[1]); D.emas['20'].forEach(x => e20[x[0]] = x[1]);
+function autoReason(x) {  // guess the exit reason from the square-off candle; changeable in the list
+  const c = byTime[x.exit], S = x.side === 'short', sl = slPrice(x), a = e200[x.exit], b = e20[x.exit];
+  if (sl != null && (S ? c[2] >= sl : c[3] <= sl)) return 'stop';
+  const e = entryPx(x), ai = e200[x.signal];
+  if (a && ai && (S ? e > ai : e < ai) && (S ? c[3] <= a * 1.001 : c[2] >= a * 0.999)) return 'target EMA 200';
+  if (b && (S ? c[2] >= b : c[3] <= b)) return 'EMA 20 breach';
+  if (D.tf !== '1d' && fmt(x.exit).slice(11) >= '15:00') return 'end of day';
+  return 'other';
 }
-function setExit() {
-  const a = cur(); if (!a || a.side === 'skip') return alertBox('press ENTRY long / short first');
-  if (!need('click the square-off candle first')) return;
-  if (selected <= a.signal) return alertBox('square off must be after the entry candle');
-  a.exit = selected; a.reason = document.getElementById('reason').value; save(); draw();
+chart.subscribeClick(p => {
+  if (!p.time) return;
+  select(p.time);
+  if (!step) return;
+  const t = p.time;
+  if (step === 'entry') {
+    const x = { id: Date.now(), side: pend, signal: t, sl: null, exit: null, reason: '', note: '' };
+    mine2.push(x); active = x.id; step = pend === 'skip' ? null : 'sl';
+  } else if (step === 'sl') {
+    cur().sl = t; step = cur().exit ? null : 'exit';
+  } else if (step === 'exit') {
+    const a = cur();
+    if (t <= a.signal) { document.getElementById('step').innerHTML = '<span class=neg>Square off must be after the entry - click again</span>'; return; }
+    a.exit = t; a.reason = autoReason(a); step = null;
+    document.getElementById('reason').value = a.reason;
+  }
+  document.getElementById('note').value = cur() ? cur().note || '' : '';
+  save(); draw(); showStep();
+});
+function setReason() { const a = cur(); if (a) { a.reason = document.getElementById('reason').value; save(); draw(); } }
+function undo() {  // remove the last click of the active trade
+  const a = cur(); if (!a) return;
+  if (a.exit) { a.exit = null; a.reason = ''; step = 'exit'; pend = a.side; }
+  else if (a.sl) { a.sl = null; step = 'sl'; pend = a.side; }
+  else { delTrade(); step = null; }
+  save(); draw(); showStep();
 }
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  const k = e.key.toLowerCase();
+  if (k === 'l') start('long'); else if (k === 's') start('short'); else if (k === 'k') start('skip');
+  else if (k === 'z') undo(); else if (k === 'escape') { step = null; showStep(); }
+  else if (k === 'delete') delTrade();
+});
 function setNote() { const a = cur(); if (a) { a.note = document.getElementById('note').value.trim(); save(); draw(); } }
 function delTrade() { mine2 = mine2.filter(x => x.id !== active); active = null; save(); draw(); }
-function activate(id) { active = id; const a = cur(); draw(); go(a.signal); document.getElementById('note').value = a.note || ''; }
+function activate(id) { active = id; const a = cur(); draw(); go(a.signal); document.getElementById('note').value = a.note || '';
+  if (a.reason) document.getElementById('reason').value = a.reason; }
 function exportCsv() {
   // same format as config/research/owner_trades.csv (DD-MM-YYYY HH:MM) -> owner_strategy checks it trade by trade
   const q = s => '"' + String(s || '').replace(/"/g, '""') + '"';
