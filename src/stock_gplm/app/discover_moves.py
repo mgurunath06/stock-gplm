@@ -82,6 +82,7 @@ class MoveDiscoverer(Discoverer):
                               "how many stocks would show it by luck at the overall pass rate. CONFIRM = the same rule "
                               "on the same stocks' unseen bars (never shown to the LLM). Holds = share of those stocks "
                               "whose CONFIRM hit rate beat their own TUNE base rate (>= 5 confirm bars).", ""], {}
+        per_stock_md = [f"# Per-stock move rules {self.tf} ({self.name}) - every stock's own rules", ""]
         for v in probes:
             raw = res[v.vid].get("raw")
             if raw is None or "feat" not in raw:
@@ -95,12 +96,14 @@ class MoveDiscoverer(Discoverer):
             w = te.weights(day[m], self.confirm_day - 1, float(self.t["decay"]))
             label = v.vid.split("~")[1]
             L += self._move_facts(label, hit, net, feat, w, names)
-            facts_lines, rep_lines, js = self._stock_rules(label, raw, m, day >= self.confirm_day, names)
+            facts_lines, rep_lines, js, ps_lines = self._stock_rules(label, raw, m, day >= self.confirm_day, names)
             L += facts_lines + [""]
             report += rep_lines
+            per_stock_md += ps_lines
             rules_json[label] = js
         (self.root / "STOCK_RULES.md").write_text("\n".join(report) + "\n", encoding="utf-8")
         (self.root / "stock_rules.json").write_text(json.dumps(rules_json, indent=1), encoding="utf-8")
+        (self.root / "PER_STOCK_RULES.md").write_text("\n".join(per_stock_md) + "\n", encoding="utf-8")
         self.log(f"per-stock rules: {self.root / 'STOCK_RULES.md'}")
         txt = "\n".join(L)
         self.state["facts"] = txt
@@ -182,6 +185,11 @@ class MoveDiscoverer(Discoverer):
         for j, qs in edges.items():
             ok = np.isfinite(feat[:, j])
             bins[ok, j] = np.searchsorted(qs, feat[ok, j], side="right")
+        pid = te.period_of(raw["day"].astype(np.int64), "month" if self.intraday else "year")
+        per = (pid - pid.min()).astype(np.int64)
+        P = int(per.max()) + 1 if len(per) else 1
+        per_stock: dict[int, list[tuple]] = {}
+        elig_s = np.zeros(S, np.int64)
         nb_t = np.bincount(st[tune], minlength=S)
         base_t = np.bincount(st[tune], weights=hit[tune], minlength=S) / np.maximum(nb_t, 1)
         mb, mh, lift = int(self.sr["min_bars"]), int(self.sr["min_hits"]), float(self.sr["lift"])
@@ -204,11 +212,26 @@ class MoveDiscoverer(Discoverer):
                            & (s_t > 0))
                 n_pass += int(ok_pass.sum())
                 n_elig += int(elig.sum())
+                elig_s += elig.sum(axis=1)
+                if not ok_pass.any():
+                    continue
                 cnt = ok_pass.sum(axis=0)
+                n_c, h_c, s_c = agg(ok & conf)
+                # per-stock view (owner 2026-11-22): every passing rule of every stock, with consistency = periods
+                # (years daily / months intraday, >= 3 bars) in which it beat the stock's own base rate
+                selp = ok & tune
+                kp = key[selp] * P + per[selp]
+                pn = np.bincount(kp, minlength=S * 25 * P).reshape(S, 25, P)
+                ph = np.bincount(kp, weights=hit[selp], minlength=S * 25 * P).reshape(S, 25, P)
+                for s_, c_ in zip(*np.nonzero(ok_pass)):
+                    okp = pn[s_, c_] >= 3
+                    good = int((ph[s_, c_][okp] / pn[s_, c_][okp] > base_t[s_]).sum())
+                    per_stock.setdefault(int(s_), []).append(
+                        (a, b, int(c_), int(n_t[s_, c_]), float(h_t[s_, c_]), float(s_t[s_, c_]), int(okp.sum()), good,
+                         int(n_c[s_, c_]), float(h_c[s_, c_]), float(s_c[s_, c_]), int(cnt[c_])))
                 cells = np.flatnonzero(cnt >= int(self.sr["min_stocks"]))
                 if not len(cells):
                     continue
-                n_c, h_c, s_c = agg(ok & conf)
                 for c in cells:
                     stocks = np.flatnonzero(ok_pass[:, c])
                     found.append({"a": a, "b": b, "qa": int(c) // 5, "qb": int(c) % 5, "stocks": stocks,
@@ -250,7 +273,49 @@ class MoveDiscoverer(Discoverer):
         if len(facts) == 1:
             facts.append("- none beyond chance")
         rep_lines.append("")
-        return facts, rep_lines, {"pass_rate": p_pass, "rules": js}
+        ps_lines, ps_json = self._per_stock(label, per_stock, base_t, elig_s, p_pass, names)
+        return facts, rep_lines, {"pass_rate": p_pass, "rules": js, "per_stock": ps_json}, ps_lines
+
+    def _per_stock(self, label: str, per_stock: Mapping[int, list[tuple]], base_t: np.ndarray, elig_s: np.ndarray,
+                   p_pass: float, names: list[str]) -> tuple[list[str], dict]:
+        """Per stock: its rules ranked by cautious extra hit rate (lower 20% estimate minus the stock's base rate),
+        with lift, consistency, how many other stocks share the rule (a bonus, not a requirement) and CONFIRM."""
+        from scipy.stats import beta
+        ranked = []
+        for si, items in per_stock.items():
+            base = float(base_t[si])
+            rows = []
+            for a, b, c, n, h, sn, np_, good, nc, hc, sc, also in items:
+                low = float(beta.ppf(0.2, h + 1, n - h + 1))
+                rows.append({"rule": f"{self._cond(names, a, c // 5)} and {self._cond(names, b, c % 5)}", "bars": n,
+                             "hit": h / n, "lift": (h / n) / base if base > 0 else 0.0, "hit_low": low,
+                             "extra_low": low - base, "avg_net": sn / n, "periods": np_, "periods_good": good,
+                             "also_on": also - 1, "confirm_bars": nc, "confirm_hit": hc / nc if nc else None,
+                             "confirm_avg_net": sc / nc if nc else None})
+            rows.sort(key=lambda r: (-r["extra_low"], -r["periods_good"]))
+            sym = self.stocks[si] if si < len(self.stocks) else str(si)
+            ranked.append((rows[0]["extra_low"], sym, base, len(items), p_pass * float(elig_s[si]), rows[:10]))
+        ranked.sort(key=lambda r: -r[0])
+        per = "year" if not self.intraday else "month"
+        L = [f"## {label}", "", f"Per stock, best first. Rules ranked by CAUTIOUS extra hit rate (lower 20% estimate "
+             f"minus the stock's own base rate). Consistent = {per}s (with >= 3 bars) in which the rule beat the base. "
+             "Also on = other stocks where the same rule passed (a bonus, not required). Luck = rules this stock would "
+             "pass by chance at the overall pass rate - if 'rules passed' is not well above it, treat its list as noise. "
+             "CONFIRM = the stock's unseen bars.", ""]
+        js = {}
+        for best, sym, base, npass, luck, rows in ranked:
+            L += [f"### {sym}: base hit rate {base:.0%}, {npass} rules passed (luck ~{luck:.0f})", "",
+                  f"| Rule | Bars | Hit | Lift | Cautious hit | Consistent | Also on | CONFIRM bars / hit / avg net |",
+                  "|---|---|---|---|---|---|---|---|"]
+            for r in rows[:5]:
+                cf = (f"{r['confirm_bars']} / {r['confirm_hit']:.0%} / {100 * r['confirm_avg_net']:+.2f}%"
+                      if r["confirm_bars"] else "0")
+                L.append(f"| {r['rule']} | {r['bars']} | {r['hit']:.0%} | x{r['lift']:.1f} | {r['hit_low']:.0%} | "
+                         f"{r['periods_good']} of {r['periods']} | {r['also_on']} | {cf} |")
+            L.append("")
+            js[sym] = {"base_hit": round(base, 4), "rules_passed": npass, "luck": round(luck, 1),
+                       "rules": [{k: (round(v, 5) if isinstance(v, float) else v) for k, v in r.items()} for r in rows]}
+        return L, js
 
     def _combos(self, k: int, cols: list[int], bins: np.ndarray, edges: Mapping[int, np.ndarray], hit: np.ndarray,
                 net: np.ndarray, w: np.ndarray, names: list[str], min_n: int) -> list[tuple]:
