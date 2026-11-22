@@ -50,6 +50,17 @@ CSV reading rules: dates are DD-MM-YYYY (Excel); times < 09:15 are PM (02:30 = 1
 3. Shorts: same-day only (cash), or overnight allowed (7 Sep stop came from 4 Sep)?
 4. Exactly which swing low (lowest low of the pullback? pivot strength?).
 
+**Owner answers (session 10, 2026-11-22):**
+1. PDH: NOT a rule - only the reason for skipping 16 Sep (a feature for the learning step).
+2. Works on ALL stocks, but every stock gets its own signals and verdict irrespective of other stocks.
+3. Cash shorts same-day (15:15 square-off); options can be multi-day (deferred).
+4. Stop = lowest low of the pullback (encoded: last run of EMA13 < EMA20 up to the signal candle).
+
+**Session 10 build:** engine `exit.pullback_stop {fast, slow, buffer, lookback}` and `exit.ema_regime {anchor,
+trail, target live|fixed, breach_fill close|next_open}`; `app/owner_strategy.py` + `config/research/owner_strategy.json`
+(check vs owner_trades.csv for 4 exit readings, signals not in the file, every trade, label, today's signal).
+`& $py -m stock_gplm.app.owner_strategy --symbol RELIANCE`
+
 ## 2. NEXT TASK (owner's direction, agreed in principle)
 
 "Train on just this one (keep the others) - learn when it succeeds and when it fails."

@@ -252,6 +252,22 @@ def validate(doc: Mapping[str, Any]) -> tuple[tuple | None, tuple | None, dict[s
         if not 0 <= float(sw.get("buffer", 0.002)) <= 0.05 or not 0.2 <= float(sw.get("rr", 2.0)) <= 10 \
                 or not 3 <= int(sw.get("lookback", 20)) <= 200:
             raise StrategyConfigError("exit.swing_stop: buffer 0..0.05, rr 0.2..10, lookback 3..200")
+    pb = ex.get("pullback_stop")  # owner 2026-11-22: stop beyond the lowest low of the pullback
+    if pb is not None:
+        if not isinstance(pb, dict) or set(pb) - {"fast", "slow", "buffer", "lookback"}:
+            raise StrategyConfigError("exit.pullback_stop must be {fast, slow, buffer, lookback}")
+        if not 2 <= int(pb.get("fast", 13)) < int(pb.get("slow", 20)) <= 500 \
+                or not 0 <= float(pb.get("buffer", 0.0)) <= 0.05 or not 5 <= int(pb.get("lookback", 400)) <= 5000:
+            raise StrategyConfigError("exit.pullback_stop: 2 <= fast < slow <= 500, buffer 0..0.05, lookback 5..5000")
+    rg = ex.get("ema_regime")  # owner 2026-11-22: below EMA anchor -> target it; above -> exit on EMA trail breach
+    if rg is not None:
+        if not isinstance(rg, dict) or set(rg) - {"anchor", "trail", "target", "breach_fill"}:
+            raise StrategyConfigError("exit.ema_regime must be {anchor, trail, target, breach_fill}")
+        if not 2 <= int(rg.get("trail", 20)) < int(rg.get("anchor", 200)) <= 500 \
+                or rg.get("target", "live") not in ("live", "fixed") \
+                or rg.get("breach_fill", "close") not in ("close", "next_open"):
+            raise StrategyConfigError("exit.ema_regime: 2 <= trail < anchor <= 500, target live|fixed, "
+                                      "breach_fill close|next_open")
     needs = dsl.requirements(enode)
     if xnode is not None:
         for k, v in dsl.requirements(xnode).items():

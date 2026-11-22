@@ -70,6 +70,25 @@ class Exit:
     swing_strength: int = 2
     target_ema: int | None = None
     min_rr: float | None = None
+    # owner strategy 2026-11-22 (EMA13 x EMA20): stop `pullback_buffer` beyond the lowest low (long) / highest high
+    # (short) of the pullback = the last run of candles with EMA(fast) below (short: above) EMA(slow), up to the signal
+    # candle. Can be days back.
+    pullback_fast: int | None = None
+    pullback_slow: int = 20
+    pullback_buffer: float = 0.0
+    pullback_lookback: int = 400
+    # owner conditional exit: signal close below (short: above) EMA(anchor) -> target = EMA(anchor) (live: the EMA of the
+    # previous candle, i.e. known at each candle's open; fixed: the signal candle's EMA); otherwise hold until a close
+    # breaches EMA(trail), filled at that close or at the next open.
+    regime_anchor: int | None = None
+    regime_trail: int = 20
+    regime_fixed: bool = False
+    regime_next_open: bool = False
+
+    @property
+    def structural(self) -> bool:
+        """Held to stop / target / structure exit only - no bar limit (intraday: until the 15:15 square-off)."""
+        return self.swing_buffer is not None or self.pullback_fast is not None or self.regime_anchor is not None
 
     @staticmethod
     def of(d: Mapping[str, Any]) -> "Exit":
@@ -77,12 +96,17 @@ class Exit:
         mx = sw.get("max_swing_pct") if sw else None
         sp, tp = d.get("stop_pct"), d.get("target_pct")
         te_, mr = d.get("target_ema"), d.get("min_rr")
+        pb, rg = d.get("pullback_stop") or {}, d.get("ema_regime") or {}
         return Exit(int(d["max_hold_bars"]), d.get("stop_atr"), d.get("target_atr"), d.get("trail_atr"),
                     float(sw.get("buffer", 0.002)) if sw else None, float(sw.get("rr", 2.0)),
                     int(sw.get("lookback", 20)), float(mx) if mx is not None else None,
                     float(sp) if sp else None, float(tp) if tp else None, bool(d.get("overnight", False)),
                     int(sw.get("strength", 2)) if sw else 2, int(te_) if te_ else None,
-                    float(mr) if mr is not None else None)
+                    float(mr) if mr is not None else None,
+                    int(pb.get("fast", 13)) if pb else None, int(pb.get("slow", 20)), float(pb.get("buffer", 0.0)),
+                    int(pb.get("lookback", 400)),
+                    int(rg.get("anchor", 200)) if rg else None, int(rg.get("trail", 20)),
+                    rg.get("target", "live") == "fixed", rg.get("breach_fill", "close") == "next_open")
 
     def key(self) -> str:
         k = ExitPolicy(self.max_hold, self.stop_atr, self.target_atr, self.trail_atr).key()
@@ -100,6 +124,11 @@ class Exit:
             k += f"|tema{self.target_ema}"
         if self.min_rr is not None:
             k += f"|minrr{self.min_rr:g}"
+        if self.pullback_fast is not None:
+            k += f"|pullback:{self.pullback_fast}:{self.pullback_slow}:{self.pullback_buffer:g}:{self.pullback_lookback}"
+        if self.regime_anchor is not None:
+            k += (f"|regime:{self.regime_anchor}:{self.regime_trail}:{'fixed' if self.regime_fixed else 'live'}:"
+                  f"{'next' if self.regime_next_open else 'close'}")
         return k
 
     def text(self, when: str | None, short: bool) -> str:
@@ -130,6 +159,15 @@ class Exit:
             parts.append(f"target = EMA {self.target_ema} at the signal candle")
         if self.min_rr is not None:
             parts.append(f"no trade when reward/risk < {self.min_rr:g}")
+        if self.pullback_fast is not None:
+            parts.append(f"stop {self.pullback_buffer:.1%} {side} the {'highest high' if short else 'lowest low'} of "
+                         f"the pullback (last run of EMA {self.pullback_fast} {'above' if short else 'below'} EMA "
+                         f"{self.pullback_slow})")
+        if self.regime_anchor is not None:
+            parts.append(f"signal close {side} EMA {self.regime_anchor}: target EMA {self.regime_anchor} "
+                         f"({'fixed at the signal candle' if self.regime_fixed else 'live'}); otherwise hold until a "
+                         f"close {'above' if short else 'below'} EMA {self.regime_trail} "
+                         f"(exit {'next open' if self.regime_next_open else 'at that close'})")
         if when:
             parts.append(f"exit at next open when: {when}")
         return "; ".join(parts)
@@ -219,6 +257,28 @@ def swing_level_k(low: np.ndarray, high: np.ndarray, t: int, entry: float, short
     return None
 
 
+def pullback_level(low: np.ndarray, high: np.ndarray, fast: np.ndarray, slow: np.ndarray, t: int, short: bool,
+                   lookback: int) -> tuple[float, int] | None:
+    """Lowest low (long) / highest high (short) of the pullback before signal candle t, and its candle.
+
+    Pullback = the most recent run of candles with fast EMA below slow EMA (short: above) ending at or before t,
+    searched within `lookback` candles; the level covers that run's first candle up to t (the signal candle).
+    None when no such run is found."""
+    lo_k = max(0, t - lookback)
+    k = t
+    pull = (lambda i: fast[i] > slow[i]) if short else (lambda i: fast[i] < slow[i])
+    while k >= lo_k and not pull(k):
+        k -= 1
+    if k < lo_k:
+        return None
+    s = k
+    while s - 1 >= lo_k and pull(s - 1):
+        s -= 1
+    seg = high[s:t + 1] if short else low[s:t + 1]
+    i = int(np.argmax(seg) if short else np.argmin(seg))
+    return float(seg[i]), s + i
+
+
 _EMA_CACHE: dict[tuple[int, int], tuple[Any, np.ndarray]] = {}
 
 
@@ -263,6 +323,24 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         if not math.isfinite(lv) or (lv >= entry if short else lv <= entry):
             return None  # price already beyond the EMA target: no room, no trade
         target = lv
+    if p.pullback_fast is not None:
+        pl = pullback_level(m.low, m.high, _ema_of(m, p.pullback_fast), _ema_of(m, p.pullback_slow), t, short,
+                            p.pullback_lookback)
+        if pl is None or (pl[0] <= entry if short else pl[0] >= entry):
+            return None  # no pullback found, or entry opened beyond it: no valid stop, no trade
+        stop = pl[0] * (1 + p.pullback_buffer) if short else pl[0] * (1 - p.pullback_buffer)
+    regime = ""  # "target": aim for EMA anchor; "trail": hold until a close breaches EMA trail
+    ea = et = None
+    if p.regime_anchor is not None:
+        ea, et = _ema_of(m, p.regime_anchor), _ema_of(m, p.regime_trail)
+        a0, c0 = float(ea[t]), float(m.close[t])
+        if not math.isfinite(a0) or not math.isfinite(float(et[t])):
+            return None
+        # signal candle on the far side of the anchor and the entry still short of it -> target the anchor
+        if (c0 > a0 and entry > a0) if short else (c0 < a0 and entry < a0):
+            regime, target = "target", a0
+        else:
+            regime = "trail"
     if p.min_rr is not None and math.isfinite(stop) and math.isfinite(target) and stop != entry:
         if abs(target - entry) / abs(entry - stop) < p.min_rr:
             return None
@@ -272,7 +350,7 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         sess_end = int(m.exit_last[t + 1])  # square-off bar (15:15 IST), owner rule 2026-11-20
         if sess_end < t + 1:
             return None
-        if p.swing_buffer is not None:  # owner rule: intraday holds to stop / target / 15:15, no bar limit
+        if p.structural:  # owner rule: intraday holds to stop / target / 15:15, no bar limit
             time_bar = sess_end + 1
         hold_end = min(time_bar - 1, sess_end)
     else:
@@ -280,7 +358,7 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
         hold_end = time_bar - 1
     # owner 2026-11-20: daily/weekly swing trades hold until stop or target - no bar limit. A trade still
     # running at the end of the range is closed there at the close and labelled OPEN_END.
-    hold_open = p.swing_buffer is not None and not sess
+    hold_open = p.structural and not sess
     if hold_open:
         time_bar = last + 1
         hold_end = last
@@ -293,12 +371,16 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
     if not hold_open and m._blocked_cum[min(time_bar, len(m) - 1) + 1] - m._blocked_cum[t + 1] > 0:
         return None
     simple = not (p.stop_atr or p.target_atr or p.trail_atr or p.swing_buffer is not None or p.stop_pct
-                  or p.target_pct or p.target_ema) and xmask is None
+                  or p.target_pct or p.target_ema or p.structural) and xmask is None
     if not simple:
         water = entry
-        o_, h_, l_ = m.open, m.high, m.low
+        o_, h_, l_, c_ = m.open, m.high, m.low, m.close
         for j in range(t + 1, hold_end + 1):
             o, h, lo = o_[j], h_[j], l_[j]
+            if regime == "target" and not p.regime_fixed and j > t + 1:
+                lv = float(ea[j - 1])  # live EMA anchor, known at this candle's open
+                if math.isfinite(lv):
+                    target = lv
             if not short:
                 if j > t + 1 and o <= stop:
                     return j, float(o), "STOP_GAP"
@@ -323,6 +405,14 @@ def _path(m: LaneMarket, t: int, p: Exit, last: int, short: bool, xmask: np.ndar
                 if p.trail_atr:
                     water = min(water, lo)
                     stop = min(stop, water + p.trail_atr * atr)
+            if regime == "trail" and (c_[j] > et[j] if short else c_[j] < et[j]):
+                if not p.regime_next_open or (sess and j >= sess_end):
+                    return j, float(c_[j]), "EMA_BREACH"
+                if j + 1 > last:  # breach on the latest candle: the next open is not known yet
+                    if hold_open:
+                        return last, float(c_[last]), "OPEN_END"
+                else:
+                    return j + 1, float(o_[j + 1]), "EMA_BREACH"
             if xmask is not None and xmask[j]:
                 if sess and j >= sess_end:
                     return sess_end, float(m.close[sess_end]), "SESSION_CLOSE"
@@ -348,7 +438,7 @@ def simulate(m: LaneMarket, mask: np.ndarray, seg: tuple[int, int], p: Exit, buy
     trades: list[dict[str, Any]] = []
     nxt = -1
     sid = m.session_id
-    hold = p.swing_buffer is not None and not (m.intraday and not p.overnight)
+    hold = p.structural and not (m.intraday and not p.overnight)
     for t in fired.tolist():
         if t < nxt or t + 1 > last:
             continue

@@ -1,0 +1,46 @@
+{
+ "_doc": "Owner's own strategy (2026-11-22, from config/research/owner_trades.csv; answers in docs/handover/owner-strategy-handover-2026-11-22.md). Entries fire on the candle the cross happens, buy/sell at the next candle's open. One position per side at a time. Used by app/owner_strategy.py.",
+ "name": "Owner-EMA13x20",
+ "timeframe": "15m",
+ "entries": {
+  "long": {
+   "EMA13xEMA20": "cross_above(ema(close, 13), ema(close, 20))",
+   "EMA13xEMA200-milestone": "cross_above(ema(close, 13), ema(close, 200))"
+  },
+  "short": {
+   "EMA13xEMA20": "cross_below(ema(close, 13), ema(close, 20))",
+   "EMA13xEMA200-milestone": "cross_below(ema(close, 13), ema(close, 200))"
+  }
+ },
+ "exit": {
+  "long": {
+   "_doc": "Longs may be held overnight (owner: 21 Sep -> 23 Sep).",
+   "max_hold_bars": 2000,
+   "overnight": true,
+   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400},
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "breach_fill": "close"}
+  },
+  "short": {
+   "_doc": "Cash shorts are same-day: no entry after 14:45, square-off 15:15 (owner 2026-11-22; multi-day option shorts deferred).",
+   "max_hold_bars": 2000,
+   "overnight": false,
+   "pullback_stop": {"fast": 13, "slow": 20, "buffer": 0.0, "lookback": 400},
+   "ema_regime": {"anchor": 200, "trail": 20, "target": "live", "breach_fill": "close"}
+  }
+ },
+ "check": {
+  "_doc": "--check compares owner_trades.csv row by row. Both readings of the exit are tried; match window in candles.",
+  "owner_trades": "config/research/owner_trades.csv",
+  "match_candles": 2,
+  "variants": [
+   {"name": "live-EMA200 / exit at breach close", "target": "live", "breach_fill": "close"},
+   {"name": "live-EMA200 / exit next open", "target": "live", "breach_fill": "next_open"},
+   {"name": "fixed-EMA200 / exit at breach close", "target": "fixed", "breach_fill": "close"},
+   {"name": "fixed-EMA200 / exit next open", "target": "fixed", "breach_fill": "next_open"}
+  ]
+ },
+ "labels": {"HC": {"min_trades": 12, "min_win_w": 0.6},
+            "HCLT": {"min_trades": 3, "max_trades": 11, "small_below": 5, "max_losses": 1},
+            "MC": {"min_win_w": 0.4}},
+ "recency": {"decay_sessions": 100, "power": 2}
+}
