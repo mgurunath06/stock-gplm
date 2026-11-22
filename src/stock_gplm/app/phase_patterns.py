@@ -135,10 +135,44 @@ class Finder:
             t, net, win, pk, rs = self.label(m, n, h, L["buy"], L["sell"])
             self.net[k, t], self.win[k, t], self.done[k, t], self.peak[k, t] = net, win, True, pk
             self.res[k, t] = rs
+        # owner rule (2026-11-21, MOST IMPORTANT): recent trades weigh more - age counted in sessions
+        self.sid = (np.asarray(m.session_id, dtype=np.int64) if m.intraday else np.arange(n, dtype=np.int64))
+        self.full_ok, self.full_done = self.ok.copy(), self.done.copy()
+        self.cut = n
         self.log(f"{n:,} bars {_date(self.days[0])} .. {_date(self.days[-1])}; {self.base_n} indicators + their "
                  f"changes over {self.pc.get('change_lookbacks')} candles = {len(names)} values per bar; phase today: "
                  f"{PHASES[int(self.phase[-1])]}")
         return True
+
+    def set_cut(self, cut: int) -> None:
+        """Stand at candle `cut` (exclusive): only candles before it, and only trades that had CLOSED before it,
+        are known - used by the causal replay in stock_tf. cut = n means today."""
+        self.cut = int(cut)
+        idx = np.arange(self.n)
+        self.ok = self.full_ok & (idx < self.cut)
+        self.done = self.full_done & (self.res < self.cut)
+        self._legs = None
+
+    def wt(self, idx: np.ndarray) -> np.ndarray:
+        """Recency weight of candles `idx` seen from the cut: (1 + age_sessions / decay) ** -power (owner rule:
+        recent trades weigh more; same decay as confidence.py - weight halves after ~40 sessions)."""
+        rc = self.pc.get("recency") or {}
+        age = self.sid[self.cut - 1] - self.sid[idx]
+        return (1.0 + np.maximum(age, 0) / float(rc.get("decay_sessions", 100))) ** -float(rc.get("power", 2))
+
+    def analyse(self, cut: int) -> dict[int, list]:
+        """Conditions, base rates and the pattern search for all 3 phases, standing at `cut`."""
+        self.set_cut(cut)
+        self.build_conditions()
+        self.base = {}
+        for q in (1, 0, -1):
+            sel = self.ok & (self.phase == q)
+            self.base[q] = [float(self.win[e, sel & self.done[e]].mean()) if (sel & self.done[e]).any() else 0.0
+                            for e in range(len(self.exits))]
+        P = int(self.phase[self.cut - 1])
+        self.res = {p: self.search(p) for p in (P, *[q for q in (1, 0, -1) if q != P])}
+        self.P = P
+        return self.res
 
     def label(self, m: Any, n: int, h: int, buy: float, sell: float):
         """Every bar: enter next open; worked = +gain net (after costs) reached before -loss net / time exit."""
@@ -249,11 +283,16 @@ class Finder:
                 hit = c == R
                 ck_n, ck_w = int(hit.sum()), int(nxt[hit].sum())
             label, rank = self.confidence(streak)
-            key = (rank, streak, float(np.mean(self.net[e, s])))
+            ww = self.wt(s)
+            nt = self.net[e, s]
+            rate_w = float((ww * w).sum() / ww.sum())
+            avg_w = float((ww * nt).sum() / ww.sum())
+            n_eff = float(ww.sum() ** 2 / (ww ** 2).sum())
+            key = (avg_w > 0, rank, avg_w)  # recent results first (owner's most important rule)
             if best is None or key > best["key"]:
                 best = {"key": key, "e": e, "times": s, "streak": streak, "all_won": int(w.sum()),
-                        "conf": label, "rank": rank, "avg": float(np.mean(self.net[e, s])), "ck_n": ck_n,
-                        "ck_w": ck_w}
+                        "conf": label, "rank": rank, "avg": float(np.mean(nt)), "rate_w": rate_w, "avg_w": avg_w,
+                        "n_eff": n_eff, "ck_n": ck_n, "ck_w": ck_w}
         return best
 
     def search(self, P: int) -> list[tuple[tuple[int, ...], dict]]:
@@ -364,9 +403,10 @@ class Finder:
         rate = r["all_won"] / n
         base = self.base[P][r["e"]]
         aft = " / ".join(f"{100 * x:+.1f}" for x in self.after(r["times"]))
-        won = f"{r['all_won']} of {n} ({rate:.0%}" + (f", x{rate / base:.1f} base)" if base > 0 else ")")
+        won = (f"{r['all_won']} of {n} ({rate:.0%}" + (f", x{rate / base:.1f} base)" if base > 0 else ")")
+               + f"; recent-weighted {r['rate_w']:.0%}")
         return (f"| {self.rtext(rule)} | max {h} bars | **{r['conf']}** | {r['streak']} | {last} | {won} | "
-                f"{100 * r['avg']:+.2f}% | {aft} |")
+                f"{100 * r['avg']:+.2f}% (recent-weighted {100 * r['avg_w']:+.2f}%) | {aft} |")
 
     def profile(self, P: int) -> list[str]:
         """-10..0 candles: how each indicator behaved before the right moves vs other bars; +1..+10: price after."""
@@ -450,19 +490,12 @@ class Finder:
     def run(self) -> int:
         if not self.load():
             return 1
-        self.build_conditions()
+        res = self.analyse(self.n)
         now = self.n - 1
-        P = int(self.phase[now])
+        P = self.P
         k = now
         while k > 0 and self.phase[k - 1] == P:
             k -= 1
-        self.base = {}
-        for q in (1, 0, -1):
-            sel = self.ok & (self.phase == q)
-            self.base[q] = [float(self.win[e, sel & self.done[e]].mean()) if (sel & self.done[e]).any() else 0.0
-                            for e in range(len(self.exits))]
-        res = {p: self.search(p) for p in (P, *[q for q in (1, 0, -1) if q != P])}
-        self.res, self.P = res, P
         top = int(self.pc["report_top"])
         ks = "/".join(f"+{k}" for k in self.pc["after_offsets"])
         head = ["| Pattern | Exit | Confidence | Streak (back from today) | Last 3 times, newest first | "
