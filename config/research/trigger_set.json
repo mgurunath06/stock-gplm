@@ -51,12 +51,13 @@
       "DailyUptrend": "htf(close > ema(close, 20), \"1d\")",
       "HourlyAboveEMA50": "htf(close > ema(close, 50), \"60m\")",
       "VolumeAboveAvg": "volume > sma(volume, 20)",
-      "RSI14Above50": "rsi(close, 14) > 50"
+      "RSI14Above50": "rsi(close, 14) > 50",
+      "NotBelowFallingHourlyEMA200": "not htf(close < ema(close, 200) and ema(close, 200) < ema(close, 200)[10], \"60m\")"
     }
   },
   "trend_guard": {
-    "_doc": "owner 2026-11-22: no longs while the stock is below a FALLING EMA 200 on the hourly chart (Sep 2026 RELIANCE: dip buys kept failing). The first expression the data can compute is used (1d has no hourly -> own timeframe).",
-    "enabled": true,
+    "_doc": "OFF (owner 2026-11-22): blocking all longs below a falling hourly EMA 200 removed 59% of RELIANCE 15m candles incl. the owner's own bottom-reversal setups (EMA13x20 -> target EMA 200). Now offered per trigger as the filter NotBelowFallingHourlyEMA200 instead. Set enabled true to block globally again.",
+    "enabled": false,
     "block_when": [
       "htf(close < ema(close, 200) and ema(close, 200) < ema(close, 200)[10], \"60m\")",
       "close < ema(close, 200) and ema(close, 200) < ema(close, 200)[40]"
