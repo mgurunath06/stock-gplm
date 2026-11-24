@@ -34,7 +34,28 @@ fits the price action at that moment. RELIANCE 15m longs first, then the univers
   never loosens, close-below-EMA20 next open, same-candle stop/target + 5m resolution) - owner runs them.
 * [x] `owner_strategy.fills` retest fix: cancel checked on the COMPLETED candle j-1 at candle j's open (was candle j's
   own closing EMAs -> cancelled limits that had already filled). Changes V11/V13/V15/V16 results slightly.
-* [ ] owner run + "check" -> read `<reports>/tuning/owner-plans-15m/REPORT.md` and `stocks/RELIANCE/audit.md`.
+* [x] First RELIANCE run (2026-11-24 15:13, old folder `owner-plans-15m`; the owner then started --stocks 200 into the
+  same folder). Fixes after it (commit after 662ae3a): `_doc` baseline row removed; audit explains each "none" and
+  tests swing k=1/2/3 vs the owner's stop candle; section 2b costs in R by stop width; output folders now
+  `owner-plans-15m-RELIANCE` (one stock) and `owner-plans-15m-pool<N>` (pooled).
+
+### RELIANCE 15m result (first run, 139 crosses Feb-Nov 2026) - NOT profitable
+* Every baseline loses: next open -43.9R (22% win), retest -63.9R, fixed 2R -55.7R, EMA20 touch -41.1R, V2 -50.6R.
+  MODEL -7.9R on 25 trades (t -1.44, negative) - it "beats" baselines only by skipping. RULE: insufficient evidence.
+  Hindsight best plan avg +0.81R/cross (diagnostic only).
+* Costs ~0.24R per trade: gross R of next-open/EMA20-close is -0.08, net -0.32. Stops < 0.6% lose most; stops > 1%
+  are +0.17 gross / +0.06 net. Stop width in R is the key driver - consider min-stop-% eligibility next.
+* Near/far: FAR crosses did better than near on every definition (0.5 ATR: near -0.62R, far -0.24R); retest worse
+  than next open in every group -> owner's "wait for EMA13 when far" hypothesis not supported on RELIANCE 15m.
+* Audit: 48 long marks: exact 18, one-bar 11, none 19 (2 before warm-up, most = owner entries without a fresh
+  cross, i.e. re-entries while EMA13 already above EMA20). Stop candle: SWING(k=3) 12/45, PBLOW 10/45 - the owner
+  usually takes a nearer, more recent swing low (k=1/2 counts in the next audit run).
+* Owner "skip" marks (16/17/25 Sep) are not at crosses in our data (EMA13 still below EMA20) -> 0 skip labels.
+
+### Next ideas (propose to owner first)
+1. Eligibility: minimum stop width (e.g. >= 0.8%) or R >= k x round-trip cost. 2. Re-entry trigger (EMA13 above
+EMA20, pullback to EMA13/20 then up-close) to cover the owner's non-cross entries. 3. Swing k from the audit.
+4. Pooled universe result (owner-plans-15m-pool200) before any conclusion.
 
 ## Commands (owner)
 ```powershell

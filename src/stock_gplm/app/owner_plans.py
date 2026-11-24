@@ -472,6 +472,8 @@ def audit(o, B: Bars, cross_ts: list[int], cfg: dict[str, Any], plans_by_t: dict
           "| SWING stop | PBLOW stop | Your exit | Our exit (plan) |", "|" + "---|" * 13]
     cnt = {"exact": 0, "one-bar": 0, "none": 0, "no candle": 0}
     stop_hit = {"SWING": 0, "PBLOW": 0}
+    swing_k_hit = {1: 0, 2: 0, 3: 0}
+    nwhy: dict[str, int] = {}
     n_stop = 0
     for r in sorted(rows, key=lambda r: r["signal"] or ""):
         i = o.find(r["signal"])
@@ -479,14 +481,29 @@ def audit(o, B: Bars, cross_ts: list[int], cfg: dict[str, Any], plans_by_t: dict
             cnt["no candle"] += 1
             md.append(f"| {r['signal']} | {r['decision']} | no candle |" + " |" * 11)
             continue
+        js = o.find(r["stop"])
         near = cs[np.abs(cs - i) <= W] if len(cs) else cs
         t = int(near[np.argmin(np.abs(near - i))]) if len(near) else None
         kind = "none" if t is None else ("exact" if t == i else ("one-bar" if abs(t - i) == 1 else f"{t - i:+d}"))
         cnt[kind if kind in cnt else "none"] += 1
+        if t is None:  # say why: warm-up, no fresh cross (already above), or not crossed yet in our data
+            nb = int(cs[np.argmin(np.abs(cs - i))]) - i if len(cs) else None
+            far_txt = f"; nearest cross {nb:+d} candles" if nb is not None else ""
+            if i < o.a0:
+                why = "before EMA200 warm-up"
+            elif B.e13[i] > B.e20[i]:
+                why = "no fresh cross: EMA13 already above EMA20 (re-entry / continuation)"
+            else:
+                why = "EMA13 still below EMA20 in our data"
+            kind = f"none ({why}{far_txt})"
+            nwhy[why] = nwhy.get(why, 0) + 1
+        elif js is not None:  # which swing strength gives your stop candle
+            for k_ in (1, 2, 3):
+                sx = swing_stop(B, t, k_, 400, float(B.c[t]))
+                swing_k_hit[k_] += bool(sx and sx[1] == js)
         if t is not None and r["decision"] in ("take", "skip"):
             labels[t] = r["decision"]
         gap = 100 * (B.e13[i] - B.e20[i]) / B.c[i]
-        js = o.find(r["stop"])
         ys = f"{r['stop']} ({B.l[js]:.2f})" if js is not None else (r["stop"] or "-")
         n_stop += js is not None
         scells, fill, ex = [], "", ""
@@ -513,7 +530,10 @@ def audit(o, B: Bars, cross_ts: list[int], cfg: dict[str, Any], plans_by_t: dict
                   f"{(r['exit'] or '-')} {r['reason']} | {ex} |")
     md += ["", f"Matches: exact {cnt['exact']}, one-bar {cnt['one-bar']}, none {cnt['none']}, "
            f"no candle {cnt['no candle']} (of {len(rows)} long marks). Stop candle same as yours ({n_stop} with a stop): "
-           f"SWING {stop_hit['SWING']}, PBLOW {stop_hit['PBLOW']}.",
+           f"SWING {stop_hit['SWING']}, PBLOW {stop_hit['PBLOW']}. Swing strength (candles each side) on matched "
+           f"crosses: " + ", ".join(f"k={k} {v}" for k, v in swing_k_hit.items())
+           + f" (plans use k={cfg['stops'].get('swing_k', 3)}).",
+           "Why 'none': " + (", ".join(f"{k} {v}" for k, v in nwhy.items()) or "-") + ".",
            f"Explicit labels for the judgement check: {sum(v == 'take' for v in labels.values())} take, "
            f"{sum(v == 'skip' for v in labels.values())} skip; every other cross is unlabeled (still simulated).", ""]
     o.log(f"audit: exact {cnt['exact']}, one-bar {cnt['one-bar']}, none {cnt['none']}; stop SWING {stop_hit['SWING']} "
@@ -735,7 +755,9 @@ class Research:
         import tempfile
         tmp = Path(tempfile.gettempdir()) / "owner_plans_stocks.txt"
         tmp.write_text(self.stocks[0] + "\n", encoding="utf-8")
-        self.du = Discoverer(a.tf, f"owner-plans-{a.tf}", cfgj, "@" + str(tmp), 1)
+        # one-stock and pooled runs get their own folders (a pooled run must not overwrite the one-stock report)
+        name = f"owner-plans-{a.tf}" + (f"-{sym}" if len(self.stocks) == 1 else f"-pool{len(self.stocks)}")
+        self.du = Discoverer(a.tf, name, cfgj, "@" + str(tmp), 1)
         self.log, self.root = self.du.log, self.du.root
         self.sdir = self.root / "stocks"
         self.sdir.mkdir(parents=True, exist_ok=True)
@@ -802,7 +824,8 @@ class Research:
 
         sel = {"MODEL": [d["model"] for d in dec], "RULE": [d["rule"] for d in dec]}
         for nm, pid in bl.items():
-            sel[nm] = [pid] * len(dec)
+            if not nm.startswith("_"):  # "_doc" is a comment, not a baseline
+                sel[nm] = [pid] * len(dec)
         res: dict[str, dict[str, Any]] = {}
         per_stock: dict[str, dict[str, list[float]]] = {}
         n_open: dict[str, int] = {}
@@ -839,9 +862,12 @@ class Research:
                       f"{m['verdict']} | {n_open[nm]} |")
         md += ["", f"Hindsight best plan per cross (DIAGNOSTIC ONLY, not achievable): avg {np.mean(hind):+.2f}R per "
                "cross.", ""]
-        mb, rb = res["MODEL"], max((v for k, v in res.items() if k not in ("MODEL", "RULE")), key=lambda m: m["total_r"])
+        mb = res["MODEL"]
+        rbk = max((k for k in res if k not in ("MODEL", "RULE")), key=lambda k: res[k]["total_r"])
         md += [f"**Did the learned selection beat the baselines?** MODEL total {mb['total_r']:+.1f}R vs best baseline "
-               f"{rb['total_r']:+.1f}R; MODEL verdict: {mb['verdict']}.", ""]
+               f"{rbk} {res[rbk]['total_r']:+.1f}R; MODEL verdict: {mb['verdict']}. Note: SKIP scores 0R, so a selector "
+               "that mostly skips beats losing baselines without having an edge - judge it by its own verdict.", ""]
+        md += self.cost_view(L)
         self.log(" | ".join(f"{k} {v['total_r']:+.1f}R/{v['trades']} ({v['verdict']})" for k, v in res.items()))
         # where each plan worked / failed (all closed rows, in-sample description)
         md += ["## 3. Where each plan worked and failed (all closed rows; descriptive, in-sample)", "",
@@ -887,6 +913,24 @@ class Research:
         (self.root / "REPORT.md").write_text("\n".join(md) + "\n", encoding="utf-8")
         audits = [str(self.sdir / s / "audit.md") for s in self.stocks if (self.sdir / s / "audit.md").is_file()]
         self.log(f"report {self.root / 'REPORT.md'}" + (f"; audit {', '.join(audits)}" if audits else ""))
+
+    def cost_view(self, L: Learner) -> list[str]:
+        """Gross vs net R by stop width (descriptive): narrow stops pay the same costs in rupees, far more in R."""
+        md = ["## 2b. Costs in R by stop width (filled trades, descriptive)", "",
+              "| Plan | Stop width | Trades | Gross R | Net R | Cost R |", "|---|---|---|---|---|---|"]
+        for pid in [v for k, v in self.cfg["baselines"].items() if not k.startswith("_") and v != "V2"]:
+            ps = [p for v in L.P.values() for q, p in v.items() if q == pid and p["filled"] and not p["open_end"]]
+            if not ps:
+                continue
+            rp = np.array([p["risk"] / p["entry"] for p in ps])
+            g = np.array([(p["exit_price"] - p["entry"]) / p["risk"] for p in ps])
+            nr = np.array([p["net_r"] for p in ps])
+            for lo, hi in ((0, .003), (.003, .006), (.006, .01), (.01, 1.0)):
+                m = (rp >= lo) & (rp < hi)
+                if m.any():
+                    md.append(f"| {pid} | {100 * lo:.1f}-{100 * hi:.1f}% | {int(m.sum())} | {g[m].mean():+.2f} | "
+                              f"{nr[m].mean():+.2f} | {(g[m] - nr[m]).mean():.2f} |")
+        return md + [""]
 
     def near_far(self, L: Learner) -> list[str]:
         lc = self.cfg["learn"]
