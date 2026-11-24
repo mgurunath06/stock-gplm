@@ -22,6 +22,15 @@ and keeps receipts as logical coverage for its downloader. Partial deletion
 after interruption is resumable. Conflicting or corrupt files remain on cloud.
 No raw file is overwritten. Live stream files are outside this policy.
 
+The cloud filler retries each missing `(symbol, session)` independently with
+backoff. A failure never blocks later sessions for that stock. After five
+failed attempts the exact item is recorded as `UNAVAILABLE`, including the
+last error and attempt timestamp, and is no longer requested automatically.
+`universe_progress.json` reports `downloaded`, `unavailable`, and `pending`
+totals separately; `resolved` means downloaded or explicitly unavailable and
+does not relabel a missing provider file as downloaded. A manual reset may
+retry an unavailable item later.
+
 Run the PC worker with `python -m stock_gplm.app.cloud_retention` (PYTHONPATH=src).
 Deploy transfer_ledger.py alongside cloud_sync.py and restart the filler before
 starting retirement; the old filler does not recognize archived receipts.

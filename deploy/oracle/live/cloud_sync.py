@@ -121,6 +121,11 @@ class Retry:
             self.s = json.loads(STATE.read_text())
         except (OSError, ValueError):
             self.s = {}
+        # Older runs called terminal failures GAVE_UP.  Preserve every receipt
+        # and error, but make the terminal state explicit and non-retryable.
+        for key, value in self.s.items():
+            if not key.startswith("_") and isinstance(value, dict) and value.get("status") == "GAVE_UP":
+                value["status"] = "UNAVAILABLE"
 
     def due(self, key):
         r = self.s.get(key)
@@ -132,10 +137,17 @@ class Retry:
         r["last_error"] = err[:160]
         r["last_try"] = now().isoformat(timespec="seconds")
         if r["attempts"] >= MAX_ATTEMPTS:
-            r["status"] = "GAVE_UP"
+            r["status"] = "UNAVAILABLE"
         else:
             r["status"] = "RETRYING"
             r["next_try"] = time.time() + BACKOFF[min(r["attempts"] - 1, len(BACKOFF) - 1)]
+
+    def mark_unavailable(self, key, err, *, attempts=MAX_ATTEMPTS):
+        """Record a provider item as terminal without manufacturing a file."""
+        r = self.s.setdefault(key, {})
+        r.update(status="UNAVAILABLE", attempts=max(int(r.get("attempts", 0)), attempts),
+                 last_error=err[:160], last_try=now().isoformat(timespec="seconds"))
+        r.pop("next_try", None)
 
     def ok(self, key):
         self.s.pop(key, None)
@@ -148,14 +160,23 @@ class Retry:
         write_atomic(STATE, self.s)
 
     def health(self, sym):
-        rs = {k: v for k, v in self.s.items() if k.startswith(sym + "|") and v.get("status") != "UNAVAILABLE"}
-        gave = [k for k, v in rs.items() if v["status"] == "GAVE_UP"]
-        if gave:
-            errs = sorted({v["last_error"] for k, v in rs.items() if v["status"] == "GAVE_UP"})
-            return {"status": "PROBLEM", "detail": f"{len(gave)} item(s) failed {MAX_ATTEMPTS}x: {'; '.join(errs)[:200]}"}
-        if rs:
-            return {"status": "RETRYING", "detail": f"{len(rs)} item(s) in backoff"}
+        rs = {k: v for k, v in self.s.items() if k.startswith(sym + "|")}
+        pending = [k for k, v in rs.items() if v.get("status") == "RETRYING"]
+        unavailable = [k for k, v in rs.items() if v.get("status") == "UNAVAILABLE"]
+        if pending:
+            return {"status": "RETRYING", "detail": f"{len(pending)} item(s) in backoff; "
+                    f"{len(unavailable)} confirmed unavailable"}
+        if unavailable:
+            return {"status": "PARTIAL", "detail": f"{len(unavailable)} item(s) confirmed unavailable "
+                    f"after {MAX_ATTEMPTS} attempts"}
         return {"status": "OK"}
+
+    def unavailable_count(self, sym, days, have=()):
+        present = {str(x) for x in have}
+        return sum(
+            1 for d in days if str(d) not in present
+            and self.s.get(f"{sym}|minute|{d}", {}).get("status") == "UNAVAILABLE"
+        )
 
 
 def inventory(syms, want, notes, retry=None):
@@ -310,27 +331,44 @@ def main():
                     key = f"{s}|master"
                     with state_lock:
                         r = retry.s.setdefault(key, {"attempts": 0})
-                        r.update(status="GAVE_UP" if r["attempts"] + 1 >= MAX_ATTEMPTS else "RETRYING",
-                                 attempts=min(MAX_ATTEMPTS, r["attempts"] + 1),
-                                 last_error="symbol not in current Shoonya master (renamed/delisted?)")
+                        err = "symbol not in current Shoonya master (renamed/delisted?)"
+                        if r.get("status") != "UNAVAILABLE":
+                            retry.fail(key, err)
+                        if retry.s[key].get("status") == "UNAVAILABLE":
+                            # No provider token means none of this symbol's session files can
+                            # be requested. Resolve each missing item explicitly so the next
+                            # sweep advances instead of stopping at this symbol forever.
+                            for missing_day in days:
+                                if str(missing_day) not in have:
+                                    retry.mark_unavailable(f"{s}|minute|{missing_day}", err)
                         failed_symbols.add(s)
-                        notes[s] = f"deferred in sweep {sweep_no}: symbol absent from current master"
+                        notes[s] = (f"unavailable after {MAX_ATTEMPTS} sweeps: symbol absent from current master"
+                                    if retry.s[key].get("status") == "UNAVAILABLE"
+                                    else f"deferred in sweep {sweep_no}: symbol absent from current master")
                     return False
                 key = f"{s}|minute|{d}"
                 err = attempt(key, lambda s=s, d=d: J.minute(worker_api(), d, s, tok[s], allow_today=True))
                 if err == "skip":
                     with state_lock:
-                        failed_symbols.add(s)
-                        notes[s] = f"deferred in sweep {sweep_no}: retry pending for {d}"
-                    return False
+                        status = retry.s.get(key, {}).get("status")
+                        if status == "RETRYING":
+                            failed_symbols.add(s)
+                            notes[s] = f"retry pending in sweep {sweep_no}: {d}"
+                        elif status == "UNAVAILABLE":
+                            notes[s] = f"continuing past unavailable session {d}"
+                    continue
                 if err and err != "skip" and "MINUTE_UNAVAILABLE" in err:
                     with state_lock:
                         retry.fail(key, err)
                 if err:
                     with state_lock:
                         failed_symbols.add(s)
-                        notes[s] = f"deferred in sweep {sweep_no}: {err[:120]}"
-                    return False
+                        status = retry.s.get(key, {}).get("status")
+                        notes[s] = (f"continuing past unavailable session {d}"
+                                    if status == "UNAVAILABLE"
+                                    else f"retry scheduled for {d}: {err[:100]}")
+                    # A bad session must never block later sessions for the stock.
+                    continue
             return True
 
         try:
@@ -341,11 +379,18 @@ def main():
         # A full pre-scan delayed every restart without improving transfer safety.
         progress_rows = {x: int(previous_rows.get(x, 0)) for x in syms + extra}
         expected_rows = {x: len(want_for(x)) for x in syms + extra}
+        unavailable_rows = {
+            x: retry.unavailable_count(x, want_for(x), minute_have(x)) for x in syms + extra
+        }
         def progress(current):
             # Recheck only the symbol just processed. Rewalking the full universe
             # after every symbol made progress O(symbols squared).
             progress_rows[current] = sum(1 for d in want_for(current) if str(d) in minute_have(current))
             expected_rows[current] = len(want_for(current))
+            unavailable_rows[current] = retry.unavailable_count(
+                current, want_for(current), minute_have(current))
+            pending_rows = {k: max(0, expected_rows[k] - progress_rows[k] - unavailable_rows[k])
+                            for k in progress_rows}
             write_atomic(LIVE / "universe_progress.json",
                          {"generated": now().isoformat(timespec="seconds"), "expected": len(want),
                           "window": [str(want[-1]), str(want[0])] if want else None, "current": current,
@@ -354,7 +399,15 @@ def main():
                           "adaptive_workers": adaptive.snapshot(),
                           "complete": sorted(k for k, v in progress_rows.items()
                                              if v >= expected_rows.get(k, len(want))),
-                          "have": progress_rows, "expected_per_symbol": expected_rows})
+                          "resolved": sorted(k for k, v in progress_rows.items()
+                                             if v + unavailable_rows[k] >= expected_rows.get(k, len(want))),
+                          "totals": {"expected": sum(expected_rows.values()),
+                                     "downloaded": sum(progress_rows.values()),
+                                     "unavailable": sum(unavailable_rows.values()),
+                                     "pending": sum(pending_rows.values())},
+                          "have": progress_rows, "expected_per_symbol": expected_rows,
+                          "unavailable_per_symbol": unavailable_rows,
+                          "pending_per_symbol": pending_rows})
 
         if a.order == "symbol":  # one stock fully, then the next: research can start per finished stock
             queue = iter(syms + extra)

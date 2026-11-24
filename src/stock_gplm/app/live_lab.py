@@ -56,7 +56,7 @@ def now_ist() -> datetime:
 
 
 def ssh(cmd: str, timeout: int = 40) -> bytes:
-    r = subprocess.run(SSH + [cmd], capture_output=True, timeout=timeout)
+    r = subprocess.run(SSH + [cmd], capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.decode(errors="replace")[:200] or f"ssh exit {r.returncode}")
     return r.stdout
@@ -68,7 +68,7 @@ LOGIN_URL = "https://api.shoonya.com/OAuthlogin/investor-entry-level/login?api_k
 
 def ctl(action: str, stdin: str | None = None) -> dict[str, Any]:
     """Run the Oracle control script; the OAuth code travels only on stdin."""
-    r = subprocess.run(SSH + [f"{CTL} {action}"], input=(stdin + "\n").encode() if stdin else None,
+    r = subprocess.run(SSH + [f"{CTL} {action}"], input=(stdin + "\n").encode() if stdin else b"",
                        capture_output=True, timeout=60)
     try:
         return json.loads(r.stdout.decode().strip().splitlines()[-1])
@@ -211,6 +211,47 @@ def build_frame(bars: list[dict[str, Any]], k: int, day: str) -> pd.DataFrame:
     return f
 
 
+
+def group_rows(alerts: list[dict[str, Any]], setups: dict[str, dict[str, Any]],
+           bear: dict[str, dict[str, int]] | None) -> list[dict[str, Any]]:
+    """One row per symbol x timeframe x signal bar; bear=None for earlier days (no live bearish state)."""
+    bear = bear if bear is not None else defaultdict(dict)
+    self_setups = setups
+    g: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for a in alerts:
+        g[a["group"]].append(a)
+    out = []
+    for key, xs in g.items():
+        a0 = xs[0]
+        med = lambda k: round(float(np.median([x[k] for x in xs if x[k] is not None])), 2) \
+            if any(x[k] is not None for x in xs) else None  # noqa: E731
+        st = defaultdict(int)
+        for x in xs:
+            st[x["state"]] += 1
+        out.append({"key": key, "symbol": a0["symbol"], "tf": a0["tf"], "bar": a0["bar"], "created": a0["created"],
+                    "catch_up": a0.get("catch_up", False), "n": len(xs), "entry": a0["entry"],
+                    "stop": med("stop"), "target": med("target"), "last": max(xs, key=lambda x: x["created"])["last"],
+                    "pnl_pct": med("pnl_pct"), "mfe_pct": max(x["mfe_pct"] for x in xs),
+                    "mae_pct": min(x["mae_pct"] for x in xs), "states": dict(st),
+                    # bearish strategies firing NOW on this stock (any timeframe) while longs are open
+                    "setup_state": (self_setups.get(key) or {}).get("state", "OPEN"),
+                    "setup_exit": {k: (self_setups.get(key) or {}).get(k) for k in ("exit_at", "exit_px", "exit_pct",
+                                                                                     "until")},
+                    "confidence": (self_setups.get(key) or {}).get("confidence") or {},
+                    "bear_now": bear[a0["symbol"]].get(a0["tf"], 0),
+                    "conflict": bool(st.get("OPEN")) and bear[a0["symbol"]].get(a0["tf"], 0) > 0,
+                    "items": [{k: x[k] for k in ("strategy", "name", "stop", "target", "state", "closed", "pnl_pct",
+                                                 "exit")} for x in xs]})
+    out.sort(key=lambda r: (r["bar"], r["n"]), reverse=True)
+    per: dict[str, int] = defaultdict(int)
+    keep = []
+    for r in out:  # cap per timeframe so slower timeframes are never crowded out by 5m rows
+        per[r["tf"]] += 1
+        if per[r["tf"]] <= 150:
+            keep.append(r)
+    return keep
+
+
 class Lab:
     def __init__(self, day: str, out: Path, stale_after: int, roots: list[Path]):
         self.day, self.out, self.stale_after = day, out, stale_after
@@ -222,6 +263,7 @@ class Lab:
         self.heartbeat: dict[str, Any] = {}
         self.feed = {"state": "CONNECTING", "error": None, "last_pull": None, "lag_s": None}
         self.alerts: list[dict[str, Any]] = []
+        self.past_groups: list[dict[str, Any]] = []  # earlier days, read-only (load_past)
         self.signals: dict[str, dict[str, int]] = defaultdict(dict)  # symbol -> tf -> strategies firing now
         self.last_eval: dict[str, str] = {}
         self.evaluated_until: dict[tuple[str, str], str] = {}
@@ -474,11 +516,11 @@ class Lab:
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             mk = self.market()
-            syms = []
+            syms, shown = [], None
             for s, bars in sorted(self.min1.items()):
-                today = [b for b in bars if b["t"].startswith(self.day)]
+                today, pc, sess = self._shown(s)  # before the open: the last session's bars
+                shown = shown or sess
                 last = today[-1] if today else None
-                pc = self.prev_close.get(s)
                 syms.append({"symbol": s, "last": last["c"] if last else None, "t": last["t"][11:16] if last else None,
                              "chg_pct": round((last["c"] / pc - 1) * 100, 2) if last and pc else None,
                              "bars_today": len(today), "sig": dict(self.signals[s]), "bear": dict(self.bear[s]),
@@ -487,7 +529,7 @@ class Lab:
             return {"contract": CONTRACT, "day": self.day, "now": now_ist().strftime("%H:%M:%S"),
                     "feed": self.feed, "oracle": self.oracle, "login_url": LOGIN_URL,
                     "link": {k: getattr(v, "state", v) for k, v in self.link.items()}, "learning": self.learning(), "heartbeat": self.heartbeat, "strategies": len(self.strats),
-                    "symbols": syms, "groups": self.groups(), "bear_events": self.bear_events[-300:][::-1],
+                    "shown_session": shown, "symbols": syms, "groups": self.groups() + self.past_groups, "bear_events": self.bear_events[-300:][::-1],
                     "timeframes": list(TFS), "counts": self.counts(), "notes": self.notes[-150:],
                     "intraday": self.intraday, "intraday_events": self.intraday_events[-150:][::-1],
                     "intraday_mkt30": self.intraday_mkt30, "market": mk}
@@ -499,7 +541,7 @@ class Lab:
     def market(self) -> dict[str, Any]:
         idx = {}
         for s in ("NIFTY", "BANKNIFTY", "INDIAVIX"):
-            tb, pc = self._today(s), self.prev_close.get(s)
+            tb, pc, _ = self._shown(s)
             if not tb:
                 continue
             closes = [b["c"] for b in tb]
@@ -512,7 +554,7 @@ class Lab:
         for s in self.min1:
             if s in INDICES:
                 continue
-            tb, pc = self._today(s), self.prev_close.get(s)
+            tb, pc, _ = self._shown(s)
             if tb and pc:
                 up += tb[-1]["c"] > pc
                 down += tb[-1]["c"] < pc
@@ -523,7 +565,7 @@ class Lab:
         regime, why = "RANGE", []
         nf = idx.get("NIFTY")
         if nf and nf.get("chg_pct") is not None:
-            tb = self._today("NIFTY")
+            tb = self._shown("NIFTY")[0]
             c5 = [b["c"] for b in tb][4::5]
             o = tb[0]["o"]
             share_up = sum(c > o for c in c5) / len(c5) if c5 else 0.5
@@ -615,39 +657,38 @@ class Lab:
 
     def groups(self) -> list[dict[str, Any]]:
         """One row per symbol x timeframe x signal bar (many strategies often fire on the same bar)."""
-        g: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for a in self.alerts:
-            g[a["group"]].append(a)
-        out = []
-        for key, xs in g.items():
-            a0 = xs[0]
-            med = lambda k: round(float(np.median([x[k] for x in xs if x[k] is not None])), 2) \
-                if any(x[k] is not None for x in xs) else None  # noqa: E731
-            st = defaultdict(int)
-            for x in xs:
-                st[x["state"]] += 1
-            out.append({"key": key, "symbol": a0["symbol"], "tf": a0["tf"], "bar": a0["bar"], "created": a0["created"],
-                        "catch_up": a0.get("catch_up", False), "n": len(xs), "entry": a0["entry"],
-                        "stop": med("stop"), "target": med("target"), "last": max(xs, key=lambda x: x["created"])["last"],
-                        "pnl_pct": med("pnl_pct"), "mfe_pct": max(x["mfe_pct"] for x in xs),
-                        "mae_pct": min(x["mae_pct"] for x in xs), "states": dict(st),
-                        # bearish strategies firing NOW on this stock (any timeframe) while longs are open
-                        "setup_state": (self.setups.get(key) or {}).get("state", "OPEN"),
-                        "setup_exit": {k: (self.setups.get(key) or {}).get(k) for k in ("exit_at", "exit_px", "exit_pct",
-                                                                                         "until")},
-                        "confidence": (self.setups.get(key) or {}).get("confidence") or {},
-                        "bear_now": self.bear[a0["symbol"]].get(a0["tf"], 0),
-                        "conflict": bool(st.get("OPEN")) and self.bear[a0["symbol"]].get(a0["tf"], 0) > 0,
-                        "items": [{k: x[k] for k in ("strategy", "name", "stop", "target", "state", "closed", "pnl_pct",
-                                                     "exit")} for x in xs]})
-        out.sort(key=lambda r: (r["bar"], r["n"]), reverse=True)
-        per: dict[str, int] = defaultdict(int)
-        keep = []
-        for r in out:  # cap per timeframe so slower timeframes are never crowded out by 5m rows
-            per[r["tf"]] += 1
-            if per[r["tf"]] <= 150:
-                keep.append(r)
-        return keep
+        return group_rows(self.alerts, self.setups, self.bear)
+
+    def load_past(self, days: int = 31) -> None:
+        """Signal rows of earlier live-lab days (their saved state.pkl), read-only, for the week/month windows
+        and for the empty page before today's first candle."""
+        import pickle
+        import re
+        lo = (datetime.fromisoformat(self.day) - timedelta(days=days)).date().isoformat()
+        rows: list[dict[str, Any]] = []
+        for d in sorted(self.out.parent.iterdir()):
+            if not (d.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name) and lo <= d.name < self.day):
+                continue
+            try:
+                st = pickle.loads((d / "state.pkl").read_bytes())
+            except Exception:  # noqa: BLE001 - missing / old state: skip that day
+                continue
+            for r in group_rows(st.get("alerts") or [], st.get("setups") or {}, None):
+                rows.append(r | {"past": True, "day": d.name})
+        self.past_groups = rows
+        print(f"earlier sessions: {len(rows)} signal rows from {len({r['day'] for r in rows})} day(s)")
+
+    def _shown(self, sym: str) -> tuple[list[dict[str, Any]], float | None, str | None]:
+        """Today's 1m bars + previous close; before today's first candle the LAST session's bars + its previous
+        close (third item = that session's date), so the page is never empty before the open."""
+        bars = self.min1.get(sym, [])
+        tb = [b for b in bars if b["t"].startswith(self.day)]
+        if tb or not bars:
+            return tb, self.prev_close.get(sym), None
+        last_day = bars[-1]["t"][:10]
+        tb = [b for b in bars if b["t"].startswith(last_day)]
+        before = [b for b in bars if b["t"][:10] < last_day]
+        return tb, (before[-1]["c"] if before else None), last_day
 
     def publish(self, msg: dict[str, Any]) -> None:
         for q in list(self.subs):
@@ -1201,6 +1242,7 @@ def main() -> None:
     from .evidence import Evidence
     lab.evidence = Evidence(Path(st.reports_dir) / "research", a.evidence_run or ["evidence-intraday", "evidence-daily"])
     lab.evidence.refresh()
+    lab.load_past()
     print(f"evidence: {len(lab.evidence.trades)} validation trades from {sorted(lab.evidence.trades['run'].unique())}")
     wl = (REPO / "deploy" / "oracle" / "live" / "watchlist.txt").read_text().splitlines()
     syms = [s for ln in wl for s in ln.split("#", 1)[0].split()]

@@ -50,7 +50,7 @@ class Stream:
         while not self._stop:
             cmd = f"tail -c +{self.offset + 1} -F {self.remote_file} 2>/dev/null"
             try:
-                p = subprocess.Popen(SSH + [cmd], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                p = subprocess.Popen(SSH + [cmd], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self.state.update(state="CONNECTED", since=now())
                 buf = b""
                 while True:
@@ -188,7 +188,7 @@ class CloudSync:
     def expected_sessions(self, n: int = 400) -> list[str]:
         """Every trading session from the provider window floor (oldest day Shoonya still serves) to today."""
         if not getattr(self, "calendar", None):
-            raw = subprocess.run(SSH + ["cat StockGPLMDownloads/calendar/nse_2026.json"], capture_output=True,
+            raw = subprocess.run(SSH + ["cat StockGPLMDownloads/calendar/nse_2026.json"], capture_output=True, stdin=subprocess.DEVNULL,
                                  timeout=30).stdout
             self.calendar = json.loads(raw)
         from datetime import date, timedelta
@@ -277,7 +277,7 @@ class CloudSync:
         for k in [k for k in fails if f"/{s}/" in k]:
             del fails[k]
         subprocess.run(SSH + [f"~/stock-gplm-venv/bin/python ~/gplm-live/gplm_live_ctl.py reset {shlex.quote(s)}"],
-                       capture_output=True, timeout=30)
+                       capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
 
     def loop(self, every: int = 30) -> None:
         """Watch continuously: every 30 s while the cloud answers, backing off to 2 min when it does not."""

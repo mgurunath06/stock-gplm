@@ -310,7 +310,7 @@ function renderTop(){const m=S.market||{},ix=m.indices||{},b=m.breadth||{};
   const f=S.feed||{},hb=S.heartbeat||{},o=S.oracle||{},L=S.link||{},ls=L.stream||{},sy=L.sync||{},ci=sy.cloud_inventory||{},c=S.counts||{};
   const st=f.state||'?',fd=st==='LIVE'?'ok':/STALE|ERROR|FAIL|UNREACH|NO_/.test(st)?'bad':'warn';const lb=ls.state!=='CONNECTED'||/UNREACH/.test(sy.state||'');
   const cu=f.catching_up;$('cuBar').style.display=cu?'':'none';if(cu){const [a,b]=cu.split('/').map(Number);$('cuBar').innerHTML=`Server restarted — rebuilding today's signals from the feed: ${Math.round(a/b*100)}% (${a.toLocaleString('en-IN')} of ${b.toLocaleString('en-IN')} bars). Signals and intraday events resume automatically when this finishes.`}
-  $('status').innerHTML=`${cu?`<span class=warn>Catching up ${cu}</span>`:''}<span><i class="dot ${fd}"></i>Feed ${st==='LIVE'?'live':st.toLowerCase()} · last bar ${hb.last_complete_minute||'–'}${f.lag_s!=null?` · lag ${f.lag_s}s`:''}</span>`+
+  $('status').innerHTML=`${S.shown_session?`<span class=warn>Before the open: prices = last session ${S.shown_session}</span>`:''}${cu?`<span class=warn>Catching up ${cu}</span>`:''}<span><i class="dot ${fd}"></i>Feed ${st==='LIVE'?'live':st.toLowerCase()} · last bar ${hb.last_complete_minute||'–'}${f.lag_s!=null?` · lag ${f.lag_s}s`:''}</span>`+
     `<span><i class="dot ${lb?'bad':ci.missing_total?'warn':'ok'}"></i>Cloud ${ls.state==='CONNECTED'?'stream on':(ls.state||'–').toLowerCase()} · ${ci.missing_total?`filling ${ci.missing_total}`:'in sync'}</span>`+
     `<span><i class="dot ${o.token==='CACHED'?'ok':'bad'}"></i>Token ${o.token==='CACHED'?o.age_hours+' h':(o.token||'?').toLowerCase()}</span>`+
     `<span><i class="dot ${o.collector_pid?'ok':'warn'}"></i>Collector ${o.collector_pid?'running':'stopped'}</span>`+
@@ -331,17 +331,17 @@ function renderWL(){const rows=S.symbols.filter(x=>!x.index);if(!$('symList').ch
   $('heat').innerHTML=rows.map(x=>{const a=x.chg_pct==null?0:Math.min(Math.abs(x.chg_pct)/2,1)*55+8;const col=x.chg_pct==null?'transparent':`color-mix(in srgb,var(${x.chg_pct>=0?'--up':'--down'}) ${Math.round(a)}%,transparent)`;
     return `<div class=ht style="background:${col}" onclick="select('${x.symbol}')"><b>${x.symbol}</b><span>${x.chg_pct==null?'–':sgn(x.chg_pct)+'%'}</span></div>`}).join('')}
 function tfOn(){const o={};document.querySelectorAll('#tfBox button').forEach(b=>o[b.dataset.tf]=b.classList.contains('on'));return o}
-function rowHtml(g,why){return `<tr ${why?'data-x=1':''} class="${!first&&!seen.has(g.key)?'new':''} ${g.symbol===SEL?'sel':''}" onclick="select('${g.symbol}')"><td><b>${g.symbol}</b>${g.catch_up?' <small title="before a restart; never notified">replayed</small>':''}${why?` <span class="tag warn" title="shown because you searched or selected this stock">${why}</span>`:''}</td><td>${g.tf}</td><td>${g.bar.slice(11)}</td>
+function rowHtml(g,why){return `<tr ${why?'data-x=1':''} class="${!first&&!seen.has(g.key)?'new':''} ${g.symbol===SEL?'sel':''}" onclick="select('${g.symbol}')"><td><b>${g.symbol}</b>${g.catch_up?' <small title="before a restart; never notified">replayed</small>':''}${why?` <span class="tag warn" title="shown because you searched or selected this stock">${why}</span>`:''}</td><td>${g.tf}</td><td>${g.past?`<small>${g.bar.slice(8,10)}/${g.bar.slice(5,7)}</small> `:''}${g.bar.slice(11)}</td>
     <td class=n><b>${g.n}</b></td><td>${confCell(g.confidence)}</td><td class=n>${entryCell(g)}</td><td class=n>${px(g.stop)}</td><td class=n>${px(g.target)}</td><td class=n>${pct(g.pnl_pct)}</td><td>${statusCell(g)}</td>
     <td>${g.conflict?`<span class="tag dn" title="bearish strategies firing on this stock and timeframe while the setup is open">${g.bear_now}</span>`:''}</td><td><button onclick="event.stopPropagation();explainSym('${g.symbol}','${g.key}')" title="plain-English explanation by your local model">Explain</button></td></tr>`}
 function renderNow(){const min=+$('fMin').value||1,kv=$('fBars').value,tf=tfOn(),sc=$('fClosed').checked,now=Date.now();
   const k=+kv,long=['day','week','month'].includes(kv);
-  const inWin=g=>{if(long)return true;const tm=parseInt(g.tf)*60000,cl=new Date(sigTime(g).iso).getTime();return k>=12?now-cl<=k*5*60000+90000:now-cl<=k*tm+90000};
-  const why=g=>{const r=[];if(!tf[g.tf])r.push(`${g.tf} switched off`);if(g.n<min)r.push(`agree ${g.n} < ${min}`);if(!inWin(g))r.push('older than window');if(!sc&&g.setup_state!=='OPEN')r.push(`${g.setup_state.toLowerCase()}`);return r.join(' · ')};
+  const inWin=g=>{if(long){if(kv==='day')return !g.past;return !g.past||(Date.parse(S.day)-Date.parse(g.bar.slice(0,10)))/864e5<=(kv==='week'?7:31)}const tm=parseInt(g.tf)*60000,cl=new Date(sigTime(g).iso).getTime();return k>=12?now-cl<=k*5*60000+90000:now-cl<=k*tm+90000};
+  const why=g=>{const r=[];if(!tf[g.tf])r.push(`${g.tf} switched off`);if(g.n<min)r.push(`agree ${g.n} < ${min}`);if(!inWin(g))r.push('older than window');if(!sc&&!g.past&&g.setup_state!=='OPEN')r.push(`${g.setup_state.toLowerCase()}`);return r.join(' · ')};
   const rows=S.groups.filter(g=>!why(g)).sort((a,b)=>b.bar.localeCompare(a.bar)||b.n-a.n);
   const q=($('nowRows').closest('table')._f||'').trim().toUpperCase(),focus=new Set([SEL,...(q?S.symbols.map(x=>x.symbol).filter(x=>x.includes(q)):[])].filter(Boolean));
   const extra=S.groups.filter(g=>focus.has(g.symbol)&&why(g)).sort((a,b)=>b.bar.localeCompare(a.bar)).slice(0,25);
-  $('nowSub').textContent=`${rows.length} shown${long?` · ${kv==='day'?'today':'only today is recorded so far — week/month fill up as days accumulate'}`:''}`;
+  $('nowSub').textContent=`${rows.length} shown${long?` · ${kv==='day'?'today':'today + earlier sessions (dated rows, closed results shown)'}`:''}`;
   const syms=[...new Set(extra.map(g=>g.symbol))].join(', ');
   $('nowRows').innerHTML=(rows.map(g=>rowHtml(g,'')).join('')
     ||`<tr><td colspan=12 class=mute style="height:60px;text-align:center">No setup matches the filters (agree ≥ ${min}, window, timeframes${sc?'':', open only'}).</td></tr>`)
