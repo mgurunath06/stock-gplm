@@ -1,0 +1,36 @@
+{
+ "_doc": "owner_plans.py (owner 2026-11-24): every EMA13xEMA20 cross simulated under a small set of executable trade plans; walk-forward learning of which plan (or skip) to use. Longs only for now (shorts: TODO, same-day square-off). All prices/decisions use only candles completed before the decision.",
+ "timeframe": "15m",
+ "side": "long",
+ "lower_tf": "5m",
+ "costs": {"_doc": "lane buy/sell costs are added; slippage per side in basis points, extra on stop / gap exits",
+           "slip_bps": 2.0, "stop_slip_bps": 3.0},
+ "entry": {
+  "_doc": "NEXT_OPEN = buy the next candle's open. RETEST13 = limit at the last COMPLETED candle's EMA13, placed from the next candle; cancelled (checked at each candle's open on completed candles only) when EMA13 <= EMA20 again, a close is below the initial stop, or after max_wait candles.",
+  "max_wait": 12
+ },
+ "stops": {
+  "_doc": "SWING = last swing low confirmed by the cross candle (k candles each side, all completed), within lookback, below the cross close. PBLOW = lowest low of the last run of candles with EMA13 < EMA20 up to the cross candle. buffer_pct below the level.",
+  "swing_k": 3, "lookback": 400, "buffer_pct": 0.0
+ },
+ "management": {
+  "_doc": "T2R flat at entry+2R. T200 flat at EMA200 (live: last completed candle's EMA200), eligible only when EMA200 is above the cross close with room >= min_room_r R. PT2R / PT200 = take partial_frac at that target, trail the rest on EMA20 TOUCH. TRAIL_TOUCH = stop = max(stop, previous completed EMA20) from the first candle after entry (never loosens), hit on touch. TRAIL_CLOSE = exit at the next open after a close below EMA20 (initial stop stays).",
+  "target_r": 2.0, "min_room_r": 1.0, "partial_frac": 0.5, "max_hold_bars": 400,
+  "plans": ["T2R", "T200", "PT2R", "PT200", "TRAIL_TOUCH", "TRAIL_CLOSE"]
+ },
+ "baselines": {
+  "_doc": "Each baseline = one fixed plan id (entry|stop|management) or V2 (the old engine version from owner_strategy.json).",
+  "ALWAYS_NEXT_OPEN": "NEXT_OPEN|SWING|TRAIL_CLOSE",
+  "ALWAYS_RETEST": "RETEST13|SWING|TRAIL_CLOSE",
+  "FIXED_2R": "NEXT_OPEN|SWING|T2R",
+  "EMA20_TRAIL": "NEXT_OPEN|SWING|TRAIL_TOUCH",
+  "V2": "V2"
+ },
+ "learn": {
+  "_doc": "Walk-forward: at each cross only plan rows whose exit happened before the cross candle closed are used. refit_every = crosses between model refits. min_rows = closed rows a plan needs before it can be chosen (else 'insufficient evidence'). min_edge_r = expected net R needed to trade (else SKIP).",
+  "refit_every": 25, "min_rows": 30, "min_edge_r": 0.05, "recency_decay_sessions": 100, "recency_power": 2,
+  "near_far_atr": [0.25, 0.5, 0.75, 1.0, 1.5], "near_far_pct": [0.002, 0.003, 0.005],
+  "rule_near_atr": 0.5, "min_evidence_trades": 20
+ },
+ "match_candles": 2
+}

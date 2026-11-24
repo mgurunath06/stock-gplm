@@ -209,8 +209,10 @@ class OwnerStrategy:
                 continue  # close enough to EMA 13: normal entry at the next open
             out[t] = None
             for j in range(t + 1, min(n, t + 1 + wait)):
-                if (e[j] >= ec[j]) if S else (e[j] <= ec[j]):
-                    break  # the cross undid itself before price came back
+                # 2026-11-24 fix: cancel only on what is known at candle j's OPEN (the completed candle j-1). The old
+                # check used candle j's own closing EMAs and cancelled a limit that could already have filled inside j.
+                if j - 1 > t and ((e[j - 1] >= ec[j - 1]) if S else (e[j - 1] <= ec[j - 1])):
+                    break  # the cross undid itself (on a completed candle) before price came back
                 lv = float(e[j - 1])
                 if (m.high[j] >= lv) if S else (m.low[j] <= lv):
                     o = float(m.open[j])
